@@ -1,0 +1,100 @@
+# Fan out: when agent-core publishes a new release tag, trigger every
+# downstream SME repo's docker.yml so they rebuild against the fresh base
+# image.
+#
+# Pairs with SME Dockerfiles that pin to a minor version
+# (`FROM ghcr.io/knoxville-ai/agent-core:0.2`): patch-level releases of
+# agent-core (0.2.x) flow into all SMEs without anyone touching their
+# Dockerfiles. Minor/major releases still need an explicit FROM bump in
+# the SME repo before this fan-out is meaningful for them.
+#
+# Auth: uses a GitHub App installed on the knoxville-ai org. The App
+# needs `actions: read and write` repo permissions and must be installed
+# on every SME repo (typically "All repositories" so new SMEs are
+# covered automatically). The default GITHUB_TOKEN can't dispatch
+# workflows in other repositories.
+#
+# Required secrets/vars on this repo:
+#   secrets.SME_DISPATCH_APP_PRIVATE_KEY — the App's downloaded .pem
+#   vars.SME_DISPATCH_APP_ID             — the App's numeric ID (public)
+#
+# SME repo list lives in `.github/sme-repos.txt` — one `owner/repo` per
+# line. Adding a new SME = appending one line. No workflow edits needed.
+
+name: dispatch-smes
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "agent-core ref to advertise to SMEs (informational only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read SME repo list
+        id: repos
+        run: |
+          if [[ ! -f .github/sme-repos.txt ]]; then
+            echo "No .github/sme-repos.txt — nothing to dispatch."
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Strip blank lines and `# comments`, JSON-ify for matrix.
+          mapfile -t repos < <(grep -vE '^\s*(#|$)' .github/sme-repos.txt)
+          if [[ ${#repos[@]} -eq 0 ]]; then
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          json="["
+          for r in "${repos[@]}"; do
+            json+="\"${r}\","
+          done
+          json="${json%,}]"
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
+          echo "Will dispatch to: ${repos[*]}"
+
+      - name: Mint GitHub App installation token
+        if: steps.repos.outputs.matrix != '[]'
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SME_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.SME_DISPATCH_APP_PRIVATE_KEY }}
+          # Mint a token scoped to the org-wide installation so any SME
+          # repo the App is installed on becomes dispatchable. New SMEs
+          # are covered automatically once added to .github/sme-repos.txt
+          # (no token rotation, no permission changes).
+          owner: ${{ github.repository_owner }}
+
+      - name: Dispatch SME rebuilds
+        if: steps.repos.outputs.matrix != '[]'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          AGENT_CORE_REF: ${{ github.ref_name }}
+          REPOS_JSON: ${{ steps.repos.outputs.matrix }}
+        run: |
+          echo "${REPOS_JSON}" | jq -r '.[]' | while read -r repo; do
+            echo "→ dispatching docker.yml on ${repo} (triggered by agent-core ${AGENT_CORE_REF})"
+            # POSTs to the workflow_dispatch endpoint. The SME repo's
+            # docker.yml must keep `workflow_dispatch:` in its triggers
+            # (sme-odoo already does). We don't pass inputs so we don't
+            # have to keep the SME workflows' input schemas in sync.
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${repo}/actions/workflows/docker.yml/dispatches" \
+              -f "ref=main" \
+              || echo "::warning::Dispatch to ${repo} failed (continuing)"
+          done

@@ -1,0 +1,8 @@
+# SME repos that should rebuild when agent-core publishes a new release tag.
+# One `owner/repo` per line. Blank lines and `# comments` are ignored.
+#
+# Adding a new SME (e.g. sme-shopify): append one line, merge to main, done.
+# The fan-out workflow (.github/workflows/dispatch-smes.yml) reads this on
+# every v* tag push and POSTs a workflow_dispatch to each repo's docker.yml.
+
+knoxville-ai/sme-odoo
