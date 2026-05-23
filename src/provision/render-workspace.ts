@@ -106,8 +106,12 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
       : {},
     gateway: {
       port: env.OPENCLAW_GATEWAY_PORT,
-      bind: "127.0.0.1",
-      auth: { token: env.OPENCLAW_GATEWAY_TOKEN },
+      // openclaw refuses to start without gateway.mode=local (unless
+      // --allow-unconfigured is passed). bind=loopback keeps the gateway
+      // reachable only from the shim in the same container.
+      mode: "local",
+      bind: "loopback",
+      auth: { mode: "token", token: env.OPENCLAW_GATEWAY_TOKEN },
     },
     mcp: {
       servers: mcpServers,
