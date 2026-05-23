@@ -14,7 +14,6 @@ name: docker
 on:
   push:
     branches:
-      - claude/build-ap-invoice-agent-k8EGw
       - main
     tags:
       - "v*"
@@ -47,7 +46,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/knoxville-ai/agent-core
+          images: ghcr.io/knoxville-ai/agent-core-2
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
