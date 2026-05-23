@@ -34,6 +34,11 @@ WORKDIR /app
 COPY --chown=agent:agent package.json package-lock.json* ./
 RUN npm install --omit=dev=false --no-audit --no-fund
 
+# The shim spawns `openclaw` by bare name; child_process.spawn does not
+# prepend node_modules/.bin to PATH the way `npm run` does, so the CLI
+# must be globally installed for the gateway child to launch.
+RUN npm install -g --no-audit --no-fund openclaw@latest
+
 # Build the shim.
 COPY --chown=agent:agent tsconfig.json ./
 COPY --chown=agent:agent src ./src
