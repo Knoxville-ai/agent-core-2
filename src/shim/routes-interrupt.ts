@@ -1,28 +1,62 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { GatewayClient } from "../openclaw/gateway-client.js";
-import type { SessionRegistry } from "./sessions.js";
-import { sendJson } from "./util.js";
+import type { AgentEnv } from "../env.js";
+import { HttpError, type Principal } from "./auth.js";
+import type { CancelRegistry } from "./cancel-registry.js";
+import type { MessagingDB } from "./supabase-db.js";
+import { readJsonBody, sendJson } from "./util.js";
 
 /**
- * POST /api/v1/conversations/:id/interrupt — maps to chat.abort on the
- * underlying openclaw session.
+ * POST /api/v1/conversations/:id/interrupt
+ *
+ * Body: { assistant_message_id: string }
+ *
+ * Flips the cancel flag on an in-flight assistant stream. Idempotent:
+ * if the stream has already completed or never existed, returns 200
+ * with { cancelled: false }. Mirrors the Python interrupt handler.
  */
 export async function handleInterrupt(
   conversationId: string,
-  _req: IncomingMessage,
+  principal: Principal,
+  req: IncomingMessage,
   res: ServerResponse,
-  gateway: GatewayClient,
-  sessions: SessionRegistry,
+  deps: { env: AgentEnv; db: MessagingDB; cancels: CancelRegistry },
 ): Promise<void> {
-  const sessionKey = await sessions.resolve(conversationId);
-  try {
-    await gateway.request("chat.abort", { key: sessionKey });
-    sendJson(res, 200, { ok: true });
-  } catch (err) {
-    sendJson(res, 502, {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    });
+  const { env, db, cancels } = deps;
+
+  // Authorize the conversation first so an unrelated caller can't probe
+  // assistant_message_ids on someone else's agent.
+  const conversation = await db.getConversation(conversationId);
+  if (!conversation) throw new HttpError(404, "conversation not found");
+  if (conversation.org_id !== env.AGENT_ORG) {
+    throw new HttpError(404, "wrong org");
   }
+  if (conversation.agent_uid !== env.AGENT_UID) {
+    throw new HttpError(404, "wrong agent");
+  }
+  if (principal.kind === "agent") {
+    if (principal.orgId !== env.AGENT_ORG) {
+      throw new HttpError(403, "cross-org call forbidden");
+    }
+    const allowed = await db.agentConnectionExists(
+      principal.agentUid,
+      env.AGENT_UID,
+    );
+    if (!allowed) throw new HttpError(403, "no agent_connection approved");
+  } else {
+    const member = await db.userInOrg(principal.userId, env.AGENT_ORG);
+    if (!member) throw new HttpError(403, "forbidden");
+  }
+
+  const body =
+    (await readJsonBody<{ assistant_message_id?: unknown }>(req)) ?? {};
+  const messageId =
+    typeof body.assistant_message_id === "string"
+      ? body.assistant_message_id.trim()
+      : "";
+  if (!messageId) {
+    throw new HttpError(400, "assistant_message_id required");
+  }
+  const cancelled = cancels.signal(messageId);
+  sendJson(res, 200, { cancelled });
 }

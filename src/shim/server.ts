@@ -2,35 +2,46 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
-import type { GatewayClient } from "../openclaw/gateway-client.js";
-import { HttpError, verifyConsoleBearer } from "./auth.js";
+import { HttpError, verifyBearer } from "./auth.js";
+import { CancelRegistry } from "./cancel-registry.js";
 import { handleFilesPlaceholder } from "./routes-files.js";
 import { handleHealth, handleReady } from "./routes-health.js";
 import { handleInterrupt } from "./routes-interrupt.js";
 import { handleSendMessage } from "./routes-messages.js";
-import { SessionRegistry } from "./sessions.js";
+import { MessagingDB } from "./supabase-db.js";
 import { sendJson } from "./util.js";
 
 interface ServerHandle {
   close: () => Promise<void>;
 }
 
-export function startShim(
-  env: AgentEnv,
-  gateway: GatewayClient,
-): Promise<ServerHandle> {
-  const sessions = new SessionRegistry(gateway);
+export function startShim(env: AgentEnv): Promise<ServerHandle> {
+  const db = new MessagingDB(env);
+  const cancels = new CancelRegistry();
 
   const server = createServer((req, res) => {
-    void route(req, res, env, gateway, sessions).catch((err) => {
+    void route(req, res, env, db, cancels).catch((err) => {
       if (err instanceof HttpError) {
-        sendJson(res, err.status, { ok: false, error: err.message });
+        // Don't try to send JSON after an SSE stream has started.
+        if (!res.headersSent) {
+          sendJson(res, err.status, { ok: false, error: err.message });
+        } else {
+          try {
+            res.end();
+          } catch {
+            /* ignore */
+          }
+        }
       } else {
         log.error("unhandled shim error", { err: String(err) });
         if (!res.headersSent) {
           sendJson(res, 500, { ok: false, error: "internal error" });
         } else {
-          res.end();
+          try {
+            res.end();
+          } catch {
+            /* ignore */
+          }
         }
       }
     });
@@ -54,8 +65,8 @@ async function route(
   req: IncomingMessage,
   res: ServerResponse,
   env: AgentEnv,
-  gateway: GatewayClient,
-  sessions: SessionRegistry,
+  db: MessagingDB,
+  cancels: CancelRegistry,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -63,12 +74,12 @@ async function route(
 
   // Public endpoints (no auth).
   if (path === "/healthz" || path === "/health") return handleHealth(res);
-  if (path === "/readyz") return handleReady(res, gateway);
+  if (path === "/readyz") return handleReady(res, env);
 
-  // Everything below requires a valid console bearer.
-  await verifyConsoleBearer(req.headers.authorization, env);
+  // Everything below requires a valid bearer JWT.
+  const principal = await verifyBearer(req.headers.authorization, env);
 
-  // POST /api/v1/conversations/:id/messages
+  // POST /api/v1/conversations/:id/{messages,interrupt}
   const convMatch = /^\/api\/v1\/conversations\/([^/]+)\/(messages|interrupt)$/.exec(
     path,
   );
@@ -79,10 +90,18 @@ async function route(
       throw new HttpError(405, "method not allowed");
     }
     if (sub === "messages") {
-      return handleSendMessage(conversationId, req, res, gateway, sessions);
+      return handleSendMessage(conversationId, principal, req, res, {
+        env,
+        db,
+        cancels,
+      });
     }
     if (sub === "interrupt") {
-      return handleInterrupt(conversationId, req, res, gateway, sessions);
+      return handleInterrupt(conversationId, principal, req, res, {
+        env,
+        db,
+        cancels,
+      });
     }
   }
 

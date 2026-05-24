@@ -1,131 +1,454 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { log } from "../log.js";
-import type { GatewayClient, SessionEvent } from "../openclaw/gateway-client.js";
-import type { SessionRegistry } from "./sessions.js";
-import { HttpError } from "./auth.js";
+import type { AgentEnv } from "../env.js";
+import { HttpError, type Principal } from "./auth.js";
+import type { CancelRegistry } from "./cancel-registry.js";
+import { lookupCapabilities, type ModelCapabilities } from "./model-capabilities.js";
+import type {
+  AttachmentRow,
+  InsertAttachmentRow,
+  MessageRow,
+  MessagingDB,
+} from "./supabase-db.js";
 import { readJsonBody } from "./util.js";
 
 /**
  * POST /api/v1/conversations/:id/messages
  *
- * Console contract (knoxville-ai-console/src/app/api/org/[orgId]/messages/
- * [conversationId]/stream/route.ts): the console POSTs the user's message
- * to this endpoint and expects an SSE response stream the browser can
- * consume directly.
+ * Ports app/messaging/api.py send_message from the original (Python)
+ * agent-core. Same wire contract:
  *
- * SSE event types we emit:
- *   event: delta       data: { text: "..." }
- *   event: tool_call   data: { name, args }
- *   event: tool_result data: { name, ok, summary }
- *   event: done        data: { reason }
- *   event: error       data: { message }
+ *   request body  : { content: string, attachments?: AttachmentInput[] }
  *
- * The shape mirrors what the existing console UI already renders.
+ *   response body : SSE stream with data-only frames, one JSON object per
+ *                   `data:` line:
+ *     { type: "start", user_message_id, assistant_message_id }
+ *     { type: "token", delta }
+ *     { type: "done",  status: "complete"|"interrupted", message_id }
+ *     { type: "error", error }
+ *
+ * Persists the user turn + reserves an assistant row before calling
+ * openclaw's /v1/chat/completions endpoint, streams deltas into the
+ * row, and updates the row's status + final content on done.
  */
+
+interface AttachmentInput {
+  storage_path?: unknown;
+  mime_type?: unknown;
+  size_bytes?: unknown;
+  original_name?: unknown;
+  width?: unknown;
+  height?: unknown;
+}
+
+interface MessageRequestBody {
+  content?: unknown;
+  attachments?: unknown;
+}
+
+export interface MessagesDeps {
+  env: AgentEnv;
+  db: MessagingDB;
+  cancels: CancelRegistry;
+}
+
 export async function handleSendMessage(
   conversationId: string,
+  principal: Principal,
   req: IncomingMessage,
   res: ServerResponse,
-  gateway: GatewayClient,
-  sessions: SessionRegistry,
+  deps: MessagesDeps,
 ): Promise<void> {
-  const body = await readJsonBody<{ text?: string }>(req);
-  const text = (body?.text ?? "").toString();
-  if (!text.trim()) {
-    throw new HttpError(400, "body.text required");
+  const { env, db, cancels } = deps;
+
+  const conversation = await authorizeConversation(conversationId, principal, db, env);
+
+  if (conversation.archived_at) {
+    throw new HttpError(409, "conversation archived");
   }
 
-  const sessionKey = await sessions.resolve(conversationId);
+  const body = (await readJsonBody<MessageRequestBody>(req)) ?? {};
+  const content =
+    typeof body.content === "string" ? body.content.trim() : "";
+  const attachmentsRaw = Array.isArray(body.attachments)
+    ? (body.attachments as AttachmentInput[])
+    : [];
 
-  // Open SSE before we send the turn — the console expects byte-1 quickly.
+  if (!content && attachmentsRaw.length === 0) {
+    throw new HttpError(400, "content or attachments required");
+  }
+
+  const isAgentCaller = principal.kind === "agent";
+  const senderKind = isAgentCaller ? "agent" : "user";
+  const senderId =
+    principal.kind === "agent" ? principal.agentUid : principal.userId;
+
+  // 1. Persist the user turn.
+  const userMessageId = await db.insertMessage({
+    conversationId,
+    role: "user",
+    content,
+    status: "complete",
+    senderKind,
+    senderId,
+  });
+  if (!userMessageId) {
+    throw new HttpError(500, "failed to persist user message");
+  }
+
+  // 2. Link attachments to the user message.
+  const insertedAttachments = await persistAttachments(
+    db,
+    userMessageId,
+    conversationId,
+    env.AGENT_ORG,
+    attachmentsRaw,
+  );
+
+  // 3. Model capabilities + warning for dropped attachment types.
+  const caps = lookupCapabilities(env.LLM_PROVIDER, env.LLM_MODEL);
+  const warning = fallbackNote(insertedAttachments, caps, env.LLM_PROVIDER, env.LLM_MODEL);
+  if (warning) {
+    await db.insertMessage({
+      conversationId,
+      role: "assistant",
+      content: warning,
+      status: "complete",
+      systemGenerated: true,
+      senderKind: "system",
+      senderId: env.AGENT_UID,
+    });
+  }
+
+  // 4. Reload history (including the just-inserted user row) and build
+  //    OpenAI-format messages for the upstream call.
+  const history = await db.listMessages(conversationId);
+  const historyIds = history.map((r) => r.id);
+  const allAttachments = await db.listAttachmentsForMessages(historyIds);
+  const attsByMessage = new Map<string, AttachmentRow[]>();
+  for (const a of allAttachments) {
+    const arr = attsByMessage.get(a.message_id) ?? [];
+    arr.push(a);
+    attsByMessage.set(a.message_id, arr);
+  }
+  const openaiMessages = historyToOpenaiMessages(history, attsByMessage, caps);
+
+  // 5. Reserve an assistant row; we stream into it.
+  const assistantMessageId = await db.insertMessage({
+    conversationId,
+    role: "assistant",
+    content: "",
+    status: "streaming",
+    parentMessageId: userMessageId,
+    senderKind: "agent",
+    senderId: env.AGENT_UID,
+  });
+  if (!assistantMessageId) {
+    throw new HttpError(500, "failed to reserve assistant message");
+  }
+
+  const abortController = cancels.register(assistantMessageId);
+  // Map client disconnect to the same abort signal so we don't keep
+  // burning provider tokens after the browser goes away.
+  req.on("close", () => abortController.abort());
+
+  // Session key pins openclaw's per-session state across turns. A2A
+  // and webchat use different prefixes so an agent calling us doesn't
+  // share workspace state with human users on the same conversation.
+  const sessionKey = isAgentCaller
+    ? `a2a:${conversationId}`
+    : `webchat:${conversationId}`;
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
-  const writeEvent = (event: string, data: unknown): void => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  const sseSend = (payload: unknown): void => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
-  // Subscribe BEFORE sending so we don't miss the first deltas.
-  const eventHandler = (ev: SessionEvent): void => {
-    const eventSession =
-      (ev.payload.session as string | undefined) ??
-      (ev.payload.sessionKey as string | undefined) ??
-      (ev.payload.key as string | undefined);
-    if (eventSession && eventSession !== sessionKey) return;
-
-    switch (ev.event) {
-      case "session.message":
-      case "chat.delta": {
-        const delta = ev.payload.deltaText as string | undefined;
-        if (delta) writeEvent("delta", { text: delta });
-        break;
-      }
-      case "session.tool":
-      case "chat.tool": {
-        writeEvent("tool_call", {
-          name: ev.payload.name ?? null,
-          args: ev.payload.args ?? null,
-        });
-        break;
-      }
-      case "session.operation": {
-        writeEvent("tool_result", {
-          name: ev.payload.name ?? null,
-          ok: ev.payload.ok ?? null,
-          summary: ev.payload.summary ?? null,
-        });
-        break;
-      }
-      case "chat.done":
-      case "session.done": {
-        writeEvent("done", { reason: ev.payload.reason ?? "completed" });
-        cleanup();
-        res.end();
-        break;
-      }
-      case "chat.error":
-      case "session.error": {
-        writeEvent("error", {
-          message: ev.payload.message ?? "unknown gateway error",
-        });
-        cleanup();
-        res.end();
-        break;
-      }
-    }
-  };
-
-  let cleaned = false;
-  const cleanup = (): void => {
-    if (cleaned) return;
-    cleaned = true;
-    gateway.off("event", eventHandler);
-  };
-
-  req.on("close", () => {
-    cleanup();
-    // Caller hung up mid-stream — best-effort abort the in-flight turn so
-    // the agent doesn't keep burning tokens. Ignore failure.
-    gateway.request("chat.abort", { key: sessionKey }).catch(() => undefined);
+  sseSend({
+    type: "start",
+    user_message_id: userMessageId,
+    assistant_message_id: assistantMessageId,
   });
 
-  gateway.on("event", eventHandler);
-
+  let buffer = "";
+  let finalStatus: "complete" | "interrupted" | "error" = "complete";
   try {
-    // Subscribe explicitly to make sure events route to us.
-    await gateway.request("sessions.messages.subscribe", { key: sessionKey });
-    await gateway.request("sessions.send", { key: sessionKey, text });
-  } catch (err) {
-    log.error("sessions.send failed", { err: String(err) });
-    writeEvent("error", {
-      message: err instanceof Error ? err.message : String(err),
+    const gatewayUrl = `http://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}/v1/chat/completions`;
+    const payload = {
+      model: process.env.OPENCLAW_MODEL_ROUTE ?? "openclaw/default",
+      stream: true,
+      messages: openaiMessages,
+    };
+    const upstream = await fetch(gatewayUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        "x-openclaw-session-key": sessionKey,
+      },
+      body: JSON.stringify(payload),
+      signal: abortController.signal,
     });
-    cleanup();
-    res.end();
+
+    if (!upstream.ok || !upstream.body) {
+      const errBody = await upstream.text().catch(() => "");
+      finalStatus = "error";
+      sseSend({
+        type: "error",
+        error: `gateway ${upstream.status}: ${errBody.slice(0, 500)}`,
+      });
+      return;
+    }
+
+    for await (const token of iterOpenaiDeltas(upstream.body)) {
+      if (abortController.signal.aborted) {
+        finalStatus = "interrupted";
+        sseSend({
+          type: "done",
+          status: "interrupted",
+          message_id: assistantMessageId,
+        });
+        return;
+      }
+      buffer += token;
+      sseSend({ type: "token", delta: token });
+    }
+
+    sseSend({
+      type: "done",
+      status: "complete",
+      message_id: assistantMessageId,
+    });
+  } catch (err) {
+    if (abortController.signal.aborted) {
+      finalStatus = "interrupted";
+      sseSend({
+        type: "done",
+        status: "interrupted",
+        message_id: assistantMessageId,
+      });
+    } else {
+      log.error("streaming failed", { err: String(err) });
+      finalStatus = "error";
+      try {
+        sseSend({ type: "error", error: "internal error" });
+      } catch {
+        /* response may already be torn down */
+      }
+    }
+  } finally {
+    await db.updateMessage(assistantMessageId, {
+      content: buffer,
+      status: finalStatus,
+      completedAt: new Date().toISOString(),
+    });
+    cancels.release(assistantMessageId);
+    try {
+      res.end();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+// ── helpers ─────────────────────────────────────────────
+
+async function authorizeConversation(
+  conversationId: string,
+  principal: Principal,
+  db: MessagingDB,
+  env: AgentEnv,
+): Promise<NonNullable<Awaited<ReturnType<MessagingDB["getConversation"]>>>> {
+  const conversation = await db.getConversation(conversationId);
+  if (!conversation) throw new HttpError(404, "conversation not found");
+  if (conversation.org_id !== env.AGENT_ORG) {
+    throw new HttpError(404, "wrong org");
+  }
+  if (conversation.agent_uid !== env.AGENT_UID) {
+    throw new HttpError(404, "wrong agent");
+  }
+  if (principal.kind === "agent") {
+    if (principal.orgId !== env.AGENT_ORG) {
+      throw new HttpError(403, "cross-org call forbidden");
+    }
+    const allowed = await db.agentConnectionExists(
+      principal.agentUid,
+      env.AGENT_UID,
+    );
+    if (!allowed) {
+      throw new HttpError(403, "no agent_connection approved");
+    }
+  } else {
+    const member = await db.userInOrg(principal.userId, env.AGENT_ORG);
+    if (!member) throw new HttpError(403, "forbidden");
+  }
+  return conversation;
+}
+
+function validateAttachmentPath(
+  path: string,
+  orgId: string,
+  conversationId: string,
+): boolean {
+  const prefix = `orgs/${orgId}/conversations/${conversationId}/`;
+  if (!path.startsWith(prefix)) return false;
+  if (path.includes("..")) return false;
+  if ((path.match(/\//g) ?? []).length > 10) return false;
+  return true;
+}
+
+async function persistAttachments(
+  db: MessagingDB,
+  messageId: string,
+  conversationId: string,
+  orgId: string,
+  raw: AttachmentInput[],
+): Promise<AttachmentRow[]> {
+  const rows: InsertAttachmentRow[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const storagePath = entry.storage_path;
+    const mimeType = entry.mime_type;
+    const sizeBytes = entry.size_bytes;
+    if (typeof storagePath !== "string" || typeof mimeType !== "string") continue;
+    if (typeof sizeBytes !== "number" || !Number.isFinite(sizeBytes)) continue;
+    if (!validateAttachmentPath(storagePath, orgId, conversationId)) {
+      log.warn("rejecting attachment with out-of-scope path", {
+        storage_path: storagePath,
+      });
+      continue;
+    }
+    const row: InsertAttachmentRow = {
+      message_id: messageId,
+      conversation_id: conversationId,
+      storage_path: storagePath,
+      mime_type: mimeType,
+      size_bytes: Math.trunc(sizeBytes),
+    };
+    if (typeof entry.original_name === "string") {
+      row.original_name = entry.original_name;
+    }
+    if (typeof entry.width === "number" && Number.isFinite(entry.width)) {
+      row.width = Math.trunc(entry.width);
+    }
+    if (typeof entry.height === "number" && Number.isFinite(entry.height)) {
+      row.height = Math.trunc(entry.height);
+    }
+    rows.push(row);
+  }
+  return rows.length === 0 ? [] : await db.insertAttachments(rows);
+}
+
+function historyToOpenaiMessages(
+  rows: MessageRow[],
+  attachmentsByMessage: Map<string, AttachmentRow[]>,
+  caps: ModelCapabilities,
+): Array<Record<string, unknown>> {
+  // Image inlining (base64 data URLs) from the Python version is omitted
+  // here — porting the SupabaseStorage download path is a separate chunk
+  // of work. Text history flows through unchanged.
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (r.system_generated) continue;
+    if (r.role !== "user" && r.role !== "assistant" && r.role !== "system" && r.role !== "tool") {
+      continue;
+    }
+    const text = (r.content ?? "").trim();
+    if (!text) continue;
+    const msgAttachments = attachmentsByMessage.get(r.id) ?? [];
+    const imageAtts = caps.multimodal
+      ? msgAttachments.filter((a) => a.mime_type.startsWith("image/"))
+      : [];
+    if (imageAtts.length > 0) {
+      // Multimodal placeholder: forward the text only for now. Inlining
+      // images requires the storage download port; tracked separately.
+      out.push({ role: r.role, content: text });
+      continue;
+    }
+    out.push({ role: r.role, content: text });
+  }
+  return out;
+}
+
+function fallbackNote(
+  attachments: AttachmentRow[],
+  caps: ModelCapabilities,
+  provider: string,
+  model: string,
+): string | null {
+  if (attachments.length === 0) return null;
+  const images = attachments.filter((a) => a.mime_type.startsWith("image/"));
+  const nonImages = attachments.filter((a) => !a.mime_type.startsWith("image/"));
+  const complaints: string[] = [];
+  if (images.length > 0 && !caps.multimodal) {
+    complaints.push(`${images.length} image${images.length !== 1 ? "s" : ""}`);
+  }
+  if (nonImages.length > 0 && !caps.fileInput) {
+    complaints.push(`${nonImages.length} file${nonImages.length !== 1 ? "s" : ""}`);
+  }
+  if (complaints.length === 0) return null;
+  const modelLabel =
+    provider && model ? `\`${provider}/${model}\`` : "this agent's model";
+  const joined = complaints.join(" and ");
+  const verb = complaints.length === 1 && images.length === 1 ? "was" : "were";
+  return (
+    `⚠️ ${modelLabel} doesn't support image or file inputs. ` +
+    `Your ${joined} ${verb} saved to the conversation but weren't read by the agent. ` +
+    "Switch to a multimodal model in agent settings to have the agent act on them."
+  );
+}
+
+/**
+ * Yields content deltas from an OpenAI-compatible SSE stream.
+ * Mirrors _iter_upstream_deltas in the Python version, minus the
+ * tool-call branch (openclaw handles the agentic loop internally and
+ * doesn't emit `delta.tool_calls` frames on this endpoint today).
+ */
+async function* iterOpenaiDeltas(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = pending.indexOf("\n")) !== -1) {
+        const line = pending.slice(0, nl).trim();
+        pending = pending.slice(nl + 1);
+        if (!line || !line.startsWith("data:")) continue;
+        const body = line.slice("data:".length).trim();
+        if (body === "[DONE]") return;
+        let frame: Record<string, unknown>;
+        try {
+          frame = JSON.parse(body);
+        } catch {
+          continue;
+        }
+        const choices = (frame.choices as Array<Record<string, unknown>>) ?? [];
+        const choice = choices[0] ?? {};
+        const delta = (choice.delta as Record<string, unknown>) ?? {};
+        const text = delta.content;
+        if (typeof text === "string" && text) {
+          yield text;
+        }
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
   }
 }

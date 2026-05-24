@@ -107,6 +107,14 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
       mode: "local",
       bind: "loopback",
       auth: { mode: "token", token: env.OPENCLAW_GATEWAY_TOKEN },
+      // The shim proxies user turns via the OpenAI-compatible chat
+      // completions endpoint (mirrors what the original Python agent-core
+      // does). Disabled by default in openclaw 2026.5.x, so opt in here.
+      http: {
+        endpoints: {
+          chatCompletions: { enabled: true },
+        },
+      },
     },
     mcp: {
       servers: mcpServers,

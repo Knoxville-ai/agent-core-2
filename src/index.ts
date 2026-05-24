@@ -1,6 +1,5 @@
 import { loadEnv } from "./env.js";
 import { log } from "./log.js";
-import { GatewayClient } from "./openclaw/gateway-client.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
 import { refreshManifest } from "./provision/manifest.js";
 import { renderWorkspace } from "./provision/render-workspace.js";
@@ -26,22 +25,18 @@ async function main(): Promise<void> {
     log.warn("manifest refresh failed (non-fatal)", { err: String(err) });
   });
 
-  // 3. Spawn openclaw gateway as a child.
+  // 3. Spawn openclaw gateway as a child. The shim talks to it over the
+  //    OpenAI-compatible HTTP endpoint on the same port (loopback), so no
+  //    WebSocket client is needed in this process.
   const proc = new GatewayProcess(env);
   await proc.start();
 
-  // 4. Wait for the gateway to accept WS connections, then connect.
-  const client = new GatewayClient(
-    `ws://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}/`,
-    env.OPENCLAW_GATEWAY_TOKEN,
-  );
-  await client.connectWithRetry(30_000);
-  log.info("gateway client connected");
+  // 4. Start the HTTP shim. /readyz won't return 200 until the gateway
+  //    finishes its startup sidecars; Railway's healthcheck handles the
+  //    wait.
+  const shim = await startShim(env);
 
-  // 5. Start the HTTP shim.
-  const shim = await startShim(env, client);
-
-  // 6. Graceful shutdown.
+  // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     log.info("shutdown requested", { signal });
     try {
@@ -49,7 +44,6 @@ async function main(): Promise<void> {
     } catch (err) {
       log.warn("shim close failed", { err: String(err) });
     }
-    client.close();
     await proc.stop();
     process.exit(0);
   };
