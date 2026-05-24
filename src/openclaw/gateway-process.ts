@@ -1,12 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 
 /**
- * Spawns `openclaw gateway` as a child process. The gateway reads its
- * config from $OPENCLAW_HOME/openclaw.json (rendered by provision/).
+ * Spawns `openclaw gateway` as a child process. We point openclaw at the
+ * exact file the shim just wrote via OPENCLAW_CONFIG_PATH so its config
+ * lookup can't desync from ours — relying on $HOME-based resolution
+ * broke under Railway env overrides.
  *
  * We deliberately do NOT implement crash-restart in-process: Railway already
  * restarts the container on exit, and a gateway crash usually means the
@@ -22,13 +25,18 @@ export class GatewayProcess {
     if (this.child) throw new Error("gateway already started");
 
     const port = String(this.env.OPENCLAW_GATEWAY_PORT);
-    log.info("spawning openclaw gateway", { port, home: this.env.OPENCLAW_HOME });
+    const configPath = join(this.env.OPENCLAW_HOME, "openclaw.json");
+    log.info("spawning openclaw gateway", {
+      port,
+      home: this.env.OPENCLAW_HOME,
+      configPath,
+    });
 
     const child = spawn("openclaw", ["gateway", "--port", port, "--verbose"], {
       env: {
         ...process.env,
-        HOME: this.env.OPENCLAW_HOME.replace(/\/\.openclaw\/?$/, ""),
-        OPENCLAW_HOME: this.env.OPENCLAW_HOME,
+        OPENCLAW_STATE_DIR: this.env.OPENCLAW_HOME,
+        OPENCLAW_CONFIG_PATH: configPath,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
