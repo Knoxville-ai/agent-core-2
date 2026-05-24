@@ -18,7 +18,6 @@ import {
 } from "../provision/render-workspace.js";
 import { ClawhubSkillResolver } from "../skills/clawhub.js";
 import { installBundleSkills } from "../skills/install.js";
-import { LocalSkillResolver } from "../skills/local.js";
 import type { InstalledSkill, SkillResolver } from "../skills/resolver.js";
 
 /**
@@ -50,11 +49,10 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   const blobs = await loadPromptBlobs(env);
 
   const workspaceSkillsDir = join(env.OPENCLAW_STATE_DIR, "workspace", "skills");
-  const resolver = buildSkillResolver();
 
   let installedSkills: InstalledSkill[] = [];
   if (bundle) {
-    installedSkills = await installBundleSkills(bundle, workspaceSkillsDir, resolver);
+    installedSkills = await installBundleSkills(bundle, workspaceSkillsDir, resolver(env));
     try {
       validateBundleEnv(bundle);
     } catch (err) {
@@ -116,11 +114,6 @@ async function fetchBundle(env: AgentEnv): Promise<AgentBundle | null> {
   }
 }
 
-function buildSkillResolver(): SkillResolver {
-  // SKILLS_DIR is where the image (or a future Storage pull step) stages
-  // pre-built skill bundles. Defaults to ~/.openclaw-skills which is
-  // baked into the agent-core image at build time.
-  const sourceDir = process.env.SKILLS_DIR ?? "/home/agent/.openclaw-skills";
-  const local = new LocalSkillResolver(sourceDir);
-  return new ClawhubSkillResolver(local);
+function resolver(env: AgentEnv): SkillResolver {
+  return new ClawhubSkillResolver({ stateDir: env.OPENCLAW_STATE_DIR });
 }

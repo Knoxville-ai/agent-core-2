@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 
 import { log } from "../log.js";
 import type { AgentBundle, SkillRequirement } from "../bundle/types.js";
@@ -9,6 +9,11 @@ import type { InstalledSkill, SkillResolver } from "./resolver.js";
  * conflicting versions, then run them through the resolver. Returns the
  * list of installed skills keyed by ref so the caller can wire prompt
  * assembly + manifest annotations.
+ *
+ * Reconcile semantics: `workspace/skills/` is wiped before installs run
+ * so any skill that was previously installed but is no longer declared
+ * by the current bundle disappears. The bundle is the desired state;
+ * stale installs are a footgun (the LLM still sees them in TOOLS.md).
  */
 
 export class SkillVersionConflictError extends Error {
@@ -35,6 +40,10 @@ export async function installBundleSkills(
   workspaceSkillsDir: string,
   resolver: SkillResolver,
 ): Promise<InstalledSkill[]> {
+  // Reconcile: nuke the workspace skills directory before installing.
+  // openclaw's installer writes directly into it, so an unreferenced
+  // skill from a previous boot would otherwise hang around.
+  await rm(workspaceSkillsDir, { recursive: true, force: true });
   await mkdir(workspaceSkillsDir, { recursive: true });
 
   // 1. Collect every (ref, version) pair, keyed by ref. Two different
