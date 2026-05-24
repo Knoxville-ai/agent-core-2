@@ -10,7 +10,7 @@ import { AgentStorage } from "./supabase-storage.js";
  * writes openclaw.json so `openclaw gateway` can boot cold against it.
  *
  * Workspace layout (matches openclaw defaults):
- *   $OPENCLAW_HOME/
+ *   $OPENCLAW_STATE_DIR/
  *     openclaw.json
  *     workspace/
  *       AGENTS.md       ← from Storage memory/identity.md
@@ -20,8 +20,8 @@ import { AgentStorage } from "./supabase-storage.js";
  *       skills/         ← empty for now; populated by skill installs later
  */
 export async function renderWorkspace(env: AgentEnv): Promise<void> {
-  const home = env.OPENCLAW_HOME;
-  const ws = join(home, "workspace");
+  const stateDir = env.OPENCLAW_STATE_DIR;
+  const ws = join(stateDir, "workspace");
   await mkdir(join(ws, "skills"), { recursive: true });
 
   const storage = new AgentStorage(env);
@@ -58,13 +58,13 @@ export async function renderWorkspace(env: AgentEnv): Promise<void> {
   // 2) Render openclaw.json.
   const config = buildOpenclawConfig(env, ws);
   await writeFile(
-    join(home, "openclaw.json"),
+    join(stateDir, "openclaw.json"),
     JSON.stringify(config, null, 2),
     "utf8",
   );
 
   log.info("workspace rendered", {
-    home,
+    stateDir,
     workspace: ws,
     has_system_prompt: systemPrompt != null,
     has_identity: identity != null,

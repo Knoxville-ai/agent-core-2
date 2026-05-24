@@ -8,8 +8,11 @@
 
 set -euo pipefail
 
+# OPENCLAW_STATE_DIR is where openclaw.json + the workspace live.
+# Distinct from openclaw's own OPENCLAW_HOME (a user-home equivalent
+# that openclaw appends `.openclaw` to). Defaults in the Dockerfile.
 export HOME="${HOME:-/home/agent}"
-export OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
-mkdir -p "${OPENCLAW_HOME}/workspace/skills"
+export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${HOME}/.openclaw}"
+mkdir -p "${OPENCLAW_STATE_DIR}/workspace/skills"
 
 exec node --enable-source-maps /app/dist/index.js

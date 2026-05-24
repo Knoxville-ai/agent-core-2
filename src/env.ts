@@ -41,8 +41,10 @@ const Schema = z.object({
     .default("18789")
     .transform((v) => Number.parseInt(v, 10)),
 
-  // openclaw HOME (defaults set in Dockerfile)
-  OPENCLAW_HOME: z.string().default("/home/agent/.openclaw"),
+  // openclaw state directory (where openclaw.json + workspace live).
+  // Distinct from openclaw's own OPENCLAW_HOME env var, which it treats
+  // as the user-home equivalent and appends `.openclaw` to.
+  OPENCLAW_STATE_DIR: z.string().default("/home/agent/.openclaw"),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional().default("info"),
 });

@@ -37,7 +37,7 @@ export class GatewayProcess {
     if (this.child) throw new Error("gateway already started");
 
     const port = String(this.env.OPENCLAW_GATEWAY_PORT);
-    const stateDir = this.env.OPENCLAW_HOME;
+    const stateDir = this.env.OPENCLAW_STATE_DIR;
     const userHome = dirname(stateDir);
     const configPath = join(stateDir, "openclaw.json");
     log.info("spawning openclaw gateway", {

@@ -16,7 +16,8 @@ FROM node:24-bookworm-slim
 ENV NODE_ENV=production \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false \
-    OPENCLAW_HOME=/home/agent/.openclaw \
+    HOME=/home/agent \
+    OPENCLAW_STATE_DIR=/home/agent/.openclaw \
     AGENT_HTTP_PORT=8080 \
     OPENCLAW_GATEWAY_PORT=18789
 
