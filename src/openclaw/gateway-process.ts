@@ -1,15 +1,27 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 
 /**
- * Spawns `openclaw gateway` as a child process. We point openclaw at the
- * exact file the shim just wrote via OPENCLAW_CONFIG_PATH so its config
- * lookup can't desync from ours — relying on $HOME-based resolution
- * broke under Railway env overrides.
+ * Spawns `openclaw gateway` as a child process. Two env semantics matter
+ * and they collide with the Dockerfile's default:
+ *
+ *   - OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH point openclaw at the
+ *     exact state dir + config file the shim renders. We set both.
+ *
+ *   - OPENCLAW_HOME, in openclaw's own code (see openclaw.mjs
+ *     normalizeLauncherHomeValue), is the *user home* equivalent —
+ *     openclaw appends `.openclaw` to it when deriving paths in
+ *     subprocesses (clawhub skill installs, etc.). The Dockerfile
+ *     historically set OPENCLAW_HOME to the state dir, which makes
+ *     subprocesses resolve `.openclaw/.openclaw` and fail with EPERM.
+ *
+ * We override OPENCLAW_HOME (and HOME for good measure) in the spawn
+ * env to the *parent* of our state dir so any subprocess that re-derives
+ * a path from $OPENCLAW_HOME/.openclaw lands at the right place.
  *
  * We deliberately do NOT implement crash-restart in-process: Railway already
  * restarts the container on exit, and a gateway crash usually means the
@@ -25,17 +37,22 @@ export class GatewayProcess {
     if (this.child) throw new Error("gateway already started");
 
     const port = String(this.env.OPENCLAW_GATEWAY_PORT);
-    const configPath = join(this.env.OPENCLAW_HOME, "openclaw.json");
+    const stateDir = this.env.OPENCLAW_HOME;
+    const userHome = dirname(stateDir);
+    const configPath = join(stateDir, "openclaw.json");
     log.info("spawning openclaw gateway", {
       port,
-      home: this.env.OPENCLAW_HOME,
+      stateDir,
+      userHome,
       configPath,
     });
 
     const child = spawn("openclaw", ["gateway", "--port", port, "--verbose"], {
       env: {
         ...process.env,
-        OPENCLAW_STATE_DIR: this.env.OPENCLAW_HOME,
+        HOME: userHome,
+        OPENCLAW_HOME: userHome,
+        OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
       },
       stdio: ["ignore", "pipe", "pipe"],
