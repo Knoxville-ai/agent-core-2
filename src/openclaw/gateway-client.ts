@@ -8,21 +8,21 @@ import { log } from "../log.js";
 /**
  * Minimal WebSocket client for the openclaw Gateway protocol.
  *
- * Protocol (from docs/gateway/protocol.md):
- *   - Transport: WS, JSON text frames.
- *   - Handshake: server sends `connect.challenge`; client replies with
- *     a `connect` request; server returns `hello-ok`.
- *   - Requests:  { type: "req", id, method, params }
- *   - Responses: { type: "res", id, ok, payload }
- *   - Events:    { type: "event", event, payload, seq }
+ * Protocol shape (verified against openclaw 2026.5.20 docs/gateway/protocol.md):
+ *   1. Server sends an event frame:
+ *        { type: "event", event: "connect.challenge",
+ *          payload: { nonce, ts } }
+ *   2. Client sends a `connect` request whose params include the gateway
+ *      token under `params.auth.token`, a protocol version range, and a
+ *      role/scopes declaration.
+ *   3. Server replies with { type: "res", id, ok: true,
+ *        payload: { type: "hello-ok", protocol, server, ... } }
  *
- * Auth: gateway.auth.token in openclaw.json. Per the docs the WS upgrade
- * timeout is `handshakeTimeoutMs`, suggesting auth happens on upgrade. We
- * send it as `Authorization: Bearer <token>` AND include it in the connect
- * request body for belt-and-suspenders compatibility — the docs were
- * incomplete on the exact field name (see comment in shim/auth.ts). If
- * deploy testing shows the token field has a different name (e.g. `auth`,
- * `bearer`), adjust `connect()` below.
+ * Same-process backend path: this shim runs in the same container as the
+ * gateway and talks to it over loopback, so per the protocol doc it can
+ * use `client.id: "gateway-client"` + `client.mode: "backend"` and skip
+ * the device pairing/signature flow. The shared gateway token is the
+ * only credential.
  */
 
 type Pending = {
@@ -108,8 +108,8 @@ export class GatewayClient extends EventEmitter {
       const type = msg.type as string | undefined;
 
       if (!helloSeen) {
-        if (type === "connect.challenge") {
-          // Reply with a connect request including the token.
+        // Challenge arrives as an event frame, not a typed frame.
+        if (type === "event" && msg.event === "connect.challenge") {
           const id = this.allocId();
           ws.send(
             JSON.stringify({
@@ -117,29 +117,35 @@ export class GatewayClient extends EventEmitter {
               id,
               method: "connect",
               params: {
-                token: this.token,
-                client: { name: "knoxville-shim", version: "0.3.0" },
-                challenge: msg.payload ?? msg.nonce ?? null,
+                minProtocol: 3,
+                maxProtocol: 4,
+                client: {
+                  id: "gateway-client",
+                  version: "0.3.0",
+                  platform: "linux",
+                  mode: "backend",
+                },
+                role: "operator",
+                scopes: ["operator.read", "operator.write"],
+                caps: [],
+                commands: [],
+                permissions: {},
+                auth: { token: this.token },
               },
             }),
           );
           return;
         }
         if (type === "res") {
-          const ok = msg.ok as boolean | undefined;
-          if (ok === false) {
+          if (msg.ok === false) {
             onReadyError(
               new Error(
-                `connect rejected: ${JSON.stringify(msg.payload ?? msg)}`,
+                `connect rejected: ${JSON.stringify(msg.payload ?? msg.error ?? msg)}`,
               ),
             );
             ws.close();
             return;
           }
-          // Some servers send hello-ok as a typed frame (below). Tolerate
-          // either shape: any successful res to our connect counts as ready.
-        }
-        if (type === "hello-ok" || type === "res") {
           helloSeen = true;
           this.ready = true;
           onReady();
