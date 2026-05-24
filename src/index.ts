@@ -1,8 +1,8 @@
+import { bootstrap } from "./boot/bootstrap.js";
 import { loadEnv } from "./env.js";
 import { log } from "./log.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
 import { refreshManifest } from "./provision/manifest.js";
-import { renderWorkspace } from "./provision/render-workspace.js";
 import { startShim } from "./shim/server.js";
 
 async function main(): Promise<void> {
@@ -16,8 +16,10 @@ async function main(): Promise<void> {
     gateway_port: env.OPENCLAW_GATEWAY_PORT,
   });
 
-  // 1. Materialize openclaw workspace + config from Storage / env.
-  await renderWorkspace(env);
+  // 1. Bundle-driven bootstrap: fetch capabilities, install skills,
+  //    validate env, assemble SOUL.md, render the openclaw workspace.
+  //    Throws on missing required creds or skill version conflicts.
+  await bootstrap(env);
 
   // 2. Refresh the agent's manifest so the console sees the boot.
   //    Don't fail boot if Storage is briefly unavailable — log and move on.

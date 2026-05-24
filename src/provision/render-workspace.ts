@@ -13,49 +13,65 @@ import { AgentStorage } from "./supabase-storage.js";
  *   $OPENCLAW_STATE_DIR/
  *     openclaw.json
  *     workspace/
- *       AGENTS.md       ← from Storage memory/identity.md
- *       SOUL.md         ← from Storage memory/system_prompt.md
+ *       AGENTS.md       ← from Storage memory/identity.md (the identity block)
+ *       SOUL.md         ← assembled prompt (base + identity + capability fragments)
  *       TOOLS.md        ← from Storage memory/boot.md (operational guidance)
  *       playbook.md     ← from Storage memory/playbook.md (writable)
- *       skills/         ← empty for now; populated by skill installs later
+ *       skills/         ← populated by skill installs (see ../skills/install.ts)
  */
-export async function renderWorkspace(env: AgentEnv): Promise<void> {
-  const stateDir = env.OPENCLAW_STATE_DIR;
-  const ws = join(stateDir, "workspace");
-  await mkdir(join(ws, "skills"), { recursive: true });
 
+export interface PromptBlobs {
+  /** Raw `memory/system_prompt.md` from storage, or null if absent. */
+  base: string | null;
+  /** Raw `memory/identity.md` from storage, or null if absent. */
+  identity: string | null;
+  /** Raw `memory/boot.md` from storage, or null if absent. */
+  boot: string | null;
+  /** Raw `memory/playbook.md` from storage, or null if absent. */
+  playbook: string | null;
+}
+
+/** Fetch the four prompt blobs from storage in one pass. Bootstrap uses
+ *  these to build the per-capability assembled SOUL.md. */
+export async function loadPromptBlobs(env: AgentEnv): Promise<PromptBlobs> {
   const storage = new AgentStorage(env);
-
-  // 1) Pull prompt blobs from Storage. Missing files are tolerated — we
-  //    fall back to small built-in defaults so a freshly-provisioned agent
-  //    boots even before the console has uploaded anything.
-  const [systemPrompt, identity, boot, playbook] = await Promise.all([
+  const [base, identity, boot, playbook] = await Promise.all([
     storage.downloadText("memory/system_prompt.md"),
     storage.downloadText("memory/identity.md"),
     storage.downloadText("memory/boot.md"),
     storage.downloadText("memory/playbook.md"),
   ]);
+  return { base, identity, boot, playbook };
+}
 
-  await writeFile(
-    join(ws, "SOUL.md"),
-    systemPrompt ?? defaultSoul(env),
-    "utf8",
-  );
+export interface RenderWorkspaceInput {
+  env: AgentEnv;
+  /** Final SOUL.md contents — already assembled with capability prompts. */
+  assembledSoul: string;
+  blobs: PromptBlobs;
+}
+
+export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void> {
+  const { env, assembledSoul, blobs } = input;
+  const stateDir = env.OPENCLAW_STATE_DIR;
+  const ws = join(stateDir, "workspace");
+  await mkdir(join(ws, "skills"), { recursive: true });
+
+  await writeFile(join(ws, "SOUL.md"), assembledSoul, "utf8");
   await writeFile(
     join(ws, "AGENTS.md"),
-    identity ?? defaultAgents(env),
+    blobs.identity ?? defaultAgents(env),
     "utf8",
   );
   await writeFile(
     join(ws, "TOOLS.md"),
-    boot ?? defaultTools(),
+    blobs.boot ?? defaultTools(),
     "utf8",
   );
-  if (playbook != null) {
-    await writeFile(join(ws, "playbook.md"), playbook, "utf8");
+  if (blobs.playbook != null) {
+    await writeFile(join(ws, "playbook.md"), blobs.playbook, "utf8");
   }
 
-  // 2) Render openclaw.json.
   const config = buildOpenclawConfig(env, ws);
   await writeFile(
     join(stateDir, "openclaw.json"),
@@ -66,22 +82,34 @@ export async function renderWorkspace(env: AgentEnv): Promise<void> {
   log.info("workspace rendered", {
     stateDir,
     workspace: ws,
-    has_system_prompt: systemPrompt != null,
-    has_identity: identity != null,
-    has_boot: boot != null,
-    has_playbook: playbook != null,
-    mcp_platform_attached: Boolean(env.KNOXVILLE_PLATFORM_MCP_URL),
+    has_base_prompt: blobs.base != null,
+    has_identity: blobs.identity != null,
+    has_boot: blobs.boot != null,
+    has_playbook: blobs.playbook != null,
+    mcp_platform_attached: Boolean(env.PLATFORM_MCP_URL),
   });
+}
+
+/** Public so bootstrap can pass it into the prompt assembler as the base
+ *  layer when storage has no `system_prompt.md`. */
+export function defaultBasePrompt(env: AgentEnv): string {
+  return defaultSoul(env);
+}
+
+/** Public so bootstrap can use it as the identity layer when storage has
+ *  no `memory/identity.md`. */
+export function defaultIdentity(env: AgentEnv): string {
+  return defaultAgents(env);
 }
 
 function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
-  if (env.KNOXVILLE_PLATFORM_MCP_URL) {
+  if (env.PLATFORM_MCP_URL) {
     mcpServers.knoxville_platform = {
-      url: env.KNOXVILLE_PLATFORM_MCP_URL,
+      url: env.PLATFORM_MCP_URL,
       transport: "streamable-http",
-      headers: env.KNOXVILLE_PLATFORM_MCP_TOKEN
-        ? { Authorization: `Bearer ${env.KNOXVILLE_PLATFORM_MCP_TOKEN}` }
+      headers: env.PLATFORM_API_TOKEN
+        ? { Authorization: `Bearer ${env.PLATFORM_API_TOKEN}` }
         : {},
     };
   }
