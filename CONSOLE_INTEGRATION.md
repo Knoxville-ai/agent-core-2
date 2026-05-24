@@ -53,11 +53,18 @@ The console provisions an agent by:
 When both are set, the shim's `renderWorkspace()` adds an entry to
 `mcp.servers.knoxville_platform` in `openclaw.json`, and at boot the
 agent calls `get_my_bundle` on the same MCP to discover which Drive
-Through capabilities route to it. Each capability's pinned skill is
-installed into `workspace/skills/`, each capability's `promptFragment`
-is appended to `workspace/SOUL.md`, and every `required: true`
-envVarSpec is validated against `process.env` — boot fails loud if any
-are missing.
+Through capabilities route to it. Each capability's pinned clawhub
+skill is installed (or re-installed) into `workspace/skills/` via
+`openclaw skills install <ref> --version <version> --force` — the
+directory is wiped first so a capability removed from the bundle goes
+away. Each capability's `promptFragment` is appended to
+`workspace/SOUL.md`, and every `required: true` envVarSpec is validated
+against `process.env`. Boot fails loud on a clawhub install failure, a
+skill version conflict, or a missing required cred.
+
+Editing a Drive Through capability and restarting the agent is the
+only step needed to pick up new skills, new prompt fragments, or
+removed capabilities — the boot pipeline reconciles from scratch.
 
 When unset, the agent is purely inbound: no outbound A2A, no bundle, no
 capability-driven skill installs. The vessel still boots with whatever
