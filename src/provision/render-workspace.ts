@@ -86,11 +86,11 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
     };
   }
 
-  // openclaw.json shape derived from docs/gateway/configuration.md and
-  // docs/gateway/configuration-reference.md. The shape is conservative —
-  // keys openclaw doesn't recognize will be ignored; missing keys fall to
-  // safe defaults.
-  return {
+  // openclaw.json shape derived from `openclaw config schema` for the
+  // pinned CLI version. openclaw 2026.5.x rejects unknown top-level keys
+  // with "<root>: Invalid input", so anything we emit here must match the
+  // schema exactly — comments on each block call out the key path.
+  const config: Record<string, unknown> = {
     agents: {
       defaults: {
         workspace,
@@ -99,11 +99,6 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
         },
       },
     },
-    providers: env.LLM_API_KEY
-      ? {
-          [env.LLM_PROVIDER]: { apiKey: env.LLM_API_KEY },
-        }
-      : {},
     gateway: {
       port: env.OPENCLAW_GATEWAY_PORT,
       // openclaw refuses to start without gateway.mode=local (unless
@@ -120,6 +115,18 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
     // the shim's HTTP surface, which is what the knoxville console talks to.
     channels: {},
   };
+
+  // Provider API keys live under models.providers.<name>.apiKey — there
+  // is no top-level `providers` key in the schema.
+  if (env.LLM_API_KEY) {
+    config.models = {
+      providers: {
+        [env.LLM_PROVIDER]: { apiKey: env.LLM_API_KEY },
+      },
+    };
+  }
+
+  return config;
 }
 
 function defaultSoul(env: AgentEnv): string {
