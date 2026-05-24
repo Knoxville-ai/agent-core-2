@@ -47,14 +47,21 @@ The console provisions an agent by:
 
 | Var | Purpose |
 | --- | --- |
-| `KNOXVILLE_PLATFORM_MCP_URL` | URL of the platform's MCP server. Set this to give the agent an outbound channel to discover and converse with other platform agents (drive-throughs). |
-| `KNOXVILLE_PLATFORM_MCP_TOKEN` | per-agent bearer for the platform MCP. |
+| `PLATFORM_MCP_URL` | URL of the platform's MCP server. Set this to give the agent an outbound channel to discover and converse with other platform agents (drive-throughs) AND to fetch its own bundle at boot. |
+| `PLATFORM_API_TOKEN` | per-agent bearer (`knox_agent_*`) for the platform MCP. Required whenever `PLATFORM_MCP_URL` is set. |
 
 When both are set, the shim's `renderWorkspace()` adds an entry to
-`mcp.servers.knoxville_platform` in `openclaw.json`. The openclaw runtime
-loads it as a tool surface; the agent decides when to invoke it.
+`mcp.servers.knoxville_platform` in `openclaw.json`, and at boot the
+agent calls `get_my_bundle` on the same MCP to discover which Drive
+Through capabilities route to it. Each capability's pinned skill is
+installed into `workspace/skills/`, each capability's `promptFragment`
+is appended to `workspace/SOUL.md`, and every `required: true`
+envVarSpec is validated against `process.env` — boot fails loud if any
+are missing.
 
-When unset, the agent is purely inbound (no outbound A2A).
+When unset, the agent is purely inbound: no outbound A2A, no bundle, no
+capability-driven skill installs. The vessel still boots with whatever
+prompt blobs the console uploaded to Storage.
 
 ## Storage contract (unchanged from CONTRACT.md)
 

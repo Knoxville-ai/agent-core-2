@@ -25,9 +25,13 @@ const Schema = z.object({
   LLM_MODEL: z.string().min(1),
   LLM_API_KEY: z.string().optional().default(""),
 
-  // Platform MCP — optional; when missing the agent simply has no outbound A2A.
-  KNOXVILLE_PLATFORM_MCP_URL: z.string().url().optional(),
-  KNOXVILLE_PLATFORM_MCP_TOKEN: z.string().optional(),
+  // Platform MCP — the console's MCP server. URL is optional; when
+  // missing the agent simply has no outbound A2A (and no bundle). The
+  // token authenticates THIS agent (knox_agent_* form) and is required
+  // whenever the URL is set — without it the bundle fetch would 401 and
+  // the agent would silently boot with no capabilities.
+  PLATFORM_MCP_URL: z.string().url().optional(),
+  PLATFORM_API_TOKEN: z.string().optional(),
 
   // Ports
   AGENT_HTTP_PORT: z

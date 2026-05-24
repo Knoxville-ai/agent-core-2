@@ -51,7 +51,7 @@ list):
 | `SUPABASE_JWT_SECRET` | HS256 secret used to verify the console's bearer JWTs |
 | `OPENCLAW_GATEWAY_TOKEN` | shared secret between shim and local openclaw gateway |
 | `LLM_PROVIDER` / `LLM_MODEL` / `LLM_API_KEY` | written into `openclaw.json` as the primary model |
-| `KNOXVILLE_PLATFORM_MCP_URL` / `KNOXVILLE_PLATFORM_MCP_TOKEN` | optional; attaches the platform MCP server for A2A discovery |
+| `PLATFORM_MCP_URL` / `PLATFORM_API_TOKEN` | optional; attaches the platform MCP server for A2A discovery and is used at boot to call `get_my_bundle` for capability assignments |
 
 Workspace blobs (pulled from Supabase Storage at boot, all optional):
 
