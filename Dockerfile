@@ -49,6 +49,21 @@ RUN npm run build && npm prune --omit=dev
 COPY --chown=agent:agent entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
+# Per-user npm prefix so the agent can run `npm i -g <skill>` (clawhub
+# installs, etc.) at runtime without root. The openclaw CLI itself was
+# installed globally above (as root) and stays reachable via /usr/local/bin.
+# Set this after all build-time `npm install -g` calls so they continue
+# to land in /usr/local — only runtime installs use the user prefix.
+ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global \
+    PATH=/home/agent/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Build-time npm ran as root with HOME=/home/agent, so the cache + any
+# npm-touched dirs under /home/agent are root-owned. Reset ownership to
+# the agent uid (and create the new global prefix dir while we're here)
+# before dropping privileges, otherwise runtime `npm` hits EPERM.
+RUN mkdir -p /home/agent/.npm-global \
+ && chown -R agent:agent /home/agent
+
 USER agent
 EXPOSE 8080
 
