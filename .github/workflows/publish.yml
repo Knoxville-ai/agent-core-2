@@ -15,21 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
+          node-version: "22"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@knoxville-ai"
 
-      - name: Install build tools
-        run: pip install build twine
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build sdist and wheel
-        run: python -m build
+      - name: Build
+        run: npm run build
 
       - name: Publish to GitHub Packages
+        run: npm publish
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          twine upload \
-            --repository-url https://upload.pypi.pkg.github.com/Knoxville-ai \
-            dist/*
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
