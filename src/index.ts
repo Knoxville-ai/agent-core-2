@@ -54,6 +54,17 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  log.error("fatal", { err: err instanceof Error ? err.stack ?? err.message : String(err) });
+  // Inline the error name + message into the msg field so it shows up
+  // in log viewers that only render `msg` (Railway's tail view, etc.).
+  // Stack stays in the extra field for richer log sinks.
+  const summary =
+    err instanceof Error
+      ? `${err.name}: ${err.message}`
+      : String(err);
+  log.error(`fatal — ${summary}`, {
+    name: err instanceof Error ? err.name : undefined,
+    message: err instanceof Error ? err.message : undefined,
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
 });
