@@ -178,11 +178,17 @@ export async function handleSendMessage(
 
   let buffer = "";
   let finalStatus: "complete" | "interrupted" | "error" = "complete";
+  // Filled in from the upstream `usage` frame when openclaw reports it
+  // (requested via stream_options below). Persisted onto the assistant row
+  // so the console's metrics dashboard can chart token in/out over time.
+  const usageRef: { value: OpenaiUsage | null } = { value: null };
   try {
     const gatewayUrl = `http://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}/v1/chat/completions`;
     const payload = {
       model: process.env.OPENCLAW_MODEL_ROUTE ?? "openclaw/default",
       stream: true,
+      // Ask the OpenAI-compatible endpoint to emit a final usage frame.
+      stream_options: { include_usage: true },
       messages: openaiMessages,
     };
     const upstream = await fetch(gatewayUrl, {
@@ -207,7 +213,7 @@ export async function handleSendMessage(
       return;
     }
 
-    for await (const token of iterOpenaiDeltas(upstream.body)) {
+    for await (const token of iterOpenaiDeltas(upstream.body, usageRef)) {
       if (abortController.signal.aborted) {
         finalStatus = "interrupted";
         sseSend({
@@ -248,6 +254,7 @@ export async function handleSendMessage(
       content: buffer,
       status: finalStatus,
       completedAt: new Date().toISOString(),
+      tokenUsage: buildTokenUsage(usageRef.value, env),
     });
     cancels.release(assistantMessageId);
     try {
@@ -405,14 +412,54 @@ function fallbackNote(
   );
 }
 
+/** OpenAI-compatible usage block, as emitted on the final stream frame. */
+interface OpenaiUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  model?: string;
+}
+
+/**
+ * Normalize the upstream usage frame into the `messages.token_usage` JSONB
+ * shape the console's metrics dashboard reads
+ * (`input_tokens` / `output_tokens` / `total_tokens`). Returns undefined when
+ * the gateway reported no usage so we don't overwrite the column with zeros.
+ */
+function buildTokenUsage(
+  usage: OpenaiUsage | null,
+  env: AgentEnv,
+): Record<string, unknown> | undefined {
+  if (!usage) return undefined;
+  const input = usage.prompt_tokens;
+  const output = usage.completion_tokens;
+  if (typeof input !== "number" && typeof output !== "number") return undefined;
+  const inputTokens = typeof input === "number" ? input : 0;
+  const outputTokens = typeof output === "number" ? output : 0;
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens:
+      typeof usage.total_tokens === "number"
+        ? usage.total_tokens
+        : inputTokens + outputTokens,
+    provider: env.LLM_PROVIDER,
+    model: usage.model ?? env.LLM_MODEL,
+  };
+}
+
 /**
  * Yields content deltas from an OpenAI-compatible SSE stream.
  * Mirrors _iter_upstream_deltas in the Python version, minus the
  * tool-call branch (openclaw handles the agentic loop internally and
  * doesn't emit `delta.tool_calls` frames on this endpoint today).
+ *
+ * Captures the trailing `usage` frame (requested via stream_options) into
+ * `usageRef` as a side channel so the caller can persist token counts.
  */
 async function* iterOpenaiDeltas(
   body: ReadableStream<Uint8Array>,
+  usageRef?: { value: OpenaiUsage | null },
 ): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -434,6 +481,17 @@ async function* iterOpenaiDeltas(
           frame = JSON.parse(body);
         } catch {
           continue;
+        }
+        // Usage frames arrive on their own chunk (often with empty choices)
+        // when stream_options.include_usage is set. Capture the latest.
+        if (usageRef && frame.usage && typeof frame.usage === "object") {
+          const u = frame.usage as OpenaiUsage;
+          usageRef.value = {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+            model: typeof frame.model === "string" ? frame.model : u.model,
+          };
         }
         const choices = (frame.choices as Array<Record<string, unknown>>) ?? [];
         const choice = choices[0] ?? {};
