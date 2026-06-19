@@ -35,9 +35,13 @@ When the platform proxies a turn it:
 
 ## Endpoints the external host implements
 
-### `POST {base}/api/v1/conversations/{conversation_id}/messages` — required
+### `POST <your messaging endpoint>` — required
 
-One user turn.
+One user turn. The platform POSTs directly to the URL the owner registers —
+**no path structure is imposed**. The conversation id is not a resource in
+the path; it travels as a body param + header the agent may use or ignore,
+so the host is free to organize history however it already does (per
+session, per user, or stateless).
 
 Request headers:
 
@@ -45,7 +49,7 @@ Request headers:
 Authorization: Bearer <shared secret>      # the value set on the listing
 Content-Type: application/json
 Accept: text/event-stream, application/json
-X-Knox-Conversation-Id: <uuid>             # stable across turns
+X-Knox-Conversation-Id: <uuid>             # opaque correlation token
 X-Knox-Caller-Kind: user | anonymous | agent
 X-Knox-Caller-Id: <opaque stable caller id>
 X-Knox-Caller-Email: <email>               # signed-in users only
@@ -56,7 +60,7 @@ Request body:
 ```json
 {
   "content": "…user message…",
-  "conversation_id": "…",
+  "conversation_id": "…",   // opaque token — thread on it or ignore it
   "caller_kind": "anonymous",
   "caller_id": "…"
 }
@@ -79,16 +83,23 @@ The listing's **response mode** (`auto` | `json` | `sse`, default `auto`)
 controls how the platform reads the response. `auto` negotiates on the
 response `Content-Type`.
 
+**openclaw vessels / path-based routing.** If the host wants the
+conversation id in the path (e.g. pointing the platform straight at an
+openclaw vessel's `/api/v1/conversations/{id}/messages`), register a
+messaging URL containing a `{conversation_id}` placeholder and the platform
+substitutes it. Absent the placeholder, the platform POSTs flat.
+
 ### `GET {base}/healthz` — recommended
 
 `200` when the agent is up.
 
-### `POST {base}/api/v1/tasks` — optional
+### Long-running tasks — not yet
 
-Only for long-running `start_task` jobs. Body
-`{ task_id, instructions, conversation_id }`; return `202 Accepted` and run
-the work in the background. Not implementing it leaves normal chat
-unaffected — task requests just fail cleanly.
+`start_task` against a BYOA drive thru currently returns a clear "not
+supported yet" error. Async tasks need a result-callback API (so the
+external agent can report progress back into `public.mcp_tasks`, which it
+can't write to directly); that's roadmap, not contract. Synchronous
+`send_message` chat is unaffected.
 
 ## Authentication
 
@@ -99,9 +110,10 @@ they couldn't verify anyway) — the shared secret is the trust anchor.
 
 ## Conversation semantics
 
-- `conversation_id` is stable for the conversation's life and arrives in
-  both the path and the body. The host owns its own history keyed off it;
-  the platform does not replay prior turns.
+- `conversation_id` is a stable, opaque correlation token in the body (and
+  the `X-Knox-Conversation-Id` header). It is a convenience, not a contract:
+  thread on it for continuity, or ignore it and run stateless. The platform
+  never replays prior turns.
 - `caller_kind`: `user` (signed-in Knoxville user), `anonymous` (public
   website / QR visitor, no account), `agent` (agent-to-agent call).
 - `caller_id` is a stable opaque id — fine for per-caller memory / rate
