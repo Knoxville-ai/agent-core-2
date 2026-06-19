@@ -70,6 +70,18 @@ When unset, the agent is purely inbound: no outbound A2A, no bundle, no
 capability-driven skill installs. The vessel still boots with whatever
 prompt blobs the console uploaded to Storage.
 
+## Bring your own agent (BYOA)
+
+A third party can list a self-hosted drive thru whose agent runs on their
+own infrastructure. The console proxies each conversation turn to the
+owner's endpoint, authenticating with an owner-set shared secret. An
+openclaw vessel already satisfies the BYOA endpoint contract (the HTTP
+surface above is a superset of it) — so a BYOA listing can point at an
+openclaw gateway URL directly, or at any other stack that implements the
+same tiny surface. The full wire contract lives in
+[`BYOA.md`](./BYOA.md); the console renders a user-facing version at
+`/drive-throughs/byoa`.
+
 ## Storage contract (unchanged from CONTRACT.md)
 
 The shim reads/writes the same paths the console already manages:
