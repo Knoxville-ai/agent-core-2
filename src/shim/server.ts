@@ -2,12 +2,20 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import { HttpError, verifyBearer } from "./auth.js";
 import { CancelRegistry } from "./cancel-registry.js";
+import { OAuthSessionManager } from "./oauth-session.js";
 import { handleFilesPlaceholder } from "./routes-files.js";
 import { handleHealth, handleReady } from "./routes-health.js";
 import { handleInterrupt } from "./routes-interrupt.js";
 import { handleSendMessage } from "./routes-messages.js";
+import {
+  handleOAuthComplete,
+  handleOAuthStart,
+  handleOAuthStatus,
+  type OAuthDeps,
+} from "./routes-oauth.js";
 import { MessagingDB } from "./supabase-db.js";
 import { sendJson } from "./util.js";
 
@@ -15,12 +23,21 @@ interface ServerHandle {
   close: () => Promise<void>;
 }
 
-export function startShim(env: AgentEnv): Promise<ServerHandle> {
+export function startShim(
+  env: AgentEnv,
+  gateway: GatewayProcess,
+): Promise<ServerHandle> {
   const db = new MessagingDB(env);
   const cancels = new CancelRegistry();
+  const oauth: OAuthDeps = {
+    env,
+    db,
+    sessions: new OAuthSessionManager(env),
+    gateway,
+  };
 
   const server = createServer((req, res) => {
-    void route(req, res, env, db, cancels).catch((err) => {
+    void route(req, res, env, db, cancels, oauth).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
         if (!res.headersSent) {
@@ -67,6 +84,7 @@ async function route(
   env: AgentEnv,
   db: MessagingDB,
   cancels: CancelRegistry,
+  oauth: OAuthDeps,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -78,6 +96,20 @@ async function route(
 
   // Everything below requires a valid bearer JWT.
   const principal = await verifyBearer(req.headers.authorization, env);
+
+  // Model-provider OAuth control surface (operator-only; see routes-oauth).
+  if (path === "/api/v1/auth/oauth/status") {
+    if (method !== "GET") throw new HttpError(405, "method not allowed");
+    return handleOAuthStatus(env, res);
+  }
+  if (path === "/api/v1/auth/oauth/start") {
+    if (method !== "POST") throw new HttpError(405, "method not allowed");
+    return handleOAuthStart(principal, req, res, oauth);
+  }
+  if (path === "/api/v1/auth/oauth/complete") {
+    if (method !== "POST") throw new HttpError(405, "method not allowed");
+    return handleOAuthComplete(principal, req, res, oauth);
+  }
 
   // POST /api/v1/conversations/:id/{messages,interrupt}
   const convMatch = /^\/api\/v1\/conversations\/([^/]+)\/(messages|interrupt)$/.exec(

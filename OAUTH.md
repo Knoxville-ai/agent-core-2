@@ -95,37 +95,58 @@ gateway starts, downloading the encrypted store from
 `agent-data/orgs/{org}/agents/{uid}/config/oauth/auth-profile-store.json` and
 writing the files back into the state dir. No-op on a first-ever boot.
 
-## The one open piece: minting the token on the container
+## Minting the token on the container (implemented)
 
-The console → container control channel and UI are straightforward (mirror
-`messaging-proxy.ts` + the `interrupt` route; add an "auth source" to the
-model switcher). The hard part is **how the shim mints the credential**,
-because OpenClaw's `models auth` commands (`login`, `paste-token`,
-`setup-token`, `add`) are **all interactive TUIs** in 2026.5.20 — they refuse
-a non-TTY and ignore piped stdin. Two viable strategies (decision pending):
+OpenClaw's `models auth` commands (`login`, `paste-token`, `setup-token`,
+`add`) are **all interactive TUIs** in 2026.5.20 — they refuse a non-TTY and
+ignore piped stdin. We chose to **let OpenClaw mint the token** rather than
+reproduce its on-disk crypto: the shim drives OpenClaw's own
+`models auth login --provider openai-codex --method oauth` under a
+pseudo-terminal (util-linux `script`, added to the image), scrapes the
+`auth.openai.com/oauth/authorize?…` URL, and types the operator-pasted
+callback at the "Paste the redirect URL" prompt. OpenClaw owns the PKCE
+exchange, the encrypted store, and refresh — correct by construction. The
+tradeoff: the flow is tied to OpenClaw's prompt wording, so a major upgrade
+that changes it breaks **loudly** (a timeout), not silently.
+(`--method oauth` skips the interactive method-picker — method id confirmed
+from the pinned bundle.)
 
-- **A. PTY-drive OpenClaw's own `models auth login --provider openai-codex`.**
-  Spawn it under a pseudo-TTY, scrape the printed authorize URL, and type the
-  pasted callback at the "Paste the redirect URL to continue" prompt.
-  OpenClaw writes its own encrypted store + handles refresh (correct by
-  construction). Cost: needs a PTY in the slim image — `node-pty` has **no
-  Linux prebuild** (would need a build toolchain), or use `script`
-  (util-linux) + ANSI-stripping; and TUI scraping is brittle across upgrades.
+`src/shim/oauth-session.ts` owns the PTY session (start → hold at the paste
+prompt → complete). After a successful exchange the complete handler calls
+`persistOAuthStore(env)` to back up the encrypted store, then restarts
+**only** the openclaw child (`GatewayProcess.restart()`) — no Railway
+redeploy.
 
-- **B. Own the PKCE exchange in the shim and write the store directly.**
-  Deterministic, no TUI, no native deps; we have the exact AES-256-GCM
-  envelope (`{iv,tag,ciphertext}` base64url, AAD = `${ref.id}\0${profileId}\0${provider}`).
-  Cost: reproduces an OpenClaw-internal on-disk format that can break
-  silently on an OpenClaw version bump.
+> Considered but rejected: owning the PKCE exchange + writing the store
+> ourselves. We extracted the exact AES-256-GCM envelope
+> (`{iv,tag,ciphertext}` base64url, AAD = `${ref.id}\0${profileId}\0${provider}`,
+> key = `sha256("openclaw:auth-profile-oauth:"+seed)`) — deterministic and
+> dependency-free, but it reproduces an OpenClaw-internal format that can
+> break **silently** on a version bump. Documented here in case the TUI path
+> ever becomes untenable.
 
-Whichever is chosen, the post-mint steps are the same: `persistOAuthStore(env)`
-to back up the encrypted store, then restart **only** the openclaw child
-(`GatewayProcess.stop()`/`start()`) — no Railway redeploy.
-
-### Planned shim surface (port 8080, bearer-authenticated like the rest)
+### Shim surface (port 8080, bearer-authenticated, operator/user only)
 
 | Method + path | Behavior |
 | --- | --- |
 | `POST /api/v1/auth/oauth/start` | `{ provider: "openai-codex" }` → `{ url }`. Begins the flow, returns the authorize URL. |
-| `POST /api/v1/auth/oauth/complete` | `{ provider, callbackUrl }` → exchanges, stores, persists to Storage, restarts the gateway. |
-| `GET  /api/v1/auth/status` | `{ mode: "api_key" \| "oauth", connected: bool }` for the console badge. |
+| `POST /api/v1/auth/oauth/complete` | `{ provider, callbackUrl }` → exchanges, persists to Storage, restarts the gateway. |
+| `GET  /api/v1/auth/oauth/status` | `{ mode: "api_key" \| "oauth", provider, connected }` for the console badge. |
+
+### Still to do (console side)
+
+- A route-handler proxy (mirror `messaging-proxy.ts` + the `interrupt`
+  route) that forwards start/complete/status to the agent gateway URL.
+- A "Connect with OAuth" auth source in the model switcher: show URL → paste
+  callback → connected badge.
+- Provisioning: set `LLM_AUTH_MODE` + generate a stable
+  `OPENCLAW_AUTH_PROFILE_SECRET_KEY` on the Railway service when OAuth is
+  selected.
+
+### Needs live-container validation
+
+The PTY mint can't be exercised without a real container + real OpenAI
+account. Validate against a live agent: the scraped authorize URL, the paste
+prompt wording, and the success/failure detection in
+`src/shim/oauth-session.ts` (the regexes there may need tuning to OpenClaw's
+exact output).

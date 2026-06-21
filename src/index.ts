@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   // 4. Start the HTTP shim. /readyz won't return 200 until the gateway
   //    finishes its startup sidecars; Railway's healthcheck handles the
   //    wait.
-  const shim = await startShim(env);
+  const shim = await startShim(env, proc);
 
   // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
