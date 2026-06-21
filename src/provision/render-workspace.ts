@@ -152,9 +152,20 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
     channels: {},
   };
 
-  // Provider API keys live under models.providers.<name>.apiKey — there
-  // is no top-level `providers` key in the schema.
-  if (env.LLM_API_KEY) {
+  if (env.LLM_AUTH_MODE === "oauth") {
+    // OpenAI-Codex (ChatGPT) OAuth. The secret token is NOT in this file —
+    // it lives in OpenClaw's encrypted auth-profile store, minted on the
+    // running container and restored at boot from Storage. Here we only
+    // re-emit the non-secret wiring OpenClaw writes when you run its config
+    // menus, so a from-scratch boot doesn't un-wire OAuth:
+    //   - the openai + codex plugins enabled,
+    //   - an `openai-codex:default` oauth profile,
+    //   - auth.order routing the `openai` provider to that profile.
+    // openclaw 2026.5.x routes openai/<model> through auth.order["openai"].
+    applyCodexOAuthConfig(config);
+  } else if (env.LLM_API_KEY) {
+    // Provider API keys live under models.providers.<name>.apiKey — there
+    // is no top-level `providers` key in the schema.
     config.models = {
       providers: {
         [env.LLM_PROVIDER]: { apiKey: env.LLM_API_KEY },
@@ -163,6 +174,37 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
   }
 
   return config;
+}
+
+/** Profile id + provider for the OpenClaw OpenAI-Codex OAuth flow. These
+ *  strings are fixed by OpenClaw (provider id `openai-codex`, default
+ *  profile `openai-codex:default`) — do not localize. */
+export const CODEX_OAUTH_PROVIDER = "openai-codex";
+export const CODEX_OAUTH_PROFILE_ID = "openai-codex:default";
+
+/** Mutates `config` in place to add the Codex OAuth auth block + plugins.
+ *  Mirrors what `openclaw config` writes for a ChatGPT-OAuth setup so a
+ *  cold boot reproduces it. The model stays `openai/<model>`. */
+function applyCodexOAuthConfig(config: Record<string, unknown>): void {
+  config.auth = {
+    profiles: {
+      [CODEX_OAUTH_PROFILE_ID]: {
+        provider: CODEX_OAUTH_PROVIDER,
+        mode: "oauth",
+      },
+    },
+    // OpenClaw resolves openai/<model> auth via auth.order["openai"].
+    order: {
+      openai: [CODEX_OAUTH_PROFILE_ID],
+      [CODEX_OAUTH_PROVIDER]: [CODEX_OAUTH_PROFILE_ID],
+    },
+  };
+  config.plugins = {
+    entries: {
+      openai: { enabled: true },
+      codex: { enabled: true },
+    },
+  };
 }
 
 function defaultSoul(env: AgentEnv): string {

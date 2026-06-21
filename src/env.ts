@@ -25,6 +25,21 @@ const Schema = z.object({
   LLM_MODEL: z.string().min(1),
   LLM_API_KEY: z.string().optional().default(""),
 
+  // Model auth mode. "api_key" (default) uses LLM_API_KEY. "oauth" wires
+  // the OpenClaw OpenAI-Codex (ChatGPT) OAuth profile instead — the token
+  // itself is NOT an env var; it lives in OpenClaw's encrypted auth-profile
+  // store, minted on the running container (see routes-oauth) and persisted
+  // to Supabase Storage so it survives redeploys.
+  LLM_AUTH_MODE: z.enum(["api_key", "oauth"]).optional().default("api_key"),
+
+  // Stable seed OpenClaw derives its auth-profile encryption key from
+  // (sha256("openclaw:auth-profile-oauth:" + seed)). Set as a stable
+  // per-agent secret so the encrypted OAuth store is portable: a store
+  // persisted to Storage can be restored AND decrypted on a fresh
+  // container. Passed straight through to the gateway child, which reads
+  // this exact env var name. Required when LLM_AUTH_MODE=oauth.
+  OPENCLAW_AUTH_PROFILE_SECRET_KEY: z.string().optional(),
+
   // Platform MCP — the console's MCP server. URL is optional; when
   // missing the agent simply has no outbound A2A (and no bundle). The
   // token authenticates THIS agent (knox_agent_* form) and is required
@@ -51,6 +66,15 @@ const Schema = z.object({
   OPENCLAW_STATE_DIR: z.string().default("/home/agent/.openclaw"),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional().default("info"),
+}).superRefine((env, ctx) => {
+  if (env.LLM_AUTH_MODE === "oauth" && !env.OPENCLAW_AUTH_PROFILE_SECRET_KEY) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["OPENCLAW_AUTH_PROFILE_SECRET_KEY"],
+      message:
+        "required when LLM_AUTH_MODE=oauth (stable seed that keeps the encrypted OAuth store portable across redeploys)",
+    });
+  }
 });
 
 export type AgentEnv = z.infer<typeof Schema>;
