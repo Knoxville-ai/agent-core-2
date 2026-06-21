@@ -21,8 +21,11 @@ ENV NODE_ENV=production \
     AGENT_HTTP_PORT=8080 \
     OPENCLAW_GATEWAY_PORT=18789
 
+# bsdextrautils provides util-linux `script`, which the shim uses to
+# allocate a PTY when driving OpenClaw's interactive `models auth login`
+# (model-provider OAuth). See src/shim/oauth-session.ts.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl tini \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini bsdextrautils \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 agent \
  && useradd  --system --uid 1001 --gid 1001 --create-home --home-dir /home/agent --shell /bin/bash agent \

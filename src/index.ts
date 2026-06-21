@@ -3,6 +3,7 @@ import { loadEnv } from "./env.js";
 import { log } from "./log.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
 import { refreshManifest } from "./provision/manifest.js";
+import { restoreOAuthStore } from "./provision/oauth-store.js";
 import { startShim } from "./shim/server.js";
 
 async function main(): Promise<void> {
@@ -27,6 +28,18 @@ async function main(): Promise<void> {
     log.warn("manifest refresh failed (non-fatal)", { err: String(err) });
   });
 
+  // 2b. If this agent uses model OAuth, restore the encrypted auth-profile
+  //     store from Storage BEFORE the gateway boots so OpenClaw reads back
+  //     the token minted on a prior container. Decryptable only because
+  //     OPENCLAW_AUTH_PROFILE_SECRET_KEY is a stable per-agent secret.
+  //     Non-fatal: a first-ever boot has nothing stored yet (the operator
+  //     completes the OAuth flow afterwards via the console).
+  if (env.LLM_AUTH_MODE === "oauth") {
+    await restoreOAuthStore(env).catch((err) => {
+      log.warn("oauth store restore failed (non-fatal)", { err: String(err) });
+    });
+  }
+
   // 3. Spawn openclaw gateway as a child. The shim talks to it over the
   //    OpenAI-compatible HTTP endpoint on the same port (loopback), so no
   //    WebSocket client is needed in this process.
@@ -36,7 +49,7 @@ async function main(): Promise<void> {
   // 4. Start the HTTP shim. /readyz won't return 200 until the gateway
   //    finishes its startup sidecars; Railway's healthcheck handles the
   //    wait.
-  const shim = await startShim(env);
+  const shim = await startShim(env, proc);
 
   // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {

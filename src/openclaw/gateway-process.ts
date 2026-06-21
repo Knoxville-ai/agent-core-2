@@ -91,4 +91,17 @@ export class GatewayProcess {
       if (child.exitCode == null) child.kill("SIGKILL");
     }
   }
+
+  /**
+   * Restart the gateway child in place — used after the model auth config
+   * changes (e.g. an OAuth profile was just minted) so OpenClaw re-reads
+   * openclaw.json + the auth-profile store WITHOUT a full Railway redeploy.
+   * stop() detaches the exit handler first, so this does not take the
+   * container down.
+   */
+  async restart(): Promise<void> {
+    log.info("restarting openclaw gateway (auth/config change)");
+    await this.stop();
+    await this.start();
+  }
 }
