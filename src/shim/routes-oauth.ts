@@ -4,6 +4,7 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import { persistOAuthStore } from "../provision/oauth-store.js";
+import { switchConfigFileToOAuth } from "../provision/render-workspace.js";
 import { HttpError, type Principal } from "./auth.js";
 import type { OAuthSessionManager } from "./oauth-session.js";
 import type { MessagingDB } from "./supabase-db.js";
@@ -99,6 +100,11 @@ export async function handleOAuthComplete(
   if (!callbackUrl) throw new HttpError(400, "callbackUrl is required");
 
   await sessions.complete(provider, callbackUrl);
+
+  // Flip the on-disk openclaw.json from API-key to OAuth so the gateway
+  // restart below actually uses the new profile (boot rendered it in
+  // API-key mode; future cold boots reproduce OAuth from LLM_AUTH_MODE).
+  await switchConfigFileToOAuth(env.OPENCLAW_STATE_DIR);
 
   // Back up the freshly-minted (encrypted) store so it survives redeploys.
   // Non-fatal: the token is already live in-container; a failed backup just

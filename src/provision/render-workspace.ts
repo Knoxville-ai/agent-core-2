@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { log } from "../log.js";
@@ -181,6 +181,26 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
  *  profile `openai-codex:default`) — do not localize. */
 export const CODEX_OAUTH_PROVIDER = "openai-codex";
 export const CODEX_OAUTH_PROFILE_ID = "openai-codex:default";
+
+/**
+ * Flip an already-rendered openclaw.json (written at boot in API-key mode)
+ * to Codex OAuth in place, then the caller restarts the gateway child. This
+ * is the live "switch to OAuth" path: the token was just minted into the
+ * encrypted store, so we add the oauth profile wiring + drop the API-key
+ * block without a full Railway redeploy. Future boots reproduce this from
+ * LLM_AUTH_MODE=oauth via buildOpenclawConfig.
+ */
+export async function switchConfigFileToOAuth(stateDir: string): Promise<void> {
+  const path = join(stateDir, "openclaw.json");
+  const config = JSON.parse(await readFile(path, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  applyCodexOAuthConfig(config);
+  delete config.models; // remove the now-stale API-key block
+  await writeFile(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+  log.info("openclaw.json switched to Codex OAuth in place", { path });
+}
 
 /** Mutates `config` in place to add the Codex OAuth auth block + plugins.
  *  Mirrors what `openclaw config` writes for a ChatGPT-OAuth setup so a
