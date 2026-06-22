@@ -86,7 +86,11 @@ export class OAuthSessionManager {
     const stateDir = this.env.OPENCLAW_STATE_DIR;
     const userHome = dirname(stateDir);
     const configPath = join(stateDir, "openclaw.json");
-    const cmd = `openclaw models auth login --provider ${provider} --method oauth`;
+    // Widen the PTY before launching OpenClaw: a default 80-column terminal
+    // hard-wraps the ~400-char authorize URL (and the prompt) across lines,
+    // which breaks our contiguous URL/prompt matching. `stty` runs inside the
+    // PTY that `script` allocates, so OpenClaw inherits the wide width.
+    const cmd = `stty cols 1024 rows 50; openclaw models auth login --provider ${provider} --method oauth`;
 
     // `script -qfec "<cmd>" /dev/null`: -q quiet, -f flush each write,
     // -e return child exit code, -c run the command. /dev/null discards the
