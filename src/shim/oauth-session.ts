@@ -56,8 +56,10 @@ const SUCCESS_RE =
   /(logged in|authenticated|auth profile|signed in|success|saved|complete)/i;
 const FAILURE_RE = /(error|failed|invalid|denied|expired|mismatch)/i;
 
-const START_TIMEOUT_MS = 60_000;
-const COMPLETE_TIMEOUT_MS = 60_000;
+// Keep this comfortably under Railway's ~60s edge timeout so the shim itself
+// answers first with a useful error instead of the edge returning a bare 504.
+const START_TIMEOUT_MS = 45_000;
+const COMPLETE_TIMEOUT_MS = 45_000;
 const SESSION_TTL_MS = 10 * 60_000;
 
 interface Session {
@@ -96,6 +98,12 @@ export class OAuthSessionManager {
         OPENCLAW_HOME: userHome,
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
+        // Force OpenClaw's remote/headless OAuth branch (isRemoteEnvironment()
+        // checks this): it prints the authorize URL + prompts for the pasted
+        // redirect URL, instead of binding a local 127.0.0.1:1455 callback
+        // server. In-container that bind SUCCEEDS, so without this OpenClaw
+        // would sit forever waiting for a browser callback it can't receive.
+        REMOTE_CONTAINERS: "true",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -141,8 +149,20 @@ export class OAuthSessionManager {
         "authorize URL",
       );
     } catch (err) {
+      // Surface what OpenClaw actually printed so a timeout is diagnosable
+      // from the HTTP response alone (container debug logs aren't always on).
+      const tail = session.text.trim().slice(-400) || "<no output>";
+      log.warn("oauth start did not yield a URL", {
+        err: String(err),
+        exitCode: session.child.exitCode,
+        output_tail: tail,
+      });
       this.cancel("start failed");
-      throw err;
+      const base = err instanceof HttpError ? err.message : String(err);
+      throw new HttpError(
+        err instanceof HttpError ? err.status : 502,
+        `${base}; OpenClaw output: ${tail}`,
+      );
     }
 
     if (!session.url) {
@@ -151,7 +171,7 @@ export class OAuthSessionManager {
         502,
         `OpenClaw login exited before emitting an authorize URL: ${session.text
           .trim()
-          .slice(-200)}`,
+          .slice(-300)}`,
       );
     }
     log.info("oauth authorize url ready", { provider });

@@ -143,6 +143,17 @@ redeploy.
   `OPENCLAW_AUTH_PROFILE_SECRET_KEY` on the Railway service when OAuth is
   selected.
 
+### Remote-mode gotcha (resolved)
+
+OpenClaw's Codex login picks its strategy from `isRemoteEnvironment()`: in a
+"local" environment it **binds `127.0.0.1:1455` and waits for a browser
+callback** (which succeeds in-container and then hangs forever, since the
+operator's browser can't reach the container); only in a "remote" environment
+does it print the URL + prompt for the pasted redirect. The shim therefore
+spawns the login with `REMOTE_CONTAINERS=true` to force the remote branch.
+Other triggers OpenClaw accepts: `SSH_CONNECTION`, `SSH_TTY`, `SSH_CLIENT`,
+`CODESPACES`.
+
 ### Needs live-container validation
 
 The PTY mint can't be exercised without a real container + real OpenAI
