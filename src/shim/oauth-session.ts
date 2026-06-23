@@ -52,6 +52,22 @@ function stripAnsi(s: string): string {
 const AUTHORIZE_URL_RE =
   /https?:\/\/auth\.openai\.com\/oauth\/authorize\?[^\s"'`]+/i;
 const PASTE_PROMPT_RE = /paste the (redirect url|authorization code)/i;
+
+// OpenClaw hard-wraps the ~400-char authorize URL to the PTY width (real
+// newlines, sometimes with indentation), which breaks a contiguous regex
+// match — the short prompt fits 80 cols and looks fine, but the URL does
+// not. Join newlines that sit between two URL-safe characters, then match
+// the now-contiguous URL. (We also widen the PTY via stty, but don't rely
+// on that taking effect.)
+const URL_SAFE_CLASS = "A-Za-z0-9=&%?:_.+\\/~-";
+const URL_WRAP_RE = new RegExp(
+  `(?<=[${URL_SAFE_CLASS}])\\n+[ \\t]*(?=[${URL_SAFE_CLASS}])`,
+  "g",
+);
+function extractAuthorizeUrl(text: string): string | null {
+  const m = text.replace(URL_WRAP_RE, "").match(AUTHORIZE_URL_RE);
+  return m ? m[0] : null;
+}
 const SUCCESS_RE =
   /(logged in|authenticated|auth profile|signed in|success|saved|complete)/i;
 const FAILURE_RE = /(error|failed|invalid|denied|expired|mismatch)/i;
@@ -128,8 +144,8 @@ export class OAuthSessionManager {
       session.text += clean;
       log.debug("oauth login output", { chunk: clean.slice(0, 400) });
       if (!session.url) {
-        const m = session.text.match(AUTHORIZE_URL_RE);
-        if (m) session.url = m[0];
+        const url = extractAuthorizeUrl(session.text);
+        if (url) session.url = url;
       }
       if (PASTE_PROMPT_RE.test(session.text)) session.sawPastePrompt = true;
       for (const cb of session.onChunk.splice(0)) cb();
