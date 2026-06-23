@@ -21,6 +21,12 @@ ENV NODE_ENV=production \
     AGENT_HTTP_PORT=8080 \
     OPENCLAW_GATEWAY_PORT=18789
 
+# Build provenance so a running container can report exactly which commit
+# it was built from (logged at boot + surfaced on /healthz). The docker
+# workflow passes --build-arg BUILD_REF=<git sha>; defaults to "dev" locally.
+ARG BUILD_REF=dev
+ENV BUILD_REF=${BUILD_REF}
+
 # bsdextrautils provides util-linux `script`, which the shim uses to
 # allocate a PTY when driving OpenClaw's interactive `models auth login`
 # (model-provider OAuth). See src/shim/oauth-session.ts.

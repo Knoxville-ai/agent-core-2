@@ -13,6 +13,8 @@ async function main(): Promise<void> {
     org: env.AGENT_ORG,
     role: env.AGENT_ROLE,
     model: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
+    auth_mode: env.LLM_AUTH_MODE,
+    build: process.env.BUILD_REF ?? "dev",
     http_port: env.AGENT_HTTP_PORT,
     gateway_port: env.OPENCLAW_GATEWAY_PORT,
   });

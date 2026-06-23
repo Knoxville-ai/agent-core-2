@@ -4,7 +4,14 @@ import type { AgentEnv } from "../env.js";
 import { sendJson } from "./util.js";
 
 export function handleHealth(res: ServerResponse): void {
-  sendJson(res, 200, { ok: true, service: "agent-core", role: "vessel" });
+  sendJson(res, 200, {
+    ok: true,
+    service: "agent-core",
+    role: "vessel",
+    // Confirm which commit a running container was built from:
+    // `curl https://<agent-host>/healthz` and compare to the expected PR.
+    build: process.env.BUILD_REF ?? "dev",
+  });
 }
 
 /**
