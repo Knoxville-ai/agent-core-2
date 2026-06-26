@@ -99,6 +99,13 @@ agent-data/orgs/{org}/agents/{uid}/
 └── logs/                  ← agent-owned; shim does not touch
 ```
 
+Only `manifest.json` is written by the agent image itself; the `memory/`
+blobs are uploaded by the console at provision time and are all optional
+— when a blob is absent the shim renders a sensible default (see
+`render-workspace.ts`). A freshly provisioned generic vessel therefore
+shows up in Storage with little more than `manifest.json` (+ any
+`config/` the console wrote); this is expected, not a failed provision.
+
 The `manifest.json` written by v0.3 includes a `vessel` block:
 
 ```json
@@ -114,7 +121,8 @@ The `manifest.json` written by v0.3 includes a `vessel` block:
 ```
 
 The `vessel.kind` field lets the console distinguish v0.2 and v0.3 agents
-when rendering role-specific UI.
+when rendering role-specific UI (e.g. which filesystem roots the Files
+tab offers).
 
 ## HTTP surface (port 8080)
 
@@ -125,7 +133,15 @@ Identical to v0.2 for the endpoints the console actually calls:
 | `POST /api/v1/conversations/:id/messages` | Body: `{ "text": "…" }`. Response: `text/event-stream` with events `delta` / `tool_call` / `tool_result` / `done` / `error`. Verified by `Authorization: Bearer <Supabase session.access_token>` against `SUPABASE_JWT_SECRET`. |
 | `POST /api/v1/conversations/:id/interrupt` | Aborts the in-flight turn. Returns `{ ok: true }` on success, `{ ok: false, error }` on gateway failure. |
 | `GET  /healthz` / `/readyz` | Liveness / readiness. `/readyz` returns 503 until the openclaw gateway WebSocket is connected. |
-| `*    /api/v1/agents/:uid/files/...` | Returns 501 (file attachments are not yet implemented for vessel agents). The console should treat 501 the same as "not supported on this agent." |
+| `GET  /files/list?path=…` | Operator filesystem inspection for the console Files tab. Auth: `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>` (the gateway token, **not** a user JWT — only the console server holds it). Returns `{ path, entries: [{ name, type, size, mtime }] }`. `path` defaults to the first allowed root. |
+| `GET  /files/read?path=…` | Reads one file. Same auth. Returns `{ path, size, encoding: "utf-8" \| "base64", truncated, content }`; content is capped at 1 MiB and base64-encoded when binary. |
+| `*    /api/v1/agents/:uid/files/...` | Legacy conversation-attachment surface. Still returns 501 for vessel agents; the console treats 501 the same as "not supported on this agent." |
+
+`/files/*` is confined to an allowlist: the image code at `/app` and the
+rendered agent workspace at `<OPENCLAW_STATE_DIR>/workspace`. The openclaw
+state dir itself is **not** browsable, since `openclaw.json` there holds the
+LLM API key and the OAuth-store pointer. Symlinks are resolved (`realpath`)
+and re-checked against the allowlist so a link can't escape a root.
 
 ## Migration strategy
 
