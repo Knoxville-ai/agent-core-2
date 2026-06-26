@@ -6,7 +6,12 @@ import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import { HttpError, verifyBearer } from "./auth.js";
 import { CancelRegistry } from "./cancel-registry.js";
 import { OAuthSessionManager } from "./oauth-session.js";
-import { handleFilesPlaceholder } from "./routes-files.js";
+import {
+  handleFilesList,
+  handleFilesPlaceholder,
+  handleFilesRead,
+  requireGatewayToken,
+} from "./routes-files.js";
 import { handleHealth, handleReady } from "./routes-health.js";
 import { handleInterrupt } from "./routes-interrupt.js";
 import { handleSendMessage } from "./routes-messages.js";
@@ -94,6 +99,18 @@ async function route(
   if (path === "/healthz" || path === "/health") return handleHealth(res);
   if (path === "/readyz") return handleReady(res, env);
 
+  // Operator filesystem inspection (the console's Files tab). Authed with
+  // the gateway token rather than a user JWT — the console *server* is the
+  // only caller and the token never reaches a browser. Handled BEFORE the
+  // JWT gate below so the conversation/oauth routes stay JWT-only.
+  if (path === "/files/list" || path === "/files/read") {
+    if (method !== "GET") throw new HttpError(405, "method not allowed");
+    requireGatewayToken(req.headers.authorization, env);
+    return path === "/files/list"
+      ? handleFilesList(url, res, env)
+      : handleFilesRead(url, res, env);
+  }
+
   // Everything below requires a valid bearer JWT.
   const principal = await verifyBearer(req.headers.authorization, env);
 
@@ -137,7 +154,7 @@ async function route(
     }
   }
 
-  // /api/v1/agents/:uid/files/...  (legacy file surface — placeholder)
+  // /api/v1/agents/:uid/files/...  (legacy attachment surface — placeholder)
   if (/^\/api\/v1\/agents\/[^/]+\/files(\/|$)/.test(path)) {
     return handleFilesPlaceholder(req, res);
   }
