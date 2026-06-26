@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 
 import { log } from "../log.js";
 import type { SkillRequirement } from "../bundle/types.js";
+import { ensureOpenclawTempDir } from "../openclaw/temp-dir.js";
 import type { InstalledSkill, SkillResolver } from "./resolver.js";
 
 /**
@@ -76,6 +77,10 @@ export class ClawhubSkillResolver implements SkillResolver {
 
   private async run(args: string[], req: SkillRequirement): Promise<void> {
     const userHome = dirname(this.stateDir);
+    // Redirect openclaw's temp-dir fallback to a private agent-owned dir so
+    // the install doesn't crash with "Unsafe fallback OpenClaw temp dir" on
+    // a contended /tmp. See ../openclaw/temp-dir.ts.
+    const tempDir = ensureOpenclawTempDir(this.stateDir);
     return await new Promise((resolve, reject) => {
       const child = spawn(this.binary, args, {
         env: {
@@ -83,6 +88,7 @@ export class ClawhubSkillResolver implements SkillResolver {
           HOME: userHome,
           OPENCLAW_HOME: userHome,
           OPENCLAW_STATE_DIR: this.stateDir,
+          TMPDIR: tempDir,
         },
         stdio: ["ignore", "pipe", "pipe"],
       });

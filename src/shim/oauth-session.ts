@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { ensureOpenclawTempDir } from "../openclaw/temp-dir.js";
 import { HttpError } from "./auth.js";
 
 /**
@@ -102,6 +103,9 @@ export class OAuthSessionManager {
     const stateDir = this.env.OPENCLAW_STATE_DIR;
     const userHome = dirname(stateDir);
     const configPath = join(stateDir, "openclaw.json");
+    // Private agent-owned TMPDIR so openclaw's temp-dir fallback doesn't
+    // crash this login on a contended /tmp. See ../openclaw/temp-dir.ts.
+    const tempDir = ensureOpenclawTempDir(stateDir);
     // Widen the PTY before launching OpenClaw: a default 80-column terminal
     // hard-wraps the ~400-char authorize URL (and the prompt) across lines,
     // which breaks our contiguous URL/prompt matching. `stty` runs inside the
@@ -118,6 +122,7 @@ export class OAuthSessionManager {
         OPENCLAW_HOME: userHome,
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
+        TMPDIR: tempDir,
         // Force OpenClaw's remote/headless OAuth branch (isRemoteEnvironment()
         // checks this): it prints the authorize URL + prompts for the pasted
         // redirect URL, instead of binding a local 127.0.0.1:1455 callback
