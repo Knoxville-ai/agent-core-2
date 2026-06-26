@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, type Principal } from "./auth.js";
 import type { CancelRegistry } from "./cancel-registry.js";
 import { lookupCapabilities, type ModelCapabilities } from "./model-capabilities.js";
@@ -51,6 +52,7 @@ export interface MessagesDeps {
   env: AgentEnv;
   db: MessagingDB;
   cancels: CancelRegistry;
+  memory: MemoryCheckpoint;
 }
 
 export async function handleSendMessage(
@@ -267,6 +269,11 @@ export async function handleSendMessage(
     } catch {
       /* already closed */
     }
+    // Checkpoint agent-owned memory (playbook.md + notes/) to Supabase now that
+    // the turn is complete and any tool-driven file writes have settled. The
+    // turn boundary is a race-free quiet point; checkpoint() is coalesced and
+    // never throws (M1 volume still holds the bytes if an upload fails).
+    await deps.memory.checkpoint();
   }
 }
 

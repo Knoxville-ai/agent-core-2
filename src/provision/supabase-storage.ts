@@ -74,4 +74,31 @@ export class AgentStorage {
   async uploadJSON(rel: string, value: unknown): Promise<void> {
     await this.uploadText(rel, JSON.stringify(value, null, 2), "application/json");
   }
+
+  /**
+   * List the file names directly under a storage prefix (non-recursive).
+   * Returns names relative to `rel` (e.g. "foo.md" for `state/notes/foo.md`).
+   * Folder entries (id === null) are filtered out. Soft-fails to [] so a
+   * transient Storage error never aborts boot.
+   */
+  async list(rel: string): Promise<string[]> {
+    const prefix = this.key(rel);
+    const { data, error } = await this.client.storage
+      .from(BUCKET)
+      .list(prefix, { limit: 1000 });
+    if (error) {
+      log.warn("storage.list failed", { prefix, error: error.message });
+      return [];
+    }
+    return (data ?? []).filter((entry) => entry.id !== null).map((entry) => entry.name);
+  }
+
+  /** Delete one object. Fatal on error (callers mirror local deletions). */
+  async remove(rel: string): Promise<void> {
+    const key = this.key(rel);
+    const { error } = await this.client.storage.from(BUCKET).remove([key]);
+    if (error) {
+      throw new Error(`storage remove failed (${key}): ${error.message}`);
+    }
+  }
 }

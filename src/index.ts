@@ -2,6 +2,7 @@ import { bootstrap } from "./boot/bootstrap.js";
 import { loadEnv } from "./env.js";
 import { log } from "./log.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
+import { MemoryCheckpoint } from "./provision/agent-memory.js";
 import { refreshManifest } from "./provision/manifest.js";
 import { restoreOAuthStore } from "./provision/oauth-store.js";
 import { assertStateDirWritable } from "./provision/state-dir.js";
@@ -28,6 +29,14 @@ async function main(): Promise<void> {
   //    validate env, assemble SOUL.md, render the openclaw workspace.
   //    Throws on missing required creds or skill version conflicts.
   await bootstrap(env);
+
+  // 1b. Restore agent-owned memory (playbook.md + notes/) with volume-wins
+  //     precedence: keep the live copy on the M1 volume if present, else pull
+  //     the last checkpoint from Supabase (fresh container / re-provisioned
+  //     service). This runs AFTER bootstrap rendered the console-authored
+  //     prompts, and never touches them. See ./provision/agent-memory.ts.
+  const memory = MemoryCheckpoint.fromEnv(env);
+  await memory.restore();
 
   // 2. Refresh the agent's manifest so the console sees the boot.
   //    Don't fail boot if Storage is briefly unavailable — log and move on.
@@ -56,7 +65,7 @@ async function main(): Promise<void> {
   // 4. Start the HTTP shim. /readyz won't return 200 until the gateway
   //    finishes its startup sidecars; Railway's healthcheck handles the
   //    wait.
-  const shim = await startShim(env, proc);
+  const shim = await startShim(env, proc, memory);
 
   // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
@@ -66,6 +75,9 @@ async function main(): Promise<void> {
     } catch (err) {
       log.warn("shim close failed", { err: String(err) });
     }
+    // Backstop: flush any agent-owned memory edited in the last turn before the
+    // container stops (the per-turn checkpoint is the primary path).
+    await memory.flush();
     await proc.stop();
     process.exit(0);
   };

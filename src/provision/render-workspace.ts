@@ -16,8 +16,12 @@ import { AgentStorage } from "./supabase-storage.js";
  *       AGENTS.md       ← from Storage memory/identity.md (the identity block)
  *       SOUL.md         ← assembled prompt (base + identity + capability fragments)
  *       TOOLS.md        ← from Storage memory/boot.md (operational guidance)
- *       playbook.md     ← from Storage memory/playbook.md (writable)
  *       skills/         ← populated by skill installs (see ../skills/install.ts)
+ *
+ * NOTE: playbook.md (and the agent-authored notes/ area) are NOT rendered here.
+ * They are agent-owned: restored with volume-wins precedence and mirrored back
+ * to Storage by MemoryCheckpoint (see ./agent-memory.ts). Rendering them from
+ * Storage unconditionally here would clobber the agent's live edits every boot.
  */
 
 export interface PromptBlobs {
@@ -27,21 +31,19 @@ export interface PromptBlobs {
   identity: string | null;
   /** Raw `memory/boot.md` from storage, or null if absent. */
   boot: string | null;
-  /** Raw `memory/playbook.md` from storage, or null if absent. */
-  playbook: string | null;
 }
 
-/** Fetch the four prompt blobs from storage in one pass. Bootstrap uses
- *  these to build the per-capability assembled SOUL.md. */
+/** Fetch the console-authored prompt blobs from storage in one pass. Bootstrap
+ *  uses these to build the per-capability assembled SOUL.md. (playbook.md is
+ *  agent-owned and handled by MemoryCheckpoint, not loaded here.) */
 export async function loadPromptBlobs(env: AgentEnv): Promise<PromptBlobs> {
   const storage = new AgentStorage(env);
-  const [base, identity, boot, playbook] = await Promise.all([
+  const [base, identity, boot] = await Promise.all([
     storage.downloadText("memory/system_prompt.md"),
     storage.downloadText("memory/identity.md"),
     storage.downloadText("memory/boot.md"),
-    storage.downloadText("memory/playbook.md"),
   ]);
-  return { base, identity, boot, playbook };
+  return { base, identity, boot };
 }
 
 export interface RenderWorkspaceInput {
@@ -68,9 +70,8 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
     blobs.boot ?? defaultTools(),
     "utf8",
   );
-  if (blobs.playbook != null) {
-    await writeFile(join(ws, "playbook.md"), blobs.playbook, "utf8");
-  }
+  // playbook.md is intentionally NOT written here — see the header note. It is
+  // restored (volume-wins) and mirrored by MemoryCheckpoint (./agent-memory.ts).
 
   const config = buildOpenclawConfig(env, ws);
   await writeFile(
@@ -85,7 +86,6 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
     has_base_prompt: blobs.base != null,
     has_identity: blobs.identity != null,
     has_boot: blobs.boot != null,
-    has_playbook: blobs.playbook != null,
     mcp_platform_attached: Boolean(env.PLATFORM_MCP_URL),
   });
 }
