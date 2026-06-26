@@ -132,7 +132,12 @@ export async function handleSendMessage(
     arr.push(a);
     attsByMessage.set(a.message_id, arr);
   }
-  const openaiMessages = historyToOpenaiMessages(history, attsByMessage, caps);
+  const openaiMessages = await historyToOpenaiMessages(
+    history,
+    attsByMessage,
+    caps,
+    db,
+  );
 
   // 5. Reserve an assistant row; we stream into it.
   const assistantMessageId = await db.insertMessage({
@@ -353,33 +358,88 @@ async function persistAttachments(
   return rows.length === 0 ? [] : await db.insertAttachments(rows);
 }
 
-function historyToOpenaiMessages(
+/** Skip any single image larger than this (raw bytes) — a multi-MB inline
+ *  data URL bloats the request and is rarely what the user wants read. */
+const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+/** Stop inlining once the per-turn budget across all images is exhausted, so
+ *  a conversation with many images can't blow up the upstream payload. */
+const MAX_TOTAL_INLINE_BYTES = 20 * 1024 * 1024;
+
+/** One part of an OpenAI multimodal `content` array. */
+type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+/**
+ * Build OpenAI-format messages from conversation history, inlining image
+ * attachments as base64 data URLs for multimodal models.
+ *
+ * Ports the image-inlining path from the Python agent: for each row that
+ * carries image attachments (and a multimodal model), download the bytes
+ * from the `chat-attachments` bucket and emit an OpenAI multimodal content
+ * array (`[{type:"text"}, {type:"image_url"}, …]`). Rows without inlineable
+ * images keep the plain-string content shape. Non-image files and images on
+ * text-only models are left out here — the caller already surfaced a
+ * `fallbackNote` warning for those.
+ */
+async function historyToOpenaiMessages(
   rows: MessageRow[],
   attachmentsByMessage: Map<string, AttachmentRow[]>,
   caps: ModelCapabilities,
-): Array<Record<string, unknown>> {
-  // Image inlining (base64 data URLs) from the Python version is omitted
-  // here — porting the SupabaseStorage download path is a separate chunk
-  // of work. Text history flows through unchanged.
+  db: MessagingDB,
+): Promise<Array<Record<string, unknown>>> {
   const out: Array<Record<string, unknown>> = [];
+  let inlinedBytes = 0;
   for (const r of rows) {
     if (r.system_generated) continue;
     if (r.role !== "user" && r.role !== "assistant" && r.role !== "system" && r.role !== "tool") {
       continue;
     }
     const text = (r.content ?? "").trim();
-    if (!text) continue;
     const msgAttachments = attachmentsByMessage.get(r.id) ?? [];
     const imageAtts = caps.multimodal
       ? msgAttachments.filter((a) => a.mime_type.startsWith("image/"))
       : [];
-    if (imageAtts.length > 0) {
-      // Multimodal placeholder: forward the text only for now. Inlining
-      // images requires the storage download port; tracked separately.
+
+    if (imageAtts.length === 0) {
+      if (!text) continue;
       out.push({ role: r.role, content: text });
       continue;
     }
-    out.push({ role: r.role, content: text });
+
+    // Multimodal: download each image and inline it as a data URL.
+    const parts: ContentPart[] = [];
+    if (text) parts.push({ type: "text", text });
+    for (const att of imageAtts) {
+      if (att.size_bytes > MAX_INLINE_IMAGE_BYTES) {
+        log.warn("skipping oversized inline image", {
+          storage_path: att.storage_path,
+          size_bytes: att.size_bytes,
+        });
+        continue;
+      }
+      if (inlinedBytes + att.size_bytes > MAX_TOTAL_INLINE_BYTES) {
+        log.warn("inline image budget exhausted; skipping remaining images");
+        break;
+      }
+      const base64 = await db.downloadAttachmentBase64(att.storage_path);
+      if (!base64) continue;
+      inlinedBytes += att.size_bytes;
+      parts.push({
+        type: "image_url",
+        image_url: { url: `data:${att.mime_type};base64,${base64}` },
+      });
+    }
+
+    // If every image was skipped/failed, fall back to plain text (or drop
+    // the row if it had no text either).
+    const hasImage = parts.some((p) => p.type === "image_url");
+    if (!hasImage) {
+      if (!text) continue;
+      out.push({ role: r.role, content: text });
+      continue;
+    }
+    out.push({ role: r.role, content: parts });
   }
   return out;
 }
