@@ -125,6 +125,17 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
         model: {
           primary: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
         },
+        // GPT-5 / Codex models otherwise stall on "plan-only" turns and
+        // rationalize NOT acting (e.g. falsely claiming they have no shell
+        // access) instead of calling `exec`. The strict-agentic contract
+        // makes openclaw reject plan-only completions, re-steer with an
+        // act-now nudge, and surface an explicit blocked state instead.
+        // openclaw scopes this to openai/openai-codex GPT-5-family runs and
+        // collapses it to "default" for every other provider/model, so it's
+        // a safe no-op for the Anthropic agents and only kicks in for the
+        // Codex-OAuth vessels where this regression shows up. Schema-valid
+        // for the pinned CLI (agents.defaults.embeddedPi.executionContract).
+        embeddedPi: { executionContract: "strict-agentic" },
       },
     },
     gateway: {
