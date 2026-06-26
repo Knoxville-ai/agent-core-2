@@ -4,6 +4,13 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 
 /**
+ * Storage bucket the console uploads chat attachments into (see
+ * knoxville-ai-console migration 0009_messages.sql). Distinct from the
+ * `agent-data` bucket used for agent config/memory blobs.
+ */
+const CHAT_ATTACHMENTS_BUCKET = "chat-attachments";
+
+/**
  * Thin Supabase client for the messaging layer.
  *
  * Bypasses RLS (service-role key), so every method assumes the caller
@@ -205,6 +212,39 @@ export class MessagingDB {
       return [];
     }
     return (data ?? []) as AttachmentRow[];
+  }
+
+  /**
+   * Download a chat attachment's raw bytes from the `chat-attachments`
+   * bucket and return them base64-encoded, ready to splice into an OpenAI
+   * `image_url` data URL. `storagePath` is the bucket-relative key stored on
+   * the message_attachments row (e.g.
+   * `orgs/{org}/conversations/{conv}/{rand}.png`).
+   *
+   * Returns null on any failure (missing object, transport error) so the
+   * caller can degrade gracefully to text-only rather than failing the turn.
+   */
+  async downloadAttachmentBase64(storagePath: string): Promise<string | null> {
+    const { data, error } = await this.client.storage
+      .from(CHAT_ATTACHMENTS_BUCKET)
+      .download(storagePath);
+    if (error || !data) {
+      log.warn("attachment download failed", {
+        storage_path: storagePath,
+        error: error?.message,
+      });
+      return null;
+    }
+    try {
+      const buf = Buffer.from(await data.arrayBuffer());
+      return buf.toString("base64");
+    } catch (err) {
+      log.warn("attachment decode failed", {
+        storage_path: storagePath,
+        err: String(err),
+      });
+      return null;
+    }
   }
 
   async listAttachmentsForMessages(
