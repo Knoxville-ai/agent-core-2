@@ -90,12 +90,13 @@ The shim reads/writes the same paths the console already manages:
 agent-data/orgs/{org}/agents/{uid}/
 ├── manifest.json          ← shim writes on every boot
 ├── memory/
-│   ├── system_prompt.md   ← shim → workspace/SOUL.md (read-only at boot)
-│   ├── identity.md        ← shim → workspace/AGENTS.md
-│   ├── boot.md            ← shim → workspace/TOOLS.md
-│   └── playbook.md        ← shim → workspace/playbook.md (writable by agent)
+│   ├── system_prompt.md   ← shim → workspace/SOUL.md   (CONSOLE-authored, never written back)
+│   ├── identity.md        ← shim → workspace/AGENTS.md  (CONSOLE-authored, never written back)
+│   ├── boot.md            ← shim → workspace/TOOLS.md   (CONSOLE-authored, never written back)
+│   └── playbook.md        ↔ workspace/playbook.md       (AGENT-owned: written back, volume wins on boot)
 ├── config/                ← reserved for future skill-level policies
-├── state/                 ← agent-owned; shim does not touch
+├── state/
+│   └── notes/*.md         ↔ workspace/notes/*.md        (AGENT-authored memory; written back — M2)
 └── logs/                  ← agent-owned; shim does not touch
 ```
 
@@ -123,6 +124,100 @@ The `manifest.json` written by v0.3 includes a `vessel` block:
 The `vessel.kind` field lets the console distinguish v0.2 and v0.3 agents
 when rendering role-specific UI (e.g. which filesystem roots the Files
 tab offers).
+
+## Persistence volume (Railway) — Milestone 1
+
+Railway's container filesystem is **ephemeral**: every restart/redeploy
+recreates the container from the image and wipes the writable layer. Without a
+volume, openclaw's accumulated state — conversation transcripts, session store,
+and the memory index — is gone on every boot, so the agent has no memory of
+prior conversations.
+
+To fix this, the console attaches a **Railway volume mounted at the whole
+`OPENCLAW_STATE_DIR` (`/home/agent/.openclaw`)** when it creates the agent's
+service (see `provisioning.ts` → `volumeCreate`). The whole state dir is the
+mount because openclaw scatters its durable state as siblings of the rendered
+workspace, and Railway allows only one volume (one mount path) per service:
+
+```
+/home/agent/.openclaw/                 ← Railway volume (survives restarts)
+├── agents/<id>/sessions/   ← openclaw: session store + JSONL transcripts  [DURABLE]
+├── memory/<id>.sqlite      ← openclaw: memory index                       [DURABLE]
+├── credentials/            ← openclaw: oauth (also mirrored to Storage)    [DURABLE]
+├── openclaw.json           ← shim: regenerated every boot                 [re-derived]
+├── workspace/SOUL.md       ← shim ← Storage memory/system_prompt.md       [re-derived]
+├── workspace/AGENTS.md     ← shim ← Storage memory/identity.md            [re-derived]
+├── workspace/TOOLS.md      ← shim ← Storage memory/boot.md                [re-derived]
+├── workspace/playbook.md   ← shim ← Storage memory/playbook.md            [re-derived]
+├── workspace/skills/       ← bundle: wiped + force-reinstalled every boot [re-derived]
+└── tmp/                    ← private TMPDIR, recreated                     [re-derived]
+```
+
+**Source-of-truth precedence is unchanged.** Even though `workspace/*.md` and
+`workspace/skills/` now physically live on the volume, the boot pipeline still
+re-renders the markdown from Supabase Storage and wipes + force-reinstalls
+skills from the bundle on **every** boot, unconditionally. So Storage stays
+authoritative for console-authored prompts and the bundle stays authoritative
+for skills — the volume cannot make them stale. The volume's job is purely to
+persist openclaw's own `agents/*/sessions/` + `memory/*.sqlite`.
+
+> **M1 scope:** agent edits to `playbook.md` / `workspace/*.md` are still
+> overwritten by the boot re-render in M1 — the volume does not preserve them.
+> Milestone 2 adds Supabase write-back + a precedence rule that makes
+> `playbook.md` (and a dedicated agent-authored notes namespace) survive.
+
+**Permissions.** Railway mounts the volume **root-owned and empty**, but the
+agent process runs as `USER agent` (uid 1001) and can neither write to nor
+chown a root-owned mount. The container therefore starts as **root** under tini
+so `entrypoint.sh` can `chown` the mount to the agent uid (recursively on first
+boot only, guarded by a `.knox-volume-initialized` sentinel that lives on the
+volume; a cheap top-level chown thereafter), then drops to the agent uid via
+`gosu` before exec'ing Node. At boot the Node process asserts the state dir is
+writable (`assertStateDirWritable`) and **crashes loudly** if it is not — a
+volume the process can't write to is worse than none.
+
+**Console / Railway notes.** One volume per service, region-pinned to the
+service's environment. The volume does **not** follow an agent that is
+re-provisioned onto a new service (that gap is what M2's Storage write-back
+covers). Existing agents are **not** backfilled retroactively — see the console
+repo's follow-up note.
+
+## Agent memory write-back (Supabase) — Milestone 2
+
+The M1 volume gives continuity across normal restarts but does **not** survive a
+re-provision onto a new service (the volume doesn't follow), disaster recovery,
+or give the console any visibility into agent memory. M2 adds a checkpoint-based
+write-back of the agent's **own** markdown to Supabase Storage, plus a boot-side
+restore. Implemented in `src/provision/agent-memory.ts` (`MemoryCheckpoint`).
+
+**What round-trips (agent-owned only):**
+
+| On disk (`workspace/`) | Supabase key | Notes |
+| --- | --- | --- |
+| `playbook.md` | `memory/playbook.md` | Agent-writable. Console may seed it, but the agent's runtime edits are authoritative. |
+| `notes/*.md` | `state/notes/*.md` | New agent-authored notes area, under the reserved `state/` namespace. |
+
+**What is NEVER written back:** `system_prompt.md`, `identity.md`, `boot.md` are
+console-authored inputs. `MemoryCheckpoint` only ever uploads/deletes the two
+agent-owned keys above (there is no code path that writes a console key, and a
+unit test asserts it), so write-back can never corrupt console config. Boot keeps
+re-rendering SOUL/AGENTS/TOOLS from Storage unconditionally.
+
+**Trigger:** a checkpoint fires at the end of every conversation turn (the
+`finally` in `src/shim/routes-messages.ts`) — a race-free quiet point after any
+tool-driven file writes have settled — plus a flush on SIGTERM. It is **not** a
+real-time mirror; the M1 volume already covers normal restarts. A content-hash
+compare means only genuine edits upload (no echo of the files boot just wrote),
+and local deletions are mirrored to Storage (scoped to the agent-owned keys).
+
+**Boot precedence (volume wins):** for `playbook.md` and `notes/*.md`, the copy
+on the M1 volume wins if present (live state); the Supabase copy is restored only
+when the file is absent (fresh container / re-provisioned service / empty volume).
+Boot never downloads Storage over a present local copy. **Consequence:** a console
+edit to `memory/playbook.md` only reaches an agent on a fresh volume — for an agent
+with an existing volume, its own copy wins. Openclaw's high-churn session
+transcripts + memory index are **not** mirrored to Supabase; they stay on the
+volume.
 
 ## HTTP surface (port 8080)
 

@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import type { GatewayProcess } from "../openclaw/gateway-process.js";
+import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, verifyBearer } from "./auth.js";
 import { CancelRegistry } from "./cancel-registry.js";
 import { OAuthSessionManager } from "./oauth-session.js";
@@ -31,6 +32,7 @@ interface ServerHandle {
 export function startShim(
   env: AgentEnv,
   gateway: GatewayProcess,
+  memory: MemoryCheckpoint,
 ): Promise<ServerHandle> {
   const db = new MessagingDB(env);
   const cancels = new CancelRegistry();
@@ -42,7 +44,7 @@ export function startShim(
   };
 
   const server = createServer((req, res) => {
-    void route(req, res, env, db, cancels, oauth).catch((err) => {
+    void route(req, res, env, db, cancels, oauth, memory).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
         if (!res.headersSent) {
@@ -90,6 +92,7 @@ async function route(
   db: MessagingDB,
   cancels: CancelRegistry,
   oauth: OAuthDeps,
+  memory: MemoryCheckpoint,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -143,6 +146,7 @@ async function route(
         env,
         db,
         cancels,
+        memory,
       });
     }
     if (sub === "interrupt") {
