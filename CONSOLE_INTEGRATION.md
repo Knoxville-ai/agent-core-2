@@ -124,6 +124,63 @@ The `vessel.kind` field lets the console distinguish v0.2 and v0.3 agents
 when rendering role-specific UI (e.g. which filesystem roots the Files
 tab offers).
 
+## Persistence volume (Railway) — Milestone 1
+
+Railway's container filesystem is **ephemeral**: every restart/redeploy
+recreates the container from the image and wipes the writable layer. Without a
+volume, openclaw's accumulated state — conversation transcripts, session store,
+and the memory index — is gone on every boot, so the agent has no memory of
+prior conversations.
+
+To fix this, the console attaches a **Railway volume mounted at the whole
+`OPENCLAW_STATE_DIR` (`/home/agent/.openclaw`)** when it creates the agent's
+service (see `provisioning.ts` → `volumeCreate`). The whole state dir is the
+mount because openclaw scatters its durable state as siblings of the rendered
+workspace, and Railway allows only one volume (one mount path) per service:
+
+```
+/home/agent/.openclaw/                 ← Railway volume (survives restarts)
+├── agents/<id>/sessions/   ← openclaw: session store + JSONL transcripts  [DURABLE]
+├── memory/<id>.sqlite      ← openclaw: memory index                       [DURABLE]
+├── credentials/            ← openclaw: oauth (also mirrored to Storage)    [DURABLE]
+├── openclaw.json           ← shim: regenerated every boot                 [re-derived]
+├── workspace/SOUL.md       ← shim ← Storage memory/system_prompt.md       [re-derived]
+├── workspace/AGENTS.md     ← shim ← Storage memory/identity.md            [re-derived]
+├── workspace/TOOLS.md      ← shim ← Storage memory/boot.md                [re-derived]
+├── workspace/playbook.md   ← shim ← Storage memory/playbook.md            [re-derived]
+├── workspace/skills/       ← bundle: wiped + force-reinstalled every boot [re-derived]
+└── tmp/                    ← private TMPDIR, recreated                     [re-derived]
+```
+
+**Source-of-truth precedence is unchanged.** Even though `workspace/*.md` and
+`workspace/skills/` now physically live on the volume, the boot pipeline still
+re-renders the markdown from Supabase Storage and wipes + force-reinstalls
+skills from the bundle on **every** boot, unconditionally. So Storage stays
+authoritative for console-authored prompts and the bundle stays authoritative
+for skills — the volume cannot make them stale. The volume's job is purely to
+persist openclaw's own `agents/*/sessions/` + `memory/*.sqlite`.
+
+> **M1 scope:** agent edits to `playbook.md` / `workspace/*.md` are still
+> overwritten by the boot re-render in M1 — the volume does not preserve them.
+> Milestone 2 adds Supabase write-back + a precedence rule that makes
+> `playbook.md` (and a dedicated agent-authored notes namespace) survive.
+
+**Permissions.** Railway mounts the volume **root-owned and empty**, but the
+agent process runs as `USER agent` (uid 1001) and can neither write to nor
+chown a root-owned mount. The container therefore starts as **root** under tini
+so `entrypoint.sh` can `chown` the mount to the agent uid (recursively on first
+boot only, guarded by a `.knox-volume-initialized` sentinel that lives on the
+volume; a cheap top-level chown thereafter), then drops to the agent uid via
+`gosu` before exec'ing Node. At boot the Node process asserts the state dir is
+writable (`assertStateDirWritable`) and **crashes loudly** if it is not — a
+volume the process can't write to is worse than none.
+
+**Console / Railway notes.** One volume per service, region-pinned to the
+service's environment. The volume does **not** follow an agent that is
+re-provisioned onto a new service (that gap is what M2's Storage write-back
+covers). Existing agents are **not** backfilled retroactively — see the console
+repo's follow-up note.
+
 ## HTTP surface (port 8080)
 
 Identical to v0.2 for the endpoints the console actually calls:

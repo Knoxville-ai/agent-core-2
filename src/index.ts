@@ -4,6 +4,7 @@ import { log } from "./log.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
 import { refreshManifest } from "./provision/manifest.js";
 import { restoreOAuthStore } from "./provision/oauth-store.js";
+import { assertStateDirWritable } from "./provision/state-dir.js";
 import { startShim } from "./shim/server.js";
 
 async function main(): Promise<void> {
@@ -16,6 +17,12 @@ async function main(): Promise<void> {
     http_port: env.AGENT_HTTP_PORT,
     gateway_port: env.OPENCLAW_GATEWAY_PORT,
   });
+
+  // 0. Fail loud if the persistence volume isn't writable. On Railway,
+  //    OPENCLAW_STATE_DIR is a mounted volume that the entrypoint chowns to
+  //    the agent uid before dropping privileges; a non-writable mount would
+  //    silently lose all session/memory continuity, so we crash instead.
+  assertStateDirWritable(env.OPENCLAW_STATE_DIR);
 
   // 1. Bundle-driven bootstrap: fetch capabilities, install skills,
   //    validate env, assemble SOUL.md, render the openclaw workspace.

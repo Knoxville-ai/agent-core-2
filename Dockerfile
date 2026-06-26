@@ -24,8 +24,12 @@ ENV NODE_ENV=production \
 # bsdextrautils provides util-linux `script`, which the shim uses to
 # allocate a PTY when driving OpenClaw's interactive `models auth login`
 # (model-provider OAuth). See src/shim/oauth-session.ts.
+#
+# gosu lets the entrypoint start as root (to chown the Railway volume that
+# mounts root-owned + empty over OPENCLAW_STATE_DIR) and then drop to the
+# agent uid before exec'ing the Node process. See entrypoint.sh.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl tini bsdextrautils \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini bsdextrautils gosu \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 agent \
  && useradd  --system --uid 1001 --gid 1001 --create-home --home-dir /home/agent --shell /bin/bash agent \
@@ -67,7 +71,12 @@ ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global \
 RUN mkdir -p /home/agent/.npm-global \
  && chown -R agent:agent /home/agent
 
-USER agent
+# NOTE: we deliberately do NOT `USER agent` here. Railway mounts the
+# persistence volume root-owned + empty over OPENCLAW_STATE_DIR, and a
+# non-root process can neither write to nor chown it. The container starts
+# as root so entrypoint.sh can chown the mount, then drops to the agent uid
+# via `gosu` before exec'ing Node. tini (PID 1) still reaps the openclaw
+# grandchild on SIGTERM regardless of which uid runs the Node process.
 EXPOSE 8080
 
 # Tini reaps the openclaw child cleanly when Railway sends SIGTERM.
