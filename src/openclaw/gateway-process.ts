@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { ensureOpenclawTempDir } from "./temp-dir.js";
 
 /**
  * Spawns `openclaw gateway` as a child process. Two env semantics matter
@@ -40,11 +41,18 @@ export class GatewayProcess {
     const stateDir = this.env.OPENCLAW_STATE_DIR;
     const userHome = dirname(stateDir);
     const configPath = join(stateDir, "openclaw.json");
+    // Private, agent-owned TMPDIR so openclaw's temp-dir fallback doesn't
+    // land on the shared /tmp/openclaw-<uid> path and crash with "Unsafe
+    // fallback OpenClaw temp dir". The gateway passes its env down to the
+    // subprocesses the agent spawns (e.g. `openclaw skills install`), so
+    // setting it here fixes those too. See ./temp-dir.ts.
+    const tempDir = ensureOpenclawTempDir(stateDir);
     log.info("spawning openclaw gateway", {
       port,
       stateDir,
       userHome,
       configPath,
+      tempDir,
     });
 
     const child = spawn("openclaw", ["gateway", "--port", port, "--verbose"], {
@@ -54,6 +62,7 @@ export class GatewayProcess {
         OPENCLAW_HOME: userHome,
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
+        TMPDIR: tempDir,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
