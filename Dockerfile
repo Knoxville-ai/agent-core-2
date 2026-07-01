@@ -52,6 +52,45 @@ COPY --chown=agent:agent tsconfig.json ./
 COPY --chown=agent:agent src ./src
 RUN npm run build && npm prune --omit=dev
 
+# --- Python toolchain for skills that declare `install.uv` -------------------
+# node:24-bookworm-slim ships no Python, so skills whose openclaw frontmatter
+# declares `requires.bins: [python3]` + `install.uv: [...]` (e.g.
+# drivethru-graphic-artist: Pillow/rembg/onnxruntime) cannot run in the base
+# image. Provide a self-contained Python runtime here:
+#
+#   * apt `python3` + `python3-venv` — the interpreter and venv module.
+#   * A dedicated venv at /opt/skills-venv holding `uv` plus the skill's
+#     libraries, pre-installed at build time so boot is fast and works even
+#     when the network policy blocks outbound PyPI (skills are wiped +
+#     reinstalled every boot; we don't want a multi-hundred-MB re-download each
+#     time). `uv` is present so openclaw's boot-time `install.uv` step has its
+#     declared installer on PATH.
+#
+# The venv lives in /opt (outside /home/agent) and is world-readable, so the
+# unprivileged agent uid can execute it without a chown. Prepending its bin to
+# PATH (below) makes bare `python3` / `uv` resolve here, so the skill's
+# `python3 scripts/compose_mockup.py ...` finds the libraries.
+#
+# NOTE: this adds ~1 GB to the image (onnxruntime + scipy + scikit-image +
+# opencv + numba pull a lot of transitive weight). If image size matters more
+# than boot latency, drop the `uv pip install` line and let openclaw's
+# `install.uv` fetch the libraries at boot instead — that keeps the image
+# slim but needs outbound PyPI access on every boot.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/skills-venv \
+ && /opt/skills-venv/bin/pip install --no-cache-dir --upgrade pip uv \
+ && /opt/skills-venv/bin/uv pip install --no-cache \
+      --python /opt/skills-venv/bin/python \
+      'Pillow>=10.3,<12' 'rembg>=2.0.56,<3' 'onnxruntime>=1.18,<2'
+
+# rembg downloads its ~170 MB u2net model on first use. Point its cache at the
+# Railway persistence volume (OPENCLAW_STATE_DIR) so the one-time download
+# survives restarts/redeploys instead of re-fetching into an ephemeral $HOME.
+# entrypoint.sh creates + chowns this dir to the agent uid before dropping privs.
+ENV U2NET_HOME=/home/agent/.openclaw/u2net
+
 # Drop runtime entrypoint last so iteration on it doesn't bust the npm layer.
 COPY --chown=agent:agent entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
@@ -62,7 +101,7 @@ RUN chmod +x /app/entrypoint.sh
 # Set this after all build-time `npm install -g` calls so they continue
 # to land in /usr/local — only runtime installs use the user prefix.
 ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global \
-    PATH=/home/agent/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/home/agent/.npm-global/bin:/opt/skills-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Build-time npm ran as root with HOME=/home/agent, so the cache + any
 # npm-touched dirs under /home/agent are root-owned. Reset ownership to
