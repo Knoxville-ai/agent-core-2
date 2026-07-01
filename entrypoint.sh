@@ -50,7 +50,14 @@ chmod 700 "${TMPDIR}"
 
 # These dirs were just (re)created as root; hand them to the agent. Cheap —
 # they are empty or tiny relative to the durable session/memory trees above.
-chown -R agent:agent "${OPENCLAW_STATE_DIR}/workspace/skills" "${TMPDIR}"
+#
+# Chown the whole `workspace` tree, not just `workspace/skills`: Node (running
+# as the agent uid) wipes + reinstalls skills/ every boot via `rm -rf`, and the
+# final rmdir of workspace/skills needs write permission on the PARENT
+# `workspace` dir. `mkdir -p` above created `workspace` root-owned, so without
+# this the agent hits `EACCES: rmdir workspace/skills` and crash-loops. Running
+# this every boot also self-heals a volume left root-owned by an earlier boot.
+chown -R agent:agent "${OPENCLAW_STATE_DIR}/workspace" "${TMPDIR}"
 
 # Drop privileges to the agent uid and hand off to Node. exec keeps tini as the
 # parent (PID 1) so SIGTERM still reaches Node and the openclaw grandchild.
