@@ -238,6 +238,28 @@ state dir itself is **not** browsable, since `openclaw.json` there holds the
 LLM API key and the OAuth-store pointer. Symlinks are resolved (`realpath`)
 and re-checked against the allowlist so a link can't escape a root.
 
+## Image attachments on disk
+
+The console uploads chat images to the `chat-attachments` bucket and sends
+their `storage_path`s on the message body. The shim does **two** things with
+each image attachment when it builds the upstream turn
+(`historyToOpenaiMessages` in `src/shim/routes-messages.ts`):
+
+1. **Materializes it to the workspace filesystem** at
+   `<OPENCLAW_STATE_DIR>/workspace/attachments/<conversationId>/<attachmentId>__<name>`,
+   idempotently (a file already on disk with the expected size is not
+   re-downloaded). This happens for **every** image, on multimodal *and*
+   text-only models — a deterministic compositing skill doesn't need vision,
+   it needs a path.
+2. **Inlines it as a base64 `image_url`** for multimodal models so the model
+   can see it, subject to the existing per-image / per-turn byte budgets.
+
+The upstream message then carries a text part telling the model exactly where
+each image was saved, so skills like `drivethru-graphic-artist` can be handed
+real file paths instead of the agent asking the user to re-upload. Because the
+files land under `workspace/`, they are also visible in the console Files tab
+(the `/files/*` allowlist already covers that root).
+
 ## Migration strategy
 
 The v0.3 image deploys side-by-side with v0.2:

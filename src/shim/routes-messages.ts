@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { basename, extname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
@@ -134,11 +136,18 @@ export async function handleSendMessage(
     arr.push(a);
     attsByMessage.set(a.message_id, arr);
   }
+  // openclaw's tools (bash/python inside skills) run against the rendered
+  // workspace, so materialize image attachments there and hand the model the
+  // on-disk paths. Without this, images only exist as inlined base64 in the
+  // prompt — a deterministic compositing skill has no file to read.
+  const workspaceDir = join(env.OPENCLAW_STATE_DIR, "workspace");
   const openaiMessages = await historyToOpenaiMessages(
     history,
     attsByMessage,
     caps,
     db,
+    workspaceDir,
+    conversationId,
   );
 
   // 5. Reserve an assistant row; we stream into it.
@@ -371,6 +380,10 @@ const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 /** Stop inlining once the per-turn budget across all images is exhausted, so
  *  a conversation with many images can't blow up the upstream payload. */
 const MAX_TOTAL_INLINE_BYTES = 20 * 1024 * 1024;
+/** Cap for writing an image to the workspace filesystem. Higher than the
+ *  inline caps: a skill can composite a high-res source we'd never inline
+ *  into the prompt, so being on disk is worth more headroom. */
+const MAX_DISK_IMAGE_BYTES = 64 * 1024 * 1024;
 
 /** One part of an OpenAI multimodal `content` array. */
 type ContentPart =
@@ -378,23 +391,39 @@ type ContentPart =
   | { type: "image_url"; image_url: { url: string } };
 
 /**
- * Build OpenAI-format messages from conversation history, inlining image
- * attachments as base64 data URLs for multimodal models.
+ * Build OpenAI-format messages from conversation history.
  *
- * Ports the image-inlining path from the Python agent: for each row that
- * carries image attachments (and a multimodal model), download the bytes
- * from the `chat-attachments` bucket and emit an OpenAI multimodal content
- * array (`[{type:"text"}, {type:"image_url"}, …]`). Rows without inlineable
- * images keep the plain-string content shape. Non-image files and images on
- * text-only models are left out here — the caller already surfaced a
+ * Two independent things happen to image attachments:
+ *
+ *   1. **Materialize to disk** — every image is written to
+ *      `workspace/attachments/<conversationId>/` (idempotently) so openclaw's
+ *      tools and skills can read it by path. The on-disk paths are then
+ *      described to the model in a text part so it can hand them to a
+ *      deterministic compositing skill (e.g. drivethru-graphic-artist)
+ *      instead of asking the user to re-upload. This happens regardless of
+ *      whether the model is multimodal — a compositor doesn't need vision.
+ *
+ *   2. **Inline as base64** — for multimodal models each image is also
+ *      emitted as an `image_url` data URL so the model can *see* it, subject
+ *      to the per-image and per-turn byte budgets.
+ *
+ * Rows with no image attachments keep the plain-string content shape.
+ * Non-image files are left out here — the caller already surfaced a
  * `fallbackNote` warning for those.
  */
-async function historyToOpenaiMessages(
+export async function historyToOpenaiMessages(
   rows: MessageRow[],
   attachmentsByMessage: Map<string, AttachmentRow[]>,
   caps: ModelCapabilities,
   db: MessagingDB,
+  workspaceDir: string,
+  conversationId: string,
 ): Promise<Array<Record<string, unknown>>> {
+  const attachDir = join(
+    workspaceDir,
+    "attachments",
+    conversationId.replace(/[^A-Za-z0-9._-]/g, "_"),
+  );
   const out: Array<Record<string, unknown>> = [];
   let inlinedBytes = 0;
   for (const r of rows) {
@@ -404,9 +433,9 @@ async function historyToOpenaiMessages(
     }
     const text = (r.content ?? "").trim();
     const msgAttachments = attachmentsByMessage.get(r.id) ?? [];
-    const imageAtts = caps.multimodal
-      ? msgAttachments.filter((a) => a.mime_type.startsWith("image/"))
-      : [];
+    const imageAtts = msgAttachments.filter((a) =>
+      a.mime_type.startsWith("image/"),
+    );
 
     if (imageAtts.length === 0) {
       if (!text) continue;
@@ -414,10 +443,17 @@ async function historyToOpenaiMessages(
       continue;
     }
 
-    // Multimodal: download each image and inline it as a data URL.
-    const parts: ContentPart[] = [];
-    if (text) parts.push({ type: "text", text });
+    const savedPaths: Array<{ att: AttachmentRow; localPath: string }> = [];
+    const imageParts: ContentPart[] = [];
     for (const att of imageAtts) {
+      // 1. Ensure the image is on disk for skills to read by path.
+      const materialized = await materializeImage(att, attachDir, db);
+      if (materialized) {
+        savedPaths.push({ att, localPath: materialized.localPath });
+      }
+
+      // 2. Additionally inline it for multimodal models to see.
+      if (!caps.multimodal) continue;
       if (att.size_bytes > MAX_INLINE_IMAGE_BYTES) {
         log.warn("skipping oversized inline image", {
           storage_path: att.storage_path,
@@ -429,26 +465,128 @@ async function historyToOpenaiMessages(
         log.warn("inline image budget exhausted; skipping remaining images");
         break;
       }
-      const base64 = await db.downloadAttachmentBase64(att.storage_path);
+      const base64 =
+        materialized?.base64 ??
+        (await db.downloadAttachmentBase64(att.storage_path));
       if (!base64) continue;
       inlinedBytes += att.size_bytes;
-      parts.push({
+      imageParts.push({
         type: "image_url",
         image_url: { url: `data:${att.mime_type};base64,${base64}` },
       });
     }
 
-    // If every image was skipped/failed, fall back to plain text (or drop
-    // the row if it had no text either).
-    const hasImage = parts.some((p) => p.type === "image_url");
-    if (!hasImage) {
-      if (!text) continue;
-      out.push({ role: r.role, content: text });
+    // No image was inlined (text-only model, or all inline attempts skipped).
+    // Fold any on-disk path note into the plain-string content so the model
+    // can still act on the files, and drop the row only if nothing is left.
+    if (imageParts.length === 0) {
+      const note = savedPaths.length ? buildAttachmentPathNote(savedPaths) : "";
+      const merged = [text, note].filter(Boolean).join("\n\n");
+      if (!merged) continue;
+      out.push({ role: r.role, content: merged });
       continue;
     }
+
+    // At least one inlined image → multimodal content array.
+    const parts: ContentPart[] = [];
+    if (text) parts.push({ type: "text", text });
+    if (savedPaths.length) {
+      parts.push({ type: "text", text: buildAttachmentPathNote(savedPaths) });
+    }
+    parts.push(...imageParts);
     out.push({ role: r.role, content: parts });
   }
   return out;
+}
+
+/**
+ * Write an image attachment into the workspace so openclaw tools/skills can
+ * read it by path. Idempotent: if a file of the expected size is already
+ * there (e.g. materialized on a previous turn), we skip the re-download.
+ *
+ * Returns the absolute local path plus the base64 bytes when we had to
+ * download them (so the caller can reuse them for inlining without a second
+ * fetch), or null if the image was too large or the download/write failed.
+ */
+async function materializeImage(
+  att: AttachmentRow,
+  dir: string,
+  db: MessagingDB,
+): Promise<{ localPath: string; base64: string | null } | null> {
+  const localPath = join(dir, attachmentFileName(att));
+
+  if (await fileHasSize(localPath, att.size_bytes)) {
+    return { localPath, base64: null };
+  }
+  if (att.size_bytes > MAX_DISK_IMAGE_BYTES) {
+    log.warn("skipping on-disk materialization of oversized image", {
+      storage_path: att.storage_path,
+      size_bytes: att.size_bytes,
+    });
+    return null;
+  }
+
+  const base64 = await db.downloadAttachmentBase64(att.storage_path);
+  if (!base64) return null;
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(localPath, Buffer.from(base64, "base64"));
+  } catch (err) {
+    log.warn("failed to write attachment to workspace", {
+      local_path: localPath,
+      err: String(err),
+    });
+    return null;
+  }
+  return { localPath, base64 };
+}
+
+/** A collision-free, path-safe filename for an attachment on disk. The row id
+ *  (a UUID) guarantees uniqueness; the sanitized original name keeps it
+ *  recognizable and preserves an extension the compositor can sniff. */
+function attachmentFileName(att: AttachmentRow): string {
+  const base = att.original_name ? basename(att.original_name) : "image";
+  let safe = base.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_");
+  if (!extname(safe)) safe += extForMime(att.mime_type);
+  return `${att.id}__${safe}`;
+}
+
+/** Map an image mime type to a file extension for names that lack one. */
+function extForMime(mime: string): string {
+  const sub = (mime.split("/")[1] ?? "").toLowerCase();
+  if (!sub) return "";
+  if (sub === "jpeg") return ".jpg";
+  if (sub === "svg+xml") return ".svg";
+  return "." + sub.replace(/[^a-z0-9]/g, "");
+}
+
+/** True if `path` exists, is a regular file, and matches the expected size —
+ *  our idempotency check for "already materialized this attachment". */
+async function fileHasSize(path: string, size: number): Promise<boolean> {
+  try {
+    const s = await stat(path);
+    return s.isFile() && s.size === size;
+  } catch {
+    return false;
+  }
+}
+
+/** A text block, addressed to the model, listing where each image was saved
+ *  on disk so it can pass real paths to compositing/graphic skills. */
+function buildAttachmentPathNote(
+  saved: Array<{ att: AttachmentRow; localPath: string }>,
+): string {
+  const lines = saved.map(({ att, localPath }) => {
+    const name = att.original_name ?? basename(localPath);
+    return `  - ${name} → ${localPath}`;
+  });
+  return (
+    "The image attachment(s) on this message are saved on the local filesystem " +
+    "so tools and skills can read them directly (no re-upload needed):\n" +
+    lines.join("\n") +
+    "\nWhen a skill needs image file paths (e.g. the drivethru-graphic-artist " +
+    "compositor), pass these paths."
+  );
 }
 
 function fallbackNote(
