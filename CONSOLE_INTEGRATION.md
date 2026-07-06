@@ -70,6 +70,38 @@ When unset, the agent is purely inbound: no outbound A2A, no bundle, no
 capability-driven skill installs. The vessel still boots with whatever
 prompt blobs the console uploaded to Storage.
 
+### Skill boot list (`config/skills.json`)
+
+Independent of the Drive Through bundle, the console's agent-skills UI
+manages a per-agent **boot list** at
+`agent-data/orgs/{org}/agents/{uid}/config/skills.json`
+(writer: console `src/lib/skills.ts#writeSkillBootList`). Shape:
+
+```json
+{ "version": 1, "skills": [ { "slug": "web-search", "version": "0.2.0", "addedAt": "…" } ] }
+```
+
+On **every boot** the vessel reads this file and runs
+`openclaw skills install <slug>` for each entry (adding
+`--version <version>` when the entry pins one) into `workspace/skills/`.
+This is what makes a console-added skill **survive container restarts** —
+the same wipe-and-reconcile that rebuilds bundle skills would otherwise
+drop it. Semantics:
+
+- **Additive** to the bundle, sharing the single boot-time wipe. A slug
+  already installed by the bundle is skipped (the bundle's pinned version
+  wins).
+- **Soft-fail per skill:** a bad/typo'd slug is logged and skipped, not
+  fatal — unlike bundle skills (provisioning-critical, fail-loud), the
+  boot list is user-curated and one bad entry must not brick the agent.
+- Read via the service-role Storage client, so it works even for a
+  vanilla vessel with no `PLATFORM_MCP_URL` / bundle.
+
+A skill that is in neither the bundle nor `config/skills.json` is **not**
+persisted — installing one ad-hoc at runtime (or having the agent install
+it mid-conversation) will not survive the next restart. Add it to the
+console boot list to make it stick.
+
 ## Bring your own agent (BYOA)
 
 A third party can list a self-hosted drive thru whose agent runs on their

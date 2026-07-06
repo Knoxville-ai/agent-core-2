@@ -10,11 +10,19 @@ import type { InstalledSkill, SkillResolver } from "./resolver.js";
  * list of installed skills keyed by ref so the caller can wire prompt
  * assembly + manifest annotations.
  *
- * Reconcile semantics: `workspace/skills/` is wiped before installs run
- * so any skill that was previously installed but is no longer declared
- * by the current bundle disappears. The bundle is the desired state;
- * stale installs are a footgun (the LLM still sees them in TOOLS.md).
+ * Reconcile semantics: `workspace/skills/` is wiped (once, by the caller via
+ * `resetWorkspaceSkills`) before any installs run, so a skill that was
+ * previously installed but is no longer declared by the current bundle OR the
+ * console boot list disappears. Those two sources are the desired state; stale
+ * installs are a footgun (the LLM still sees them in TOOLS.md).
  */
+
+/** Wipe + recreate the workspace skills dir. Call ONCE per boot before any
+ *  installs so bundle + boot-list skills reconcile from a clean slate. */
+export async function resetWorkspaceSkills(workspaceSkillsDir: string): Promise<void> {
+  await rm(workspaceSkillsDir, { recursive: true, force: true });
+  await mkdir(workspaceSkillsDir, { recursive: true });
+}
 
 export class SkillVersionConflictError extends Error {
   constructor(
@@ -40,11 +48,8 @@ export async function installBundleSkills(
   workspaceSkillsDir: string,
   resolver: SkillResolver,
 ): Promise<InstalledSkill[]> {
-  // Reconcile: nuke the workspace skills directory before installing.
-  // openclaw's installer writes directly into it, so an unreferenced
-  // skill from a previous boot would otherwise hang around.
-  await rm(workspaceSkillsDir, { recursive: true, force: true });
-  await mkdir(workspaceSkillsDir, { recursive: true });
+  // NOTE: the caller must have already called `resetWorkspaceSkills` — the wipe
+  // is shared with the boot-list install so both reconcile from one clean slate.
 
   // 1. Collect every (ref, version) pair, keyed by ref. Two different
   //    versions of the same ref is a fatal config error.
@@ -93,5 +98,47 @@ export async function installBundleSkills(
     count: installed.length,
     skills: installed.map((s) => `${s.ref}@${s.version} (${s.source})`),
   });
+  return installed;
+}
+
+/**
+ * Install the console-managed boot list (`config/skills.json`) into the
+ * already-reset workspace skills dir. Additive to the bundle install:
+ *
+ *   - Skips any ref already installed by the bundle (`opts.skip`) so a pinned
+ *     bundle version wins over an unpinned boot-list entry, and de-dupes within
+ *     the list itself.
+ *   - Soft-fails PER SKILL: a bad user-added slug is logged and skipped rather
+ *     than crashing the whole boot. This is deliberately gentler than the
+ *     bundle install (which fails loud) — the boot list is user-curated via the
+ *     console UI, and one typo'd slug must not brick an otherwise-healthy agent.
+ */
+export async function installBootListSkills(
+  requirements: SkillRequirement[],
+  workspaceSkillsDir: string,
+  resolver: SkillResolver,
+  opts: { skip: Set<string> },
+): Promise<InstalledSkill[]> {
+  const installed: InstalledSkill[] = [];
+  const seen = new Set(opts.skip);
+  for (const req of requirements) {
+    if (seen.has(req.ref)) continue;
+    seen.add(req.ref);
+    try {
+      installed.push(await resolver.install(req, workspaceSkillsDir));
+    } catch (err) {
+      log.error("boot-list skill install failed (skipped)", {
+        ref: req.ref,
+        version: req.version || "(latest)",
+        err: String(err),
+      });
+    }
+  }
+  if (installed.length > 0) {
+    log.info("boot-list skills installed", {
+      count: installed.length,
+      skills: installed.map((s) => (s.version ? `${s.ref}@${s.version}` : s.ref)),
+    });
+  }
   return installed;
 }

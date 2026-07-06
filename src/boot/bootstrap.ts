@@ -16,8 +16,13 @@ import {
   loadPromptBlobs,
   renderWorkspace,
 } from "../provision/render-workspace.js";
+import { loadBootListSkills } from "../skills/boot-list.js";
 import { ClawhubSkillResolver } from "../skills/clawhub.js";
-import { installBundleSkills } from "../skills/install.js";
+import {
+  installBootListSkills,
+  installBundleSkills,
+  resetWorkspaceSkills,
+} from "../skills/install.js";
 import type { InstalledSkill, SkillResolver } from "../skills/resolver.js";
 
 /**
@@ -50,6 +55,13 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
 
   const workspaceSkillsDir = join(env.OPENCLAW_STATE_DIR, "workspace", "skills");
 
+  // Reconcile skills from scratch every boot: wipe once, then install from the
+  // two authoritative sources — the drive-through bundle AND the console-managed
+  // boot list (config/skills.json). Anything in neither is intentionally not
+  // persisted (no stale-skill drift). The single wipe here is shared so the
+  // boot-list install doesn't clobber the bundle install and vice-versa.
+  await resetWorkspaceSkills(workspaceSkillsDir);
+
   let installedSkills: InstalledSkill[] = [];
   if (bundle) {
     installedSkills = await installBundleSkills(bundle, workspaceSkillsDir, resolver(env));
@@ -74,6 +86,19 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
     }
     logResolvedEnv(bundle);
   }
+
+  // Console-managed boot list — the durable per-agent skill list the console's
+  // agent-skills UI writes to Storage. Additive + soft-fail so a console-added
+  // skill survives restarts without one bad slug bricking the agent. Skips refs
+  // the bundle already pinned.
+  const bootListReqs = await loadBootListSkills(env);
+  const bootInstalled = await installBootListSkills(
+    bootListReqs,
+    workspaceSkillsDir,
+    resolver(env),
+    { skip: new Set(installedSkills.map((s) => s.ref)) },
+  );
+  installedSkills = [...installedSkills, ...bootInstalled];
 
   const systemPrompt = assembleSystemPrompt({
     base: blobs.base ?? defaultBasePrompt(env),
