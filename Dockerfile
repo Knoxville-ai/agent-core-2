@@ -91,6 +91,44 @@ RUN apt-get update \
 # entrypoint.sh creates + chowns this dir to the agent uid before dropping privs.
 ENV U2NET_HOME=/home/agent/.openclaw/u2net
 
+# --- Headless Chromium for Playwright-based skills ---------------------------
+# Skills that drive a browser (Playwright) install the `playwright` Python
+# package themselves and download the Chromium build at boot, but they run
+# unprivileged (agent uid) and cannot install the OS-level shared libraries
+# Chromium needs (libglib-2.0.so.0, libnss3, ...). Without them a skill's
+# `chromium.launch()` dies with "error while loading shared libraries:
+# libglib-2.0.so.0: cannot open shared object file". Those system packages must
+# be baked into the image, as root — which is what this block does.
+#
+# We add `playwright` to the skills-venv purely to reach its two build-time
+# helpers:
+#   * `playwright install-deps chromium` apt-installs the canonical Chromium
+#     dependency set (system libs + rendering fonts like fonts-liberation /
+#     fonts-unifont) that the Playwright project maintains per-distro, so we
+#     track upstream instead of hand-pinning a package list that silently drifts
+#     as Chromium's needs change.
+#   * `playwright install chromium` pre-bakes the ~150 MB browser build into a
+#     shared PLAYWRIGHT_BROWSERS_PATH (/opt/pw-browsers) so the first skill run
+#     doesn't pay the download — and still works under network policies that
+#     block the browser CDN at boot.
+#
+# The gateway spawns openclaw (and thus skills) with the container env (see
+# src/openclaw/gateway-process.ts), so PLAYWRIGHT_BROWSERS_PATH below points a
+# skill's own runtime Playwright at this baked build instead of the default
+# $HOME/.cache/ms-playwright. /opt/pw-browsers is chowned to the agent uid so
+# the build is usable without root; keeping it agent-writable also lets the
+# agent download a matching build into the same dir in the rare case a skill
+# installs a newer Playwright whose expected Chromium revision differs from the
+# baked one (the system libs installed above stay valid across Chromium
+# revisions, so that fallback never needs root).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN apt-get update \
+ && /opt/skills-venv/bin/pip install --no-cache-dir 'playwright>=1.40' \
+ && /opt/skills-venv/bin/python -m playwright install-deps chromium \
+ && /opt/skills-venv/bin/python -m playwright install chromium \
+ && rm -rf /var/lib/apt/lists/* \
+ && chown -R agent:agent /opt/pw-browsers
+
 # Drop runtime entrypoint last so iteration on it doesn't bust the npm layer.
 COPY --chown=agent:agent entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
