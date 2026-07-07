@@ -6,6 +6,7 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import { ClawhubSkillResolver } from "../skills/clawhub.js";
+import { provisionSkillDeps } from "../skills/deps.js";
 import { HttpError } from "./auth.js";
 import { readJsonBody, sendJson } from "./util.js";
 
@@ -91,6 +92,11 @@ export async function handleSkillsInstall(
     { source: "clawhub", ref: slug, version },
     skillsRoot(env),
   );
+  // Install the newly-added skill's declared Python deps (SKILL.md →
+  // metadata.openclaw.install.uv) into the agent's interpreter before the
+  // gateway reload picks the skill up, so a `python3 scripts/foo.py` invocation
+  // doesn't fail with ModuleNotFoundError on first use.
+  await provisionSkillDeps([installed]);
   // Reload the running gateway so the skill is usable immediately.
   await gateway.restart();
   log.info("live skill installed", { slug, version: version || "(latest)" });
