@@ -262,6 +262,10 @@ Identical to v0.2 for the endpoints the console actually calls:
 | `GET  /healthz` / `/readyz` | Liveness / readiness. `/readyz` returns 503 until the openclaw gateway WebSocket is connected. |
 | `GET  /files/list?path=…` | Operator filesystem inspection for the console Files tab. Auth: `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>` (the gateway token, **not** a user JWT — only the console server holds it). Returns `{ path, entries: [{ name, type, size, mtime }] }`. `path` defaults to the first allowed root. |
 | `GET  /files/read?path=…` | Reads one file. Same auth. Returns `{ path, size, encoding: "utf-8" \| "base64", truncated, content }`; content is capped at 1 MiB and base64-encoded when binary. |
+| `GET    /skills` | Live skill list. Gateway-token auth. Returns `{ skills: [{ slug, version, source }] }` (the dirs under `workspace/skills/`; `version` is null — pair with the `config/skills.json` boot list for pins). |
+| `POST   /skills/install` | Body `{ slug, version? }`. Installs the skill into the running agent (`openclaw skills install <slug> [--version …] --force`) and reloads the gateway. Returns `{ ok: true, skill }`. Gateway-token auth. |
+| `DELETE /skills/{slug}` | Removes `workspace/skills/{slug}` and reloads the gateway. Returns `{ ok: true }`. Slug is path-traversal-guarded. Gateway-token auth. |
+| `GET    /skills/search?q=…` | Returns **501** (registry search not wired); the console treats 501 as "search unavailable," not an error. |
 | `*    /api/v1/agents/:uid/files/...` | Legacy conversation-attachment surface. Still returns 501 for vessel agents; the console treats 501 the same as "not supported on this agent." |
 
 `/files/*` is confined to an allowlist: the image code at `/app` and the
