@@ -55,27 +55,34 @@ RUN npm run build && npm prune --omit=dev
 # --- Python toolchain for skills that declare `install.uv` -------------------
 # node:24-bookworm-slim ships no Python, so skills whose openclaw frontmatter
 # declares `requires.bins: [python3]` + `install.uv: [...]` (e.g.
-# drivethru-graphic-artist: Pillow/rembg/onnxruntime) cannot run in the base
-# image. Provide a self-contained Python runtime here:
+# drivethru-graphic-artist: Pillow/rembg/onnxruntime, or drivethru-odoo: mcp)
+# cannot run in the base image. Provide a self-contained Python runtime here:
 #
 #   * apt `python3` + `python3-venv` — the interpreter and venv module.
-#   * A dedicated venv at /opt/skills-venv holding `uv` plus the skill's
-#     libraries, pre-installed at build time so boot is fast and works even
-#     when the network policy blocks outbound PyPI (skills are wiped +
-#     reinstalled every boot; we don't want a multi-hundred-MB re-download each
-#     time). `uv` is present so openclaw's boot-time `install.uv` step has its
-#     declared installer on PATH.
+#   * A dedicated venv at /opt/skills-venv holding `uv` plus a WARM CACHE of the
+#     heaviest skill libraries, pre-installed at build time so boot is fast and
+#     works even when the network policy blocks outbound PyPI.
 #
-# The venv lives in /opt (outside /home/agent) and is world-readable, so the
-# unprivileged agent uid can execute it without a chown. Prepending its bin to
+# IMPORTANT: this build-time `uv pip install` is only a cache/offline fallback —
+# it is NOT how a skill's deps actually get provisioned. Skills are synced at
+# RUNTIME (workspace/skills/ is wiped + reinstalled every boot, and the live
+# /skills/install route adds more), so the authoritative, generalized installer
+# is the boot/live step in src/skills/deps.ts (`provisionSkillDeps`): it reads
+# each installed SKILL.md's `metadata.openclaw.install.uv` and `uv pip install`s
+# it into THIS venv (the interpreter bare `python3` resolves to). That means a
+# newly-installed skill's deps are covered automatically without editing this
+# list. The packages below just pre-warm the heavy graphic-artist deps so that
+# common skill doesn't pay a ~1 GB download on its first boot; drop them if you
+# prefer a slimmer image and always-on PyPI access.
+#
+# The venv lives in /opt (outside /home/agent). It is chowned to the agent uid
+# below (with /opt/pw-browsers) so the runtime `provisionSkillDeps` step can
+# write new packages into it as the unprivileged agent. Prepending its bin to
 # PATH (below) makes bare `python3` / `uv` resolve here, so the skill's
 # `python3 scripts/compose_mockup.py ...` finds the libraries.
 #
 # NOTE: this adds ~1 GB to the image (onnxruntime + scipy + scikit-image +
-# opencv + numba pull a lot of transitive weight). If image size matters more
-# than boot latency, drop the `uv pip install` line and let openclaw's
-# `install.uv` fetch the libraries at boot instead — that keeps the image
-# slim but needs outbound PyPI access on every boot.
+# opencv + numba pull a lot of transitive weight).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-venv \
  && rm -rf /var/lib/apt/lists/* \
@@ -92,10 +99,12 @@ RUN apt-get update \
 ENV U2NET_HOME=/home/agent/.openclaw/u2net
 
 # --- Headless Chromium for Playwright-based skills ---------------------------
-# Skills that drive a browser (Playwright) install the `playwright` Python
-# package themselves and download the Chromium build at boot, but they run
-# unprivileged (agent uid) and cannot install the OS-level shared libraries
-# Chromium needs (libglib-2.0.so.0, libnss3, ...). Without them a skill's
+# For a browser skill (`install.uv: [playwright...]`), the runtime step in
+# src/skills/deps.ts installs the `playwright` Python package into the venv and
+# runs `python3 -m playwright install chromium` (idempotent — it reports
+# "already installed" against the build pre-bake below). What that step CANNOT
+# do is install the OS-level shared libraries Chromium needs (libglib-2.0.so.0,
+# libnss3, ...): it runs unprivileged (agent uid). Without them a skill's
 # `chromium.launch()` dies with "error while loading shared libraries:
 # libglib-2.0.so.0: cannot open shared object file". Those system packages must
 # be baked into the image, as root — which is what this block does.
@@ -127,7 +136,7 @@ RUN apt-get update \
  && /opt/skills-venv/bin/python -m playwright install-deps chromium \
  && /opt/skills-venv/bin/python -m playwright install chromium \
  && rm -rf /var/lib/apt/lists/* \
- && chown -R agent:agent /opt/pw-browsers
+ && chown -R agent:agent /opt/pw-browsers /opt/skills-venv
 
 # Drop runtime entrypoint last so iteration on it doesn't bust the npm layer.
 COPY --chown=agent:agent entrypoint.sh /app/entrypoint.sh

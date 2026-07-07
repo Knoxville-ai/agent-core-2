@@ -18,6 +18,7 @@ import {
 } from "../provision/render-workspace.js";
 import { loadBootListSkills } from "../skills/boot-list.js";
 import { ClawhubSkillResolver } from "../skills/clawhub.js";
+import { provisionSkillDeps } from "../skills/deps.js";
 import {
   installBootListSkills,
   installBundleSkills,
@@ -99,6 +100,13 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
     { skip: new Set(installedSkills.map((s) => s.ref)) },
   );
   installedSkills = [...installedSkills, ...bootInstalled];
+
+  // Install each installed skill's declared Python deps (SKILL.md →
+  // metadata.openclaw.install.uv) into the interpreter the agent shells out to,
+  // plus the Playwright Chromium build for any browser skill. Runs before the
+  // gateway spawns any skill so `python3 scripts/foo.py` finds its imports.
+  // Soft-fail so a dep hiccup degrades one skill rather than bricking boot.
+  await provisionSkillDeps(installedSkills);
 
   const systemPrompt = assembleSystemPrompt({
     base: blobs.base ?? defaultBasePrompt(env),
