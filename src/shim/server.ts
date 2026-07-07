@@ -17,6 +17,11 @@ import { handleHealth, handleReady } from "./routes-health.js";
 import { handleInterrupt } from "./routes-interrupt.js";
 import { handleSendMessage } from "./routes-messages.js";
 import {
+  handleSkillsInstall,
+  handleSkillsList,
+  handleSkillsRemove,
+} from "./routes-skills.js";
+import {
   handleOAuthComplete,
   handleOAuthStart,
   handleOAuthStatus,
@@ -112,6 +117,36 @@ async function route(
     return path === "/files/list"
       ? handleFilesList(url, res, env)
       : handleFilesRead(url, res, env);
+  }
+
+  // Live skill management (console operator surface). Gateway-token authed like
+  // /files/*, handled before the JWT gate. Lets the console install/remove
+  // skills into the running agent without a redeploy; each mutation restarts
+  // the openclaw gateway in place to reload the skill registry.
+  if (path === "/skills" || path.startsWith("/skills/")) {
+    requireGatewayToken(req.headers.authorization, env);
+    if (path === "/skills") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      return handleSkillsList(res, env);
+    }
+    if (path === "/skills/install") {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      return handleSkillsInstall(req, res, env, oauth.gateway);
+    }
+    if (path === "/skills/search") {
+      // Registry search isn't wired; the console treats 501 as "unavailable".
+      throw new HttpError(501, "skill search not supported");
+    }
+    const removeMatch = /^\/skills\/(.+)$/.exec(path);
+    if (removeMatch && method === "DELETE") {
+      return handleSkillsRemove(
+        decodeURIComponent(removeMatch[1]!),
+        res,
+        env,
+        oauth.gateway,
+      );
+    }
+    throw new HttpError(405, "method not allowed");
   }
 
   // Everything below requires a valid bearer JWT.

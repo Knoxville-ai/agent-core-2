@@ -50,17 +50,17 @@ export class ClawhubSkillResolver implements SkillResolver {
         `ClawhubSkillResolver only handles source=clawhub; got "${req.source}" for ${req.ref}@${req.version}`,
       );
     }
-    const args = [
-      "skills",
-      "install",
-      req.ref,
-      "--version",
-      req.version,
-      // Force a re-fetch so the boot-time install always matches the
-      // pinned version, even when a previous boot left a stale copy on
-      // disk (Railway volumes survive container restarts).
-      "--force",
-    ];
+    const args = ["skills", "install", req.ref];
+    // Pin the version when the requirement carries one (bundle skills always
+    // do). The console boot list (config/skills.json) may leave it unset, in
+    // which case we install the latest — `openclaw skills install <slug>`.
+    if (req.version) {
+      args.push("--version", req.version);
+    }
+    // Force a re-fetch so the boot-time install always matches the pinned
+    // version, even when a previous boot left a stale copy on disk (Railway
+    // volumes survive container restarts).
+    args.push("--force");
     await this.run(args, req);
     log.info("skill installed (clawhub)", {
       ref: req.ref,
