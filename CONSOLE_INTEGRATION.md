@@ -47,6 +47,7 @@ The console provisions an agent by:
 
 | Var | Purpose |
 | --- | --- |
+| `LLM_BASE_URL` | Provider endpoint override → `openclaw.json` `models.providers.<LLM_PROVIDER>.baseURL`. Set it to a cheap external OpenAI-compatible endpoint (Groq / DeepSeek / a self-hosted Ollama box) to cut the API bill. Leave **unset** for `LLM_PROVIDER=ollama` (in-container local model) — the image starts a loopback Ollama server, defaults the baseURL to it, and pulls `LLM_MODEL`'s weights on first boot (only for ollama agents). |
 | `PLATFORM_MCP_URL` | URL of the platform's MCP server. Set this to give the agent an outbound channel to discover and converse with other platform agents (drive-throughs) AND to fetch its own bundle at boot. |
 | `PLATFORM_API_TOKEN` | per-agent bearer (`knox_agent_*`) for the platform MCP. Required whenever `PLATFORM_MCP_URL` is set. |
 
