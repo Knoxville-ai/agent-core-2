@@ -102,7 +102,9 @@ export function defaultIdentity(env: AgentEnv): string {
   return defaultAgents(env);
 }
 
-function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
+/** Exported for unit tests — builds the openclaw.json object from env + the
+ *  rendered workspace path. */
+export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
   if (env.PLATFORM_MCP_URL) {
     mcpServers.knoxville_platform = {
@@ -174,17 +176,67 @@ function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, u
     //   - auth.order routing the `openai` provider to that profile.
     // openclaw 2026.5.x routes openai/<model> through auth.order["openai"].
     applyCodexOAuthConfig(config);
-  } else if (env.LLM_API_KEY) {
-    // Provider API keys live under models.providers.<name>.apiKey — there
-    // is no top-level `providers` key in the schema.
-    config.models = {
-      providers: {
-        [env.LLM_PROVIDER]: { apiKey: env.LLM_API_KEY },
-      },
-    };
+  } else {
+    // Provider API keys AND endpoint overrides live under
+    // models.providers.<name> — there is no top-level `providers` key in the
+    // schema. We emit this block whenever we have a key and/or a base URL:
+    //   - hosted API model with a key → { apiKey }
+    //   - external OpenAI-compatible endpoint (Groq / DeepSeek / self-hosted
+    //     Ollama box) → { apiKey, baseURL } from LLM_API_KEY + LLM_BASE_URL
+    //   - in-container Ollama → { apiKey: "ollama", baseURL: loopback } with
+    //     no LLM_API_KEY set (see buildProviderConfig)
+    const providerConfig = buildProviderConfig(env);
+    if (providerConfig) {
+      config.models = {
+        providers: {
+          // Key MUST match the provider segment of model.primary above so
+          // openclaw routes <provider>/<model> to this block.
+          [env.LLM_PROVIDER]: providerConfig,
+        },
+      };
+    }
   }
 
   return config;
+}
+
+/**
+ * Loopback OpenAI-compatible endpoint of the in-container Ollama server (see
+ * ../openclaw/ollama-process.ts). Ollama serves an OpenAI-compatible surface
+ * at `/v1` on the same port as its native API. Only reachable when
+ * LLM_PROVIDER=ollama, which is the only case that starts the server.
+ */
+export const LOCAL_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
+
+/**
+ * Resolve the `models.providers.<provider>` block from the model env vars, or
+ * null when there's nothing to emit (a hosted model with no key, e.g. an
+ * OAuth-only or default-credential provider). Encodes the base-URL + key
+ * defaults so both the external-endpoint and in-container-Ollama paths work.
+ *
+ * NOTE: the `baseURL` key is assumed to be the schema sibling of `apiKey`
+ * under a provider entry (camelCase, matching `apiKey`). Verify against
+ * `openclaw config schema` for the pinned CLI if a provider override is
+ * rejected — see README "Verification status".
+ */
+function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
+  const provider = env.LLM_PROVIDER.trim().toLowerCase();
+
+  // Endpoint: explicit override wins; else the ollama provider falls back to
+  // the in-container server. Every other provider uses openclaw's built-in
+  // hosted default (no baseURL emitted).
+  const baseURL =
+    env.LLM_BASE_URL ?? (provider === "ollama" ? LOCAL_OLLAMA_BASE_URL : undefined);
+
+  // Key: use LLM_API_KEY when present. Ollama's OpenAI-compatible endpoint
+  // ignores the key, but OpenAI-compatible clients often reject an empty one,
+  // so fall back to a harmless placeholder for ollama.
+  const apiKey = env.LLM_API_KEY || (provider === "ollama" ? "ollama" : undefined);
+
+  const cfg: Record<string, unknown> = {};
+  if (apiKey) cfg.apiKey = apiKey;
+  if (baseURL) cfg.baseURL = baseURL;
+  return Object.keys(cfg).length > 0 ? cfg : null;
 }
 
 /** Profile id + provider for the OpenClaw OpenAI-Codex OAuth flow. These

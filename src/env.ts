@@ -25,6 +25,16 @@ const Schema = z.object({
   LLM_MODEL: z.string().min(1),
   LLM_API_KEY: z.string().optional().default(""),
 
+  // Optional provider base URL override. When set it is written into
+  // openclaw.json as models.providers.<LLM_PROVIDER>.baseURL so the agent
+  // can talk to ANY OpenAI-compatible endpoint instead of the provider's
+  // hosted default. Two uses:
+  //   - external cheap inference (Groq / DeepSeek / Together / OpenRouter /
+  //     a self-hosted Ollama box) — set to that endpoint's /v1 URL.
+  //   - in-container Ollama (LLM_PROVIDER=ollama) — left unset here and
+  //     defaulted to the loopback Ollama server by buildOpenclawConfig.
+  LLM_BASE_URL: z.string().url().optional(),
+
   // Model auth mode. "api_key" (default) uses LLM_API_KEY. "oauth" wires
   // the OpenClaw OpenAI-Codex (ChatGPT) OAuth profile instead — the token
   // itself is NOT an env var; it lives in OpenClaw's encrypted auth-profile

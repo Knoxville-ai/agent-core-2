@@ -2,6 +2,7 @@ import { bootstrap } from "./boot/bootstrap.js";
 import { loadEnv } from "./env.js";
 import { log } from "./log.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
+import { maybeStartOllama } from "./openclaw/ollama-process.js";
 import { MemoryCheckpoint } from "./provision/agent-memory.js";
 import { refreshManifest } from "./provision/manifest.js";
 import { restoreOAuthStore } from "./provision/oauth-store.js";
@@ -56,6 +57,14 @@ async function main(): Promise<void> {
     });
   }
 
+  // 2c. If this agent runs a LOCAL model (LLM_PROVIDER=ollama), start the
+  //     in-container Ollama server and pull the weights BEFORE the gateway
+  //     boots, so openclaw's first model call finds a live backend. No-op for
+  //     every other provider — an API/external agent never starts Ollama or
+  //     downloads weights. Fatal on failure: a local agent with no backend
+  //     can't answer a turn. Weights persist on the volume (see ollama-process).
+  const ollama = await maybeStartOllama(env);
+
   // 3. Spawn openclaw gateway as a child. The shim talks to it over the
   //    OpenAI-compatible HTTP endpoint on the same port (loopback), so no
   //    WebSocket client is needed in this process.
@@ -79,6 +88,7 @@ async function main(): Promise<void> {
     // container stops (the per-turn checkpoint is the primary path).
     await memory.flush();
     await proc.stop();
+    if (ollama) await ollama.stop();
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

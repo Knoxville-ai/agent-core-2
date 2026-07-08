@@ -38,6 +38,12 @@ fi
 # create it up front so the path exists.
 mkdir -p "${OPENCLAW_STATE_DIR}/workspace/skills"
 
+# Ollama weights dir (LOCAL models only). Lives on the volume so a model pulled
+# once survives restarts/redeploys instead of re-downloading. Created + owned
+# here even when unused — it's an empty dir until an ollama agent pulls into it,
+# and src/openclaw/ollama-process.ts points OLLAMA_MODELS here.
+mkdir -p "${OPENCLAW_STATE_DIR}/ollama"
+
 # Give openclaw a private, agent-owned TMPDIR for the whole process tree.
 # Otherwise openclaw's temp-dir fallback targets the shared, predictable
 # /tmp/openclaw-<uid> path and crashes with "Unsafe fallback OpenClaw temp
@@ -58,6 +64,9 @@ chmod 700 "${TMPDIR}"
 # this the agent hits `EACCES: rmdir workspace/skills` and crash-loops. Running
 # this every boot also self-heals a volume left root-owned by an earlier boot.
 chown -R agent:agent "${OPENCLAW_STATE_DIR}/workspace" "${TMPDIR}"
+# Cheap top-level chown of the ollama dir every boot (its weight subtrees are
+# already agent-owned because ollama created them as the agent uid).
+chown agent:agent "${OPENCLAW_STATE_DIR}/ollama" 2>/dev/null || true
 
 # Drop privileges to the agent uid and hand off to Node. exec keeps tini as the
 # parent (PID 1) so SIGTERM still reaches Node and the openclaw grandchild.

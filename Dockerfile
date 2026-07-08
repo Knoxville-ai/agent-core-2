@@ -138,6 +138,35 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && chown -R agent:agent /opt/pw-browsers /opt/skills-venv
 
+# --- Ollama binary for in-container LOCAL models -----------------------------
+# Bake the `ollama` CLI/server so agents provisioned with LLM_PROVIDER=ollama
+# can run a small model inside the container (no external API bill). We install
+# ONLY the binary + its bundled CPU runner here — NO model weights. The multi-GB
+# weights are pulled at RUNTIME, and ONLY for an agent actually set to a local
+# model (see src/openclaw/ollama-process.ts → maybeStartOllama). An
+# OpenAI/Anthropic/external-endpoint agent never starts ollama and never
+# downloads a weight, so it pays only this one-time image cost.
+#
+# Uses Ollama's documented manual-install tarball (amd64 — Railway is amd64),
+# extracted into /usr (→ /usr/bin/ollama + /usr/lib/ollama). Set the
+# INSTALL_OLLAMA build arg to "false" to build a slimmer image with no local
+# model support. OLLAMA_VERSION pins the release for reproducibility.
+ARG INSTALL_OLLAMA=true
+ARG OLLAMA_VERSION=0.5.7
+RUN if [ "$INSTALL_OLLAMA" = "true" ]; then \
+      set -eu; \
+      arch="$(dpkg --print-architecture)"; \
+      case "$arch" in \
+        amd64) asset="ollama-linux-amd64.tgz" ;; \
+        arm64) asset="ollama-linux-arm64.tgz" ;; \
+        *) echo "unsupported arch for ollama: $arch" >&2; exit 1 ;; \
+      esac; \
+      curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/${asset}" -o /tmp/ollama.tgz; \
+      tar -C /usr -xzf /tmp/ollama.tgz; \
+      rm -f /tmp/ollama.tgz; \
+      ollama --version >/dev/null 2>&1 || true; \
+    fi
+
 # Drop runtime entrypoint last so iteration on it doesn't bust the npm layer.
 COPY --chown=agent:agent entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
