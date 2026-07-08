@@ -92,6 +92,22 @@ RUN apt-get update \
       --python /opt/skills-venv/bin/python \
       'Pillow>=10.3,<12' 'rembg>=2.0.56,<3' 'onnxruntime>=1.18,<2'
 
+# --- Warm-cache the MCP SDK for drivethru-odoo -------------------------------
+# drivethru-odoo declares `install.uv: [mcp>=1.9.0]` in its SKILL.md, and the
+# `mcp` SDK imports `anyio`. As with the graphic-artist deps above, the
+# authoritative install is the RUNTIME provisionSkillDeps step
+# (src/skills/deps.ts) — this build-time pre-bake is only a warm cache so that
+# skill's first boot is fast and still works when the network policy blocks
+# outbound PyPI. Pinned to the same `mcp>=1.9.0` the skill declares, so the
+# runtime `uv pip install` is a no-op ("already satisfied") instead of an
+# upgrade. anyio is listed explicitly even though `mcp` pulls it transitively,
+# per the request to bake both in. These are light (a few MB), so unlike the
+# ~1 GB graphic-artist stack there's little reason to drop them for a slimmer
+# image.
+RUN /opt/skills-venv/bin/uv pip install --no-cache \
+      --python /opt/skills-venv/bin/python \
+      'mcp>=1.9.0' anyio
+
 # rembg downloads its ~170 MB u2net model on first use. Point its cache at the
 # Railway persistence volume (OPENCLAW_STATE_DIR) so the one-time download
 # survives restarts/redeploys instead of re-fetching into an ephemeral $HOME.
