@@ -303,15 +303,12 @@ async function authorizeConversation(
     throw new HttpError(404, "wrong agent");
   }
   if (principal.kind === "agent") {
+    // Agent-to-agent authorization (the outbound delegation allowlist) is now
+    // enforced console-side in the MCP call path — start_agent_conversation
+    // rejects a caller that isn't bound to this agent before a conversation is
+    // ever opened. Here we only assert same-org.
     if (principal.orgId !== env.AGENT_ORG) {
       throw new HttpError(403, "cross-org call forbidden");
-    }
-    const allowed = await db.agentConnectionExists(
-      principal.agentUid,
-      env.AGENT_UID,
-    );
-    if (!allowed) {
-      throw new HttpError(403, "no agent_connection approved");
     }
   } else {
     const member = await db.userInOrg(principal.userId, env.AGENT_ORG);
