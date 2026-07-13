@@ -63,6 +63,11 @@ export class BundleClient {
     if (!bundle || !Array.isArray(bundle.assignments)) {
       throw new Error("get_my_bundle returned no structured content");
     }
+    // `connections` is newer than `assignments` on the wire — tolerate a
+    // console that predates it by defaulting to an empty list.
+    if (!Array.isArray(bundle.connections)) {
+      bundle.connections = [];
+    }
     return bundle;
   }
 

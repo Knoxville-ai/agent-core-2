@@ -106,23 +106,6 @@ export class MessagingDB {
     return (data?.length ?? 0) > 0;
   }
 
-  async agentConnectionExists(
-    taskAgentUid: string,
-    smeAgentUid: string,
-  ): Promise<boolean> {
-    const { data, error } = await this.client
-      .from("agent_connections")
-      .select("id")
-      .eq("task_agent_uid", taskAgentUid)
-      .eq("sme_agent_uid", smeAgentUid)
-      .limit(1);
-    if (error) {
-      log.warn("agentConnectionExists query failed", { err: error.message });
-      return false;
-    }
-    return (data?.length ?? 0) > 0;
-  }
-
   async getConversation(conversationId: string): Promise<Conversation | null> {
     const { data, error } = await this.client
       .from("conversations")

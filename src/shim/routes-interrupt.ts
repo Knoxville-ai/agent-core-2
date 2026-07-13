@@ -35,14 +35,11 @@ export async function handleInterrupt(
     throw new HttpError(404, "wrong agent");
   }
   if (principal.kind === "agent") {
+    // A2A authorization is enforced console-side in the MCP call path (see
+    // routes-messages.ts authorizeConversation). Same-org is all we assert here.
     if (principal.orgId !== env.AGENT_ORG) {
       throw new HttpError(403, "cross-org call forbidden");
     }
-    const allowed = await db.agentConnectionExists(
-      principal.agentUid,
-      env.AGENT_UID,
-    );
-    if (!allowed) throw new HttpError(403, "no agent_connection approved");
   } else {
     const member = await db.userInOrg(principal.userId, env.AGENT_ORG);
     if (!member) throw new HttpError(403, "forbidden");

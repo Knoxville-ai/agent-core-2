@@ -65,7 +65,21 @@ export interface BundleAssignment {
   capability: BundleCapability;
 }
 
+/**
+ * An outbound delegation connection: a same-org agent this agent is allowed to
+ * open a conversation with, plus the operator's prompt-style instructions on
+ * when/how to use it. Surfaced into the boot prompt's DELEGATION section.
+ * Mirrors the console `get_my_bundle.connections` wire shape.
+ */
+export interface DelegationConnection {
+  targetAgentUid: string;
+  displayName: string;
+  label?: string | null;
+  instructions: string;
+}
+
 export interface AgentBundle {
   agent: { uid: string; orgId: string };
   assignments: BundleAssignment[];
+  connections: DelegationConnection[];
 }
