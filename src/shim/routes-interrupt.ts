@@ -40,7 +40,10 @@ export async function handleInterrupt(
     if (principal.orgId !== env.AGENT_ORG) {
       throw new HttpError(403, "cross-org call forbidden");
     }
-  } else {
+  } else if (conversation.user_id !== null) {
+    // Anonymous conversations (public drive-thru + agent-to-agent) are
+    // addressable by any console-minted token; only user-owned conversations
+    // require org membership. See routes-messages.ts authorizeConversation.
     const member = await db.userInOrg(principal.userId, env.AGENT_ORG);
     if (!member) throw new HttpError(403, "forbidden");
   }
