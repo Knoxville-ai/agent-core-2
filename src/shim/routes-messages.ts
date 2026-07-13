@@ -288,7 +288,7 @@ export async function handleSendMessage(
 
 // ── helpers ─────────────────────────────────────────────
 
-async function authorizeConversation(
+export async function authorizeConversation(
   conversationId: string,
   principal: Principal,
   db: MessagingDB,
@@ -310,7 +310,13 @@ async function authorizeConversation(
     if (principal.orgId !== env.AGENT_ORG) {
       throw new HttpError(403, "cross-org call forbidden");
     }
-  } else {
+  } else if (conversation.user_id !== null) {
+    // A non-agent token that verified against SUPABASE_JWT_SECRET can only have
+    // been minted by the console, which authorizes the caller before it opens
+    // the conversation. Anonymous conversations (user_id null — public
+    // drive-thru chats and agent-to-agent delegation, where the conversation_id
+    // is the capability) are addressable by anyone the console let through.
+    // Only user-owned conversations require the caller to be an org member.
     const member = await db.userInOrg(principal.userId, env.AGENT_ORG);
     if (!member) throw new HttpError(403, "forbidden");
   }
