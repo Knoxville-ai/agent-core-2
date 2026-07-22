@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentEnv } from "../env.js";
-import { buildOpenclawConfig, LOCAL_OLLAMA_BASE_URL } from "./render-workspace.js";
+import {
+  buildOpenclawConfig,
+  LOCAL_OLLAMA_BASE_URL,
+  parseExtraMcpServers,
+} from "./render-workspace.js";
 
 /** Minimal AgentEnv with sane defaults; override per-case. */
 function makeEnv(overrides: Partial<AgentEnv>): AgentEnv {
@@ -109,5 +113,117 @@ describe("buildOpenclawConfig model provider block", () => {
     expect(config.models).toBeUndefined();
     expect(config.auth).toBeDefined();
     expect(config.plugins).toBeDefined();
+  });
+});
+
+function mcpServers(config: Record<string, unknown>): Record<string, unknown> {
+  return (config.mcp as { servers?: Record<string, unknown> } | undefined)?.servers ?? {};
+}
+
+describe("buildOpenclawConfig mcp.servers block", () => {
+  it("no PLATFORM_MCP_URL and no extra servers → empty mcp.servers", () => {
+    expect(mcpServers(buildOpenclawConfig(makeEnv({}), "/ws"))).toEqual({});
+  });
+
+  it("PLATFORM_MCP_URL → knoxville_platform with bearer auth", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+      "/ws",
+    );
+    expect(mcpServers(config)).toEqual({
+      knoxville_platform: {
+        url: "https://console.example/api/mcp",
+        transport: "streamable-http",
+        headers: { Authorization: "Bearer knox_agent_x" },
+      },
+    });
+  });
+
+  it("OPENCLAW_MCP_SERVERS is merged alongside knoxville_platform", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+        OPENCLAW_MCP_SERVERS: JSON.stringify({
+          drivethru_mcp: {
+            url: "https://odoo.example/drivethru_mcp/v1",
+            transport: "streamable-http",
+            headers: { Authorization: "Bearer inline-token" },
+          },
+        }),
+      }),
+      "/ws",
+    );
+    const servers = mcpServers(config);
+    expect(Object.keys(servers).sort()).toEqual(["drivethru_mcp", "knoxville_platform"]);
+    expect(servers.drivethru_mcp).toEqual({
+      url: "https://odoo.example/drivethru_mcp/v1",
+      transport: "streamable-http",
+      headers: { Authorization: "Bearer inline-token" },
+    });
+  });
+
+  it("a blob cannot override the reserved knoxville_platform entry", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_real",
+        OPENCLAW_MCP_SERVERS: JSON.stringify({
+          knoxville_platform: { url: "https://evil.example", transport: "streamable-http" },
+        }),
+      }),
+      "/ws",
+    );
+    expect((mcpServers(config).knoxville_platform as { url: string }).url).toBe(
+      "https://console.example/api/mcp",
+    );
+  });
+
+  it("malformed OPENCLAW_MCP_SERVERS is ignored, not fatal", () => {
+    const config = buildOpenclawConfig(makeEnv({ OPENCLAW_MCP_SERVERS: "{not json" }), "/ws");
+    expect(mcpServers(config)).toEqual({});
+  });
+});
+
+describe("parseExtraMcpServers", () => {
+  it("expands ${VAR} references from the provided env source", () => {
+    const { servers, error } = parseExtraMcpServers(
+      JSON.stringify({
+        drivethru_mcp: {
+          url: "${ODOO_MCP_URL}",
+          transport: "streamable-http",
+          headers: { Authorization: "Bearer ${ODOO_MCP_TOKEN}" },
+        },
+      }),
+      { ODOO_MCP_URL: "https://odoo.example/drivethru_mcp/v1", ODOO_MCP_TOKEN: "s3cret" },
+    );
+    expect(error).toBeUndefined();
+    expect(servers.drivethru_mcp).toEqual({
+      url: "https://odoo.example/drivethru_mcp/v1",
+      transport: "streamable-http",
+      headers: { Authorization: "Bearer s3cret" },
+    });
+  });
+
+  it("empty / missing blob → no servers, no error", () => {
+    expect(parseExtraMcpServers(undefined)).toEqual({ servers: {} });
+    expect(parseExtraMcpServers("   ")).toEqual({ servers: {} });
+  });
+
+  it("non-object JSON → error, no servers", () => {
+    const { servers, error } = parseExtraMcpServers("[1,2,3]");
+    expect(servers).toEqual({});
+    expect(error).toBeTruthy();
+  });
+
+  it("skips non-object server entries", () => {
+    const { servers } = parseExtraMcpServers(
+      JSON.stringify({ good: { url: "https://x" }, bad: "nope" }),
+      {},
+    );
+    expect(Object.keys(servers)).toEqual(["good"]);
   });
 });

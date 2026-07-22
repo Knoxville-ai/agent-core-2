@@ -102,6 +102,65 @@ export function defaultIdentity(env: AgentEnv): string {
   return defaultAgents(env);
 }
 
+/**
+ * Parse the OPENCLAW_MCP_SERVERS env blob into openclaw `mcp.servers` entries.
+ *
+ * The blob is a JSON object keyed by server name, each value an openclaw MCP
+ * server config (`{ url, transport, headers?, … }`). String values may embed
+ * `${VAR}` references, expanded from `envSource` (default `process.env`) so a
+ * secret can be kept in its own credential-bound env var instead of inlined.
+ *
+ * Never throws: a malformed blob yields `{ servers: {}, error }` so the caller
+ * can log and boot without the extra servers rather than crash. Non-object
+ * entries are skipped. Exported for unit tests.
+ */
+export function parseExtraMcpServers(
+  raw: string | undefined,
+  envSource: Record<string, string | undefined> = process.env,
+): { servers: Record<string, unknown>; error?: string } {
+  if (!raw || !raw.trim()) return { servers: {} };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return {
+      servers: {},
+      error: `OPENCLAW_MCP_SERVERS is not valid JSON: ${(e as Error).message}`,
+    };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {
+      servers: {},
+      error: "OPENCLAW_MCP_SERVERS must be a JSON object of { name: serverConfig }",
+    };
+  }
+
+  const expand = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return value.replace(
+        /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g,
+        (_m, name: string) => envSource[name] ?? "",
+      );
+    }
+    if (Array.isArray(value)) return value.map(expand);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, expand(v)]),
+      );
+    }
+    return value;
+  };
+
+  const servers: Record<string, unknown> = {};
+  for (const [name, cfg] of Object.entries(parsed as Record<string, unknown>)) {
+    // Skip junk (null, arrays, scalars) — a server config must be an object.
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) continue;
+    servers[name] = expand(cfg);
+  }
+  return { servers };
+}
+
 /** Exported for unit tests — builds the openclaw.json object from env + the
  *  rendered workspace path. */
 export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
@@ -114,6 +173,22 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
         ? { Authorization: `Bearer ${env.PLATFORM_API_TOKEN}` }
         : {},
     };
+  }
+
+  // Operator-configured MCP servers (any number, any agent) delivered from the
+  // console as the OPENCLAW_MCP_SERVERS JSON blob, merged in so the openclaw
+  // runtime exposes their tools natively. The reserved knoxville_platform entry
+  // above cannot be overridden.
+  const extraMcp = parseExtraMcpServers(env.OPENCLAW_MCP_SERVERS);
+  if (extraMcp.error) {
+    log.warn("ignoring OPENCLAW_MCP_SERVERS", { reason: extraMcp.error });
+  }
+  for (const [name, cfg] of Object.entries(extraMcp.servers)) {
+    if (name === "knoxville_platform") {
+      log.warn("OPENCLAW_MCP_SERVERS cannot override reserved server", { name });
+      continue;
+    }
+    mcpServers[name] = cfg;
   }
 
   // openclaw.json shape derived from `openclaw config schema` for the
