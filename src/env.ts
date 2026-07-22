@@ -58,6 +58,18 @@ const Schema = z.object({
   PLATFORM_MCP_URL: z.string().url().optional(),
   PLATFORM_API_TOKEN: z.string().optional(),
 
+  // Operator-configured MCP servers, delivered as a JSON blob so an agent can
+  // be wired to ANY number of remote MCP servers from the console without a
+  // vessel code change. Shape mirrors openclaw's mcp.servers:
+  //   { "<name>": { "url": "https://…", "transport": "streamable-http",
+  //                 "headers": { "Authorization": "Bearer ${SOME_TOKEN}" } } }
+  // String values may reference other env vars as ${VAR} (expanded at boot),
+  // so a secret lives in its own credential-bound env var rather than inline.
+  // Parsed + merged into mcp.servers by buildOpenclawConfig; a malformed blob
+  // is logged and skipped rather than failing boot. The reserved server name
+  // "knoxville_platform" cannot be overridden here.
+  OPENCLAW_MCP_SERVERS: z.string().optional(),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()
