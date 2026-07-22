@@ -108,6 +108,20 @@ RUN /opt/skills-venv/bin/uv pip install --no-cache \
       --python /opt/skills-venv/bin/python \
       'mcp>=1.9.0' anyio
 
+# --- Warm-cache requests for sportsinc-sportslink ----------------------------
+# sportsinc-sportslink declares `install.uv: [requests>=2.28]` in its SKILL.md,
+# and scripts/sportslink.py imports `requests` to reach the SportsLink API. Same
+# rationale as the mcp/anyio bake above: the authoritative install is the
+# RUNTIME provisionSkillDeps step (src/skills/deps.ts), but pre-baking it here
+# means the Sports Inc payables flow still works when the network policy blocks
+# outbound PyPI — otherwise the boot-time `uv pip install requests` soft-fails
+# and sportslink.py exits `config_error` ("the 'requests' package is required").
+# Pinned to the same `requests>=2.28` the skill declares, so the runtime install
+# is a no-op ("already satisfied"). A few hundred KB.
+RUN /opt/skills-venv/bin/uv pip install --no-cache \
+      --python /opt/skills-venv/bin/python \
+      'requests>=2.28'
+
 # rembg downloads its ~170 MB u2net model on first use. Point its cache at the
 # Railway persistence volume (OPENCLAW_STATE_DIR) so the one-time download
 # survives restarts/redeploys instead of re-fetching into an ephemeral $HOME.
