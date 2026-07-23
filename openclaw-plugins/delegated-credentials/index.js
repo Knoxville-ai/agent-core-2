@@ -3,28 +3,6 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { buildInjectedParams, isExecTool, parseCredentialsResponse } from "./inject.js";
 
 /**
- * Redacted, one-line proof that an injection happened — key NAMES + count +
- * session key, NEVER values. This mirrors the shim's "delegated credentials
- * staged for turn" log and is what makes this otherwise-silent plugin
- * debuggable: seeing this line on a delegated turn confirms the credential
- * actually reached the exec env (vs. the skill's own auth error meaning it
- * did not). Logging names is compliant with the "never log the values" rule
- * (the shim already logs `credentialKeyNames`).
- */
-function logInjection(sessionKey, creds) {
-  try {
-    const names = Object.keys(creds ?? {}).sort();
-    // stderr so it lands in the gateway log stream regardless of stdout capture.
-    console.error(
-      `[knox-delegated-credentials] injected ${names.length} credential(s) ` +
-        `into exec env for session ${sessionKey}: [${names.join(", ")}]`,
-    );
-  } catch {
-    /* never let logging break the tool call */
-  }
-}
-
-/**
  * Knox delegated-credentials injector — the OpenClaw half of the platform-brokered
  * A2A credential consumer.
  *
@@ -39,7 +17,9 @@ function logInjection(sessionKey, creds) {
  *   - The secrets travel shim -> plugin over a LOOPBACK route, gateway-token
  *     authed. They never enter the model prompt, the tool-call the model emitted,
  *     or the transcript (this hook rewrites tool *execution* params only).
- *   - Nothing is logged (the response holds secrets).
+ *   - NEVER logs the secret VALUES. It DOES log a redacted diagnostic (session
+ *     key, fetch status, and credential NAMES) so a delegated turn is traceable
+ *     end-to-end — the same names-only rule the shim's staging log follows.
  *   - Fail-open: on any error we inject nothing and never block the tool; the
  *     skill surfaces its own auth error.
  *   - Per-session isolation: creds are looked up by `ctx.sessionKey`, so a turn
@@ -47,10 +27,18 @@ function logInjection(sessionKey, creds) {
  *     empty map back and nothing is injected.
  */
 
-const SHIM_PORT = process.env.AGENT_HTTP_PORT || "8080";
-const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "";
-const LOOKUP_URL = `http://127.0.0.1:${SHIM_PORT}/internal/delegated-credentials`;
 const FETCH_TIMEOUT_MS = 2000;
+
+// Read the loopback port + gateway token at CALL time, not module-load time.
+// OpenClaw loads this plugin in more than one context during a run; capturing
+// `process.env` at import time risks binding an empty token in a realm that was
+// evaluated before the env was populated. Reading lazily always sees the live
+// process env of whatever realm the hook fires in.
+function loopbackConfig() {
+  const port = process.env.AGENT_HTTP_PORT || "8080";
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  return { port, token, url: `http://127.0.0.1:${port}/internal/delegated-credentials` };
+}
 
 // Memoize per (sessionKey, runId) so we hit the shim at most once per turn rather
 // than on every exec call. Short TTL backstop keeps the map from growing and
@@ -58,36 +46,69 @@ const FETCH_TIMEOUT_MS = 2000;
 const CACHE_TTL_MS = 5000;
 const cache = new Map();
 
+/**
+ * One redacted, end-to-end-traceable diagnostic line per delegated exec — so a
+ * turn that fails to inject can be pinpointed (token missing? loopback 401? empty
+ * store? session-key mismatch?) without ever exposing a value. Gated to `a2a:`
+ * sessions to avoid noise on ordinary web-chat exec calls. NEVER logs values.
+ */
+function logDiag(sessionKey, diag, creds) {
+  try {
+    // Skip ordinary web-chat exec calls (the common, uninteresting case). Log
+    // everything else — including a missing/odd session key, which is itself the
+    // anomaly worth seeing (e.g. ctx.sessionKey not populated for the hook).
+    if (typeof sessionKey === "string" && sessionKey.startsWith("webchat:")) return;
+    const names = Object.keys(creds ?? {}).sort();
+    console.error(
+      `[knox-delegated-credentials] exec hook session=${sessionKey ?? "undefined"} ` +
+        `tokenSet=${diag.tokenSet} port=${diag.port} status=${diag.status} ` +
+        `creds=${names.length} keys=[${names.join(", ")}]`,
+    );
+  } catch {
+    /* never let logging break the tool call */
+  }
+}
+
+/** Fetch this turn's staged creds from the shim's loopback route. Returns
+ *  `{ creds, diag }` where `diag` is non-secret fetch telemetry for logging. */
 async function fetchDelegatedCreds(sessionKey, runId) {
-  if (!sessionKey || !GATEWAY_TOKEN) return {};
+  const { port, token, url: lookupUrl } = loopbackConfig();
+  if (!sessionKey || !token) {
+    return { creds: {}, diag: { tokenSet: Boolean(token), port, status: "skipped" } };
+  }
   const cacheKey = `${sessionKey}::${runId ?? ""}`;
   const now = Date.now();
   const hit = cache.get(cacheKey);
-  if (hit && hit.expiresAt > now) return hit.creds;
+  if (hit && hit.expiresAt > now) {
+    return { creds: hit.creds, diag: { tokenSet: true, port, status: "cache" } };
+  }
 
   let creds = {};
+  let status = "error";
   try {
-    const url = `${LOOKUP_URL}?session_key=${encodeURIComponent(sessionKey)}`;
+    const url = `${lookupUrl}?session_key=${encodeURIComponent(sessionKey)}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     let res;
     try {
       res = await fetch(url, {
-        headers: { Authorization: `Bearer ${GATEWAY_TOKEN}` },
+        headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       });
     } finally {
       clearTimeout(timer);
     }
+    status = String(res.status);
     if (res.ok) {
       creds = parseCredentialsResponse(await res.json());
     }
-  } catch {
+  } catch (err) {
     // Fail open — no delegated creds this call. NEVER log the response body.
+    status = `fetch_error:${err?.name || "unknown"}`;
     creds = {};
   }
   cache.set(cacheKey, { creds, expiresAt: now + CACHE_TTL_MS });
-  return creds;
+  return { creds, diag: { tokenSet: true, port, status } };
 }
 
 export default definePluginEntry({
@@ -101,11 +122,15 @@ export default definePluginEntry({
       async (event, ctx) => {
         if (!isExecTool(event?.toolName)) return;
         const sessionKey = ctx?.sessionKey;
+        const { creds, diag } = await fetchDelegatedCreds(
+          sessionKey,
+          ctx?.runId ?? event?.runId,
+        );
+        // Redacted trace of what this exec saw (names + status only, no values).
+        logDiag(sessionKey, diag, creds);
         if (!sessionKey) return;
-        const creds = await fetchDelegatedCreds(sessionKey, ctx?.runId ?? event?.runId);
         const params = buildInjectedParams(event?.params ?? {}, creds);
         if (!params) return; // nothing to inject -> no change to the tool call
-        logInjection(sessionKey, creds);
         return { params };
       },
       { priority: 40 },
