@@ -3,6 +3,28 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { buildInjectedParams, isExecTool, parseCredentialsResponse } from "./inject.js";
 
 /**
+ * Redacted, one-line proof that an injection happened — key NAMES + count +
+ * session key, NEVER values. This mirrors the shim's "delegated credentials
+ * staged for turn" log and is what makes this otherwise-silent plugin
+ * debuggable: seeing this line on a delegated turn confirms the credential
+ * actually reached the exec env (vs. the skill's own auth error meaning it
+ * did not). Logging names is compliant with the "never log the values" rule
+ * (the shim already logs `credentialKeyNames`).
+ */
+function logInjection(sessionKey, creds) {
+  try {
+    const names = Object.keys(creds ?? {}).sort();
+    // stderr so it lands in the gateway log stream regardless of stdout capture.
+    console.error(
+      `[knox-delegated-credentials] injected ${names.length} credential(s) ` +
+        `into exec env for session ${sessionKey}: [${names.join(", ")}]`,
+    );
+  } catch {
+    /* never let logging break the tool call */
+  }
+}
+
+/**
  * Knox delegated-credentials injector — the OpenClaw half of the platform-brokered
  * A2A credential consumer.
  *
@@ -83,6 +105,7 @@ export default definePluginEntry({
         const creds = await fetchDelegatedCreds(sessionKey, ctx?.runId ?? event?.runId);
         const params = buildInjectedParams(event?.params ?? {}, creds);
         if (!params) return; // nothing to inject -> no change to the tool call
+        logInjection(sessionKey, creds);
         return { params };
       },
       { priority: 40 },
