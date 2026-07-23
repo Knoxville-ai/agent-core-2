@@ -16,6 +16,20 @@ const DELEGATED_CREDS_PLUGIN_DIR = fileURLToPath(
 );
 
 /**
+ * `bin/` of the dedicated Python venv the image builds (see Dockerfile:
+ * `/opt/skills-venv`), where every installed skill's `install.uv` deps land
+ * (see ../skills/deps.ts). It MUST be prepended to the exec tool's PATH: on
+ * `host=gateway` openclaw rebuilds the exec PATH from the login shell — a
+ * minimal `/usr/local/bin:/usr/bin:/bin` that does NOT carry the image's
+ * `ENV PATH` — and rejects per-call `env.PATH` overrides, so without this a
+ * skill's `python3 scripts/foo.py` resolves to the system interpreter and dies
+ * with `ModuleNotFoundError: requests`. `tools.exec.pathPrepend` is the one
+ * supported lever that survives that rebuild (it merges to the FRONT, ahead of
+ * the login-shell PATH). See docs/tools/exec.md "PATH handling".
+ */
+const SKILLS_VENV_BIN = "/opt/skills-venv/bin";
+
+/**
  * Renders an openclaw workspace from env vars + Supabase Storage, then
  * writes openclaw.json so `openclaw gateway` can boot cold against it.
  *
@@ -244,6 +258,17 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     },
     mcp: {
       servers: mcpServers,
+    },
+    // Make the skills venv's interpreter win on the exec tool's PATH. Skills
+    // shell out with a bare `python3 scripts/foo.py`; on host=gateway openclaw
+    // rebuilds that PATH from a minimal login shell and ignores env.PATH
+    // overrides, so the ONLY way the venv (which holds each skill's `install.uv`
+    // deps, e.g. `requests`) lands on PATH is this prepend. Applies to every
+    // agent, not just delegated ones — any Python skill needs it.
+    tools: {
+      exec: {
+        pathPrepend: [SKILLS_VENV_BIN],
+      },
     },
     // We don't bind any native channels — all conversation flows through
     // the shim's HTTP surface, which is what the knoxville console talks to.

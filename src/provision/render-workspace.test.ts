@@ -238,6 +238,32 @@ describe("buildOpenclawConfig delegated-credentials plugin", () => {
   });
 });
 
+describe("buildOpenclawConfig tools.exec.pathPrepend", () => {
+  function pathPrepend(config: Record<string, unknown>): string[] {
+    return (
+      (config.tools as { exec?: { pathPrepend?: string[] } } | undefined)?.exec
+        ?.pathPrepend ?? []
+    );
+  }
+
+  it("prepends the skills venv bin so exec's python3 finds install.uv deps", () => {
+    // Independent of A2A: every Python skill needs the venv on the exec PATH.
+    const config = buildOpenclawConfig(makeEnv({}), "/ws");
+    expect(pathPrepend(config)).toEqual(["/opt/skills-venv/bin"]);
+  });
+
+  it("is present even with the platform MCP + delegation plugin wired", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+      "/ws",
+    );
+    expect(pathPrepend(config)).toEqual(["/opt/skills-venv/bin"]);
+  });
+});
+
 describe("parseExtraMcpServers", () => {
   it("expands ${VAR} references from the provided env source", () => {
     const { servers, error } = parseExtraMcpServers(
