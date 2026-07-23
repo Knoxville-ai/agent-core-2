@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentEnv } from "../env.js";
 import {
   buildOpenclawConfig,
+  DELEGATED_CREDS_PLUGIN_ID,
   LOCAL_OLLAMA_BASE_URL,
   parseExtraMcpServers,
 } from "./render-workspace.js";
@@ -185,6 +186,55 @@ describe("buildOpenclawConfig mcp.servers block", () => {
   it("malformed OPENCLAW_MCP_SERVERS is ignored, not fatal", () => {
     const config = buildOpenclawConfig(makeEnv({ OPENCLAW_MCP_SERVERS: "{not json" }), "/ws");
     expect(mcpServers(config)).toEqual({});
+  });
+});
+
+describe("buildOpenclawConfig delegated-credentials plugin", () => {
+  function plugins(config: Record<string, unknown>): {
+    load?: { paths?: string[] };
+    entries?: Record<string, unknown>;
+  } {
+    return (config.plugins as { load?: { paths?: string[] }; entries?: Record<string, unknown> }) ?? {};
+  }
+
+  it("wires the plugin (load path + enabled entry) when PLATFORM_MCP_URL is set", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+      "/ws",
+    );
+    const p = plugins(config);
+    expect(p.entries?.[DELEGATED_CREDS_PLUGIN_ID]).toEqual({ enabled: true });
+    expect(
+      (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/delegated-credentials")),
+    ).toBe(true);
+  });
+
+  it("does NOT wire the plugin when there is no PLATFORM_MCP_URL (no A2A possible)", () => {
+    const config = buildOpenclawConfig(makeEnv({}), "/ws");
+    expect(config.plugins).toBeUndefined();
+  });
+
+  it("merges with an existing plugins block (Codex OAuth entries survive)", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openai",
+        LLM_MODEL: "gpt-5.4",
+        LLM_AUTH_MODE: "oauth",
+        OPENCLAW_AUTH_PROFILE_SECRET_KEY: "seed",
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+      "/ws",
+    );
+    const p = plugins(config);
+    // Codex OAuth entries are preserved…
+    expect(p.entries?.openai).toEqual({ enabled: true });
+    expect(p.entries?.codex).toEqual({ enabled: true });
+    // …alongside ours.
+    expect(p.entries?.[DELEGATED_CREDS_PLUGIN_ID]).toEqual({ enabled: true });
   });
 });
 

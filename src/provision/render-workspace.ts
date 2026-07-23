@@ -1,9 +1,19 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { AgentStorage } from "./supabase-storage.js";
+
+/** Id + on-disk directory of the delegated-credentials OpenClaw plugin shipped in
+ *  this repo (see `openclaw-plugins/`). Resolved relative to this module so it
+ *  works from both `src/` (unit tests) and `dist/` (runtime) — in each layout
+ *  `provision/` is one dir below the repo root that holds `openclaw-plugins/`. */
+export const DELEGATED_CREDS_PLUGIN_ID = "knox-delegated-credentials";
+const DELEGATED_CREDS_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/delegated-credentials", import.meta.url),
+);
 
 /**
  * Renders an openclaw workspace from env vars + Supabase Storage, then
@@ -270,6 +280,22 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
         },
       };
     }
+  }
+
+  // Knox delegated-credentials injector plugin — the OpenClaw half of the
+  // agent-to-agent credential consumer (see openclaw-plugins/). Only wired when
+  // the platform MCP is configured, since that is the only path by which a
+  // delegated turn can arrive. Merges into any `plugins` block a prior step
+  // (e.g. Codex OAuth) already set rather than clobbering it.
+  if (env.PLATFORM_MCP_URL) {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, DELEGATED_CREDS_PLUGIN_DIR] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    entries[DELEGATED_CREDS_PLUGIN_ID] = { enabled: true };
+    plugins.entries = entries;
+    config.plugins = plugins;
   }
 
   return config;

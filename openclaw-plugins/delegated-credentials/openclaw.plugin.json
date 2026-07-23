@@ -1,0 +1,12 @@
+{
+  "id": "knox-delegated-credentials",
+  "name": "Knox Delegated Credentials",
+  "description": "Inject platform-brokered delegated credentials into the exec tool env for agent-to-agent turns.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

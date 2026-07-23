@@ -50,6 +50,10 @@ RUN npm install -g --no-audit --no-fund openclaw@2026.5.20
 # Build the shim.
 COPY --chown=agent:agent tsconfig.json ./
 COPY --chown=agent:agent src ./src
+# OpenClaw plugins shipped with the vessel (plain JS, not built by tsc). The
+# delegated-credentials plugin is loaded via plugins.load.paths in openclaw.json
+# (see src/provision/render-workspace.ts), so the dir must exist in the image.
+COPY --chown=agent:agent openclaw-plugins ./openclaw-plugins
 RUN npm run build && npm prune --omit=dev
 
 # --- Python toolchain for skills that declare `install.uv` -------------------

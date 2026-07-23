@@ -16,6 +16,8 @@ import {
 import { handleHealth, handleReady } from "./routes-health.js";
 import { handleInterrupt } from "./routes-interrupt.js";
 import { handleSendMessage } from "./routes-messages.js";
+import { DelegatedCredentialStore } from "./delegated-credentials.js";
+import { handleDelegatedCredentialsLookup } from "./routes-internal.js";
 import {
   handleSkillsInstall,
   handleSkillsList,
@@ -41,6 +43,9 @@ export function startShim(
 ): Promise<ServerHandle> {
   const db = new MessagingDB(env);
   const cancels = new CancelRegistry();
+  // Per-turn delegated-credential store, shared between the message route
+  // (writer) and the loopback lookup route (reader for the gateway plugin).
+  const delegatedCreds = new DelegatedCredentialStore();
   const oauth: OAuthDeps = {
     env,
     db,
@@ -49,7 +54,7 @@ export function startShim(
   };
 
   const server = createServer((req, res) => {
-    void route(req, res, env, db, cancels, oauth, memory).catch((err) => {
+    void route(req, res, env, db, cancels, oauth, memory, delegatedCreds).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
         if (!res.headersSent) {
@@ -98,6 +103,7 @@ async function route(
   cancels: CancelRegistry,
   oauth: OAuthDeps,
   memory: MemoryCheckpoint,
+  delegatedCreds: DelegatedCredentialStore,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -117,6 +123,15 @@ async function route(
     return path === "/files/list"
       ? handleFilesList(url, res, env)
       : handleFilesRead(url, res, env);
+  }
+
+  // Loopback credential lookup for the gateway's before_tool_call plugin.
+  // Gateway-token authed like /files; returns the delegated creds staged for a
+  // session's current turn so the plugin can inject them into the skill env.
+  // The only caller is the in-container gateway plugin over loopback.
+  if (path === "/internal/delegated-credentials") {
+    if (method !== "GET") throw new HttpError(405, "method not allowed");
+    return handleDelegatedCredentialsLookup(url, req, res, env, delegatedCreds);
   }
 
   // Live skill management (console operator surface). Gateway-token authed like
@@ -182,6 +197,7 @@ async function route(
         db,
         cancels,
         memory,
+        delegatedCreds,
       });
     }
     if (sub === "interrupt") {
