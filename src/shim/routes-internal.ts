@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
-import type { DelegatedCredentialStore } from "./delegated-credentials.js";
+import { credentialKeyNames, type DelegatedCredentialStore } from "./delegated-credentials.js";
 import { requireGatewayToken } from "./routes-files.js";
 import { sendJson } from "./util.js";
 
@@ -17,7 +18,9 @@ import { sendJson } from "./util.js";
  * trust anchor as `/files` and `/skills`; the token only ever lives on the
  * console server and inside this container, so it gates access to the values.
  *
- * NEVER logs the values (this handler logs nothing at all). Returns `{}` for an
+ * NEVER logs the values — but it DOES log a redacted hit/miss line (session key,
+ * whether the store held an entry, the credential NAMES, and the live store size)
+ * so the shim<->plugin handoff is traceable end-to-end. Returns `{}` for an
  * unknown/expired session key so the plugin simply injects no env.
  */
 export function handleDelegatedCredentialsLookup(
@@ -30,5 +33,13 @@ export function handleDelegatedCredentialsLookup(
   requireGatewayToken(req.headers.authorization, env);
   const sessionKey = url.searchParams.get("session_key") ?? "";
   const credentials = sessionKey ? store.get(sessionKey) : {};
+  // Redacted trace: proves the plugin reached the route and whether the store
+  // had this session's creds staged. Names + counts only — never the values.
+  log.info("delegated credentials lookup", {
+    session_key: sessionKey || null,
+    hit: Object.keys(credentials).length > 0,
+    keys: credentialKeyNames(credentials),
+    store_size: store.size(),
+  });
   sendJson(res, 200, { credentials });
 }
