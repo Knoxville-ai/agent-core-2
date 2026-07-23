@@ -14,6 +14,12 @@ import type {
   MessageRow,
   MessagingDB,
 } from "./supabase-db.js";
+import { BundleClient, type DelegatedCredentials } from "../bundle/client.js";
+import {
+  credentialKeyNames,
+  detectDelegatedTurn,
+  type DelegatedCredentialStore,
+} from "./delegated-credentials.js";
 import { readJsonBody } from "./util.js";
 
 /**
@@ -55,6 +61,10 @@ export interface MessagesDeps {
   db: MessagingDB;
   cancels: CancelRegistry;
   memory: MemoryCheckpoint;
+  /** Per-turn delegated-credential store, keyed by openclaw session key. Written
+   *  here on a delegated turn, read by the loopback route the gateway plugin
+   *  calls, cleared when the turn ends. */
+  delegatedCreds: DelegatedCredentialStore;
 }
 
 export async function handleSendMessage(
@@ -176,6 +186,29 @@ export async function handleSendMessage(
     ? `a2a:${conversationId}`
     : `webchat:${conversationId}`;
 
+  // Platform-brokered delegated credentials (agent-to-agent turns only).
+  // On a delegated turn, pull the credentials the calling agent shared for THIS
+  // conversation and stash them keyed by the session key. The openclaw
+  // `before_tool_call` plugin reads them back over the loopback route and injects
+  // them into this turn's skill subprocess env, so a skill reads them from its
+  // environment exactly as it would standalone. They are NEVER added to
+  // `openaiMessages` / the prompt / the transcript, and are cleared in the
+  // `finally` below. A non-delegated turn skips this entirely, so its skills see
+  // no delegated env — keyed isolation, no cross-turn leakage.
+  const delegated = detectDelegatedTurn(req.headers, principal.kind, conversationId);
+  if (delegated.delegated) {
+    const creds = await fetchDelegatedCredentialsForTurn(env, delegated.conversationId);
+    deps.delegatedCreds.set(sessionKey, creds);
+    if (Object.keys(creds).length > 0) {
+      // Key names + count only — never the values.
+      log.info("delegated credentials staged for turn", {
+        session_key: sessionKey,
+        connection_id: delegated.connectionId,
+        keys: credentialKeyNames(creds),
+      });
+    }
+  }
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
@@ -266,6 +299,10 @@ export async function handleSendMessage(
       }
     }
   } finally {
+    // Drop any delegated credentials staged for this turn. The turn is over, so
+    // they must not outlive it (nor race a concurrent turn). Idempotent + safe
+    // on a non-delegated turn (nothing was stored under this key).
+    deps.delegatedCreds.clear(sessionKey);
     await db.updateMessage(assistantMessageId, {
       content: buffer,
       status: finalStatus,
@@ -287,6 +324,27 @@ export async function handleSendMessage(
 }
 
 // ── helpers ─────────────────────────────────────────────
+
+/**
+ * Build a one-shot platform MCP client from env and fetch the delegated
+ * credentials for this conversation. Reuses the same URL + knox_agent token as
+ * the boot `get_my_bundle` call. Returns `{}` when the platform MCP isn't
+ * configured (agent has no outbound A2A) or on any error — never throws into the
+ * turn, so a broker hiccup degrades to "no delegated creds" rather than a failed
+ * reply.
+ */
+async function fetchDelegatedCredentialsForTurn(
+  env: AgentEnv,
+  conversationId: string,
+): Promise<DelegatedCredentials> {
+  if (!env.PLATFORM_MCP_URL || !env.PLATFORM_API_TOKEN) return {};
+  const client = new BundleClient({
+    url: env.PLATFORM_MCP_URL,
+    token: env.PLATFORM_API_TOKEN,
+    timeoutMs: 5000,
+  });
+  return client.fetchDelegatedCredentials(conversationId);
+}
 
 export async function authorizeConversation(
   conversationId: string,

@@ -28,6 +28,40 @@ interface ToolCallResult {
   structuredContent?: unknown;
 }
 
+/**
+ * A map of `ENV_KEY -> secret value` a delegating (calling) agent shared with
+ * this agent for the current agent-to-agent turn. The values are secrets: never
+ * log them, and never put them in the model prompt or the conversation
+ * transcript — they belong only in the skill/tool execution environment.
+ */
+export type DelegatedCredentials = Record<string, string>;
+
+/** Env var names we're willing to inject. Anything else is dropped — a junk key
+ *  could break a subprocess spawn, and the platform only ever shares real
+ *  env-var-shaped keys. */
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Pull the `{ credentials: { KEY: value } }` map out of the
+ * `get_delegated_credentials` tool's structuredContent. Keeps only string
+ * values under valid env-var-name keys; returns `{}` for any other shape. Never
+ * throws. Exported for unit tests.
+ */
+export function extractDelegatedCredentials(
+  structuredContent: unknown,
+): DelegatedCredentials {
+  const container = structuredContent as { credentials?: unknown } | null | undefined;
+  const raw = container?.credentials;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: DelegatedCredentials = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "string" && ENV_KEY_RE.test(key)) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 export interface BundleClientOptions {
   /** Base MCP URL (e.g. https://knoxville.ai/api/mcp). */
   url: string;
@@ -69,6 +103,52 @@ export class BundleClient {
       bundle.connections = [];
     }
     return bundle;
+  }
+
+  /**
+   * Fetch the credentials a delegating (calling) agent shared with us for the
+   * agent-to-agent turn on `conversationId`. Reuses the SAME MCP endpoint +
+   * agent token as `get_my_bundle`; the platform authorizes the call (verifies
+   * we are the target of that delegated conversation and that the connection
+   * shares the creds) and audits each access, so no extra checks are needed
+   * here.
+   *
+   * Returns an empty map when nothing is shared OR on any tool/transport error:
+   * a delegated turn must never crash because the broker hiccuped — the skill
+   * surfaces its own auth error instead. NEVER logs the secret values (only the
+   * key names + count, which are not secret and are useful for audit).
+   */
+  async fetchDelegatedCredentials(
+    conversationId: string,
+  ): Promise<DelegatedCredentials> {
+    let result: ToolCallResult;
+    try {
+      result = await this.call<ToolCallResult>("tools/call", {
+        name: "get_delegated_credentials",
+        arguments: { conversation_id: conversationId },
+      });
+    } catch (err) {
+      log.warn("delegated credentials fetch failed; proceeding without", {
+        err: String(err),
+      });
+      return {};
+    }
+    if (result.isError) {
+      const msg =
+        result.content?.find((c) => c.type === "text")?.text ??
+        "tool reported error";
+      log.warn("delegated credentials tool reported error; proceeding without", {
+        msg,
+      });
+      return {};
+    }
+    const creds = extractDelegatedCredentials(result.structuredContent);
+    const keys = Object.keys(creds);
+    if (keys.length > 0) {
+      // Key NAMES + count only — never the values.
+      log.info("delegated credentials received", { count: keys.length, keys: keys.sort() });
+    }
+    return creds;
   }
 
   private async call<T>(method: string, params: unknown): Promise<T> {
