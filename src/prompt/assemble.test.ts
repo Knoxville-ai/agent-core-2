@@ -15,7 +15,7 @@ function bundle(over: Partial<AgentBundle> = {}): AgentBundle {
 describe("assembleSystemPrompt — DELEGATION", () => {
   it("omits the DELEGATION section when there are no connections", () => {
     const out = assembleSystemPrompt({
-      base: "BASE",
+      constitution: "BASE",
       identity: "ID",
       bundle: bundle(),
     });
@@ -25,7 +25,7 @@ describe("assembleSystemPrompt — DELEGATION", () => {
   it("renders a connection with its target uid, label, and instructions", () => {
     const target = "b".repeat(16);
     const out = assembleSystemPrompt({
-      base: "BASE",
+      constitution: "BASE",
       identity: "ID",
       bundle: bundle({
         connections: [
@@ -49,7 +49,7 @@ describe("assembleSystemPrompt — DELEGATION", () => {
 
   it("falls back to a placeholder when instructions are blank", () => {
     const out = assembleSystemPrompt({
-      base: "BASE",
+      constitution: "BASE",
       identity: "ID",
       bundle: bundle({
         connections: [

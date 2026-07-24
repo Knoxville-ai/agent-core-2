@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { bundleClientFromEnv } from "../bundle/client.js";
@@ -10,9 +11,10 @@ import type { AgentBundle } from "../bundle/types.js";
 import type { AgentEnv } from "../env.js";
 import { log } from "../log.js";
 import { assembleSystemPrompt } from "../prompt/assemble.js";
+import { MemoryCheckpoint } from "../provision/agent-memory.js";
 import {
-  defaultBasePrompt,
   defaultIdentity,
+  loadConstitution,
   loadPromptBlobs,
   renderWorkspace,
 } from "../provision/render-workspace.js";
@@ -48,11 +50,16 @@ export interface BootstrapResult {
   bundle: AgentBundle | null;
   installedSkills: InstalledSkill[];
   systemPrompt: string;
+  /** The agent-owned memory checkpoint, restored during boot. Returned so
+   *  index.ts reuses this exact instance for the shim + SIGTERM flush instead
+   *  of constructing a second one (which would double-restore). */
+  memory: MemoryCheckpoint;
 }
 
 export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   const bundle = await fetchBundle(env);
   const blobs = await loadPromptBlobs(env);
+  const constitution = await loadConstitution(env);
 
   const workspaceSkillsDir = join(env.OPENCLAW_STATE_DIR, "workspace", "skills");
 
@@ -108,20 +115,67 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   // Soft-fail so a dep hiccup degrades one skill rather than bricking boot.
   await provisionSkillDeps(installedSkills);
 
+  // Restore agent-owned memory (playbook.md + notes/) with volume-wins
+  // precedence BEFORE assembling SOUL, so the current playbook can be folded
+  // into the `# PLAYBOOK` section. This runs after the skills reset above (which
+  // only touches workspace/skills/) and never touches the console-authored
+  // prompts. index.ts reuses this instance — see BootstrapResult.memory.
+  const memory = MemoryCheckpoint.fromEnv(env);
+  await memory.restore();
+  const playbook = await readFileOrNull(
+    join(env.OPENCLAW_STATE_DIR, "workspace", "playbook.md"),
+  );
+
+  // Boot digest of the agent's durable memories (Postgres, via the platform
+  // `recall` tool). Fail-open: on any error the `# MEMORY` section is omitted
+  // and boot proceeds — the volume/Storage layers are unaffected.
+  const memoryDigest = await fetchMemoryDigest(env);
+
   const systemPrompt = assembleSystemPrompt({
-    base: blobs.base ?? defaultBasePrompt(env),
+    constitution,
     identity: blobs.identity ?? defaultIdentity(env),
+    charter: blobs.base,
     bundle,
+    operatorNotes: blobs.playbookSeed,
+    memoryDigest,
+    playbook,
   });
   await renderWorkspace({ env, assembledSoul: systemPrompt, blobs });
 
   log.info("bootstrap complete", {
     assignments: bundle?.assignments.length ?? 0,
     skills_installed: installedSkills.length,
-    base_from_storage: blobs.base != null,
+    charter_from_storage: blobs.base != null,
+    identity_from_storage: blobs.identity != null,
+    operator_notes: blobs.playbookSeed != null,
+    memory_digest: memoryDigest != null,
+    playbook: playbook != null,
   });
 
-  return { bundle, installedSkills, systemPrompt };
+  return { bundle, installedSkills, systemPrompt, memory };
+}
+
+async function readFileOrNull(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Boot digest of durable memories via the platform `recall` tool. Returns null
+ *  when the platform MCP isn't wired or on any error (fail-open). */
+async function fetchMemoryDigest(env: AgentEnv): Promise<string | null> {
+  const client = bundleClientFromEnv(env);
+  if (!client) return null;
+  try {
+    return await client.fetchMemoryDigest();
+  } catch (err) {
+    log.warn("memory digest fetch failed; booting without # MEMORY", {
+      err: String(err),
+    });
+    return null;
+  }
 }
 
 async function fetchBundle(env: AgentEnv): Promise<AgentBundle | null> {

@@ -151,6 +151,30 @@ export class BundleClient {
     return creds;
   }
 
+  /**
+   * Fetch a boot-time digest of this agent's durable memories via the platform
+   * `recall` tool (no query → pinned + top-salience rows). Returns the tool's
+   * text digest, or null when there is nothing to show OR on any error — the
+   * `# MEMORY` SOUL section is simply omitted. Never throws.
+   */
+  async fetchMemoryDigest(): Promise<string | null> {
+    let result: ToolCallResult;
+    try {
+      result = await this.call<ToolCallResult>("tools/call", {
+        name: "recall",
+        arguments: { limit: 15 },
+      });
+    } catch (err) {
+      log.warn("recall (boot digest) failed; proceeding without", {
+        err: String(err),
+      });
+      return null;
+    }
+    if (result.isError) return null;
+    const text = result.content?.find((c) => c.type === "text")?.text?.trim();
+    return text && text.length > 0 ? text : null;
+  }
+
   private async call<T>(method: string, params: unknown): Promise<T> {
     const req: JsonRpcRequest = {
       jsonrpc: "2.0",

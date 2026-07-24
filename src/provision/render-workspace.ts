@@ -15,6 +15,33 @@ const DELEGATED_CREDS_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/delegated-credentials", import.meta.url),
 );
 
+/** The platform constitution shipped in the image (see `prompts/constitution.md`).
+ *  Resolved relative to this module so it works from both `src/` (tests) and
+ *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
+ *  that holds `prompts/`. This is the guaranteed fallback so a brand-new or
+ *  disaster-recovered agent is never soulless even if Storage is empty. */
+const IMAGE_CONSTITUTION_PATH = fileURLToPath(
+  new URL("../../prompts/constitution.md", import.meta.url),
+);
+
+/** Bucket-root Storage key for the (optional) platform constitution override.
+ *  Org-agnostic — the same soul for every agent — so it lives outside the
+ *  per-agent `orgs/{org}/agents/{uid}/` prefix. */
+const CONSTITUTION_STORAGE_KEY = "platform/constitution.md";
+
+/**
+ * Load the platform constitution: the Storage override wins when present and
+ * non-empty, else the image copy. Never returns empty — the image copy is
+ * bundled, so this is the one prompt layer that is always available.
+ */
+export async function loadConstitution(env: AgentEnv): Promise<string> {
+  const override = await new AgentStorage(env).downloadShared(
+    CONSTITUTION_STORAGE_KEY,
+  );
+  if (override && override.trim()) return override;
+  return await readFile(IMAGE_CONSTITUTION_PATH, "utf8");
+}
+
 /**
  * `bin/` of the dedicated Python venv the image builds (see Dockerfile:
  * `/opt/skills-venv`), where every installed skill's `install.uv` deps land
@@ -62,25 +89,32 @@ const EXEC_SHIM_BIN = "/opt/knox-exec-shim";
  */
 
 export interface PromptBlobs {
-  /** Raw `memory/system_prompt.md` from storage, or null if absent. */
+  /** Raw `memory/system_prompt.md` from storage, or null if absent. Repurposed
+   *  as the optional `# CHARTER` layer (extended domain prose), NOT the base —
+   *  the base soul is now the constitution (see loadConstitution). */
   base: string | null;
   /** Raw `memory/identity.md` from storage, or null if absent. */
   identity: string | null;
   /** Raw `memory/boot.md` from storage, or null if absent. */
   boot: string | null;
+  /** Raw `memory/playbook.seed.md` from storage, or null if absent. Console-
+   *  authored operator notes, rendered read-only into SOUL as `# OPERATOR
+   *  NOTES`. Distinct from the agent-owned `memory/playbook.md`. */
+  playbookSeed: string | null;
 }
 
 /** Fetch the console-authored prompt blobs from storage in one pass. Bootstrap
- *  uses these to build the per-capability assembled SOUL.md. (playbook.md is
- *  agent-owned and handled by MemoryCheckpoint, not loaded here.) */
+ *  uses these to build the assembled SOUL.md. (The agent-owned `playbook.md` and
+ *  `notes/` are handled by MemoryCheckpoint, not loaded here.) */
 export async function loadPromptBlobs(env: AgentEnv): Promise<PromptBlobs> {
   const storage = new AgentStorage(env);
-  const [base, identity, boot] = await Promise.all([
+  const [base, identity, boot, playbookSeed] = await Promise.all([
     storage.downloadText("memory/system_prompt.md"),
     storage.downloadText("memory/identity.md"),
     storage.downloadText("memory/boot.md"),
+    storage.downloadText("memory/playbook.seed.md"),
   ]);
-  return { base, identity, boot };
+  return { base, identity, boot, playbookSeed };
 }
 
 export interface RenderWorkspaceInput {
@@ -127,14 +161,9 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
   });
 }
 
-/** Public so bootstrap can pass it into the prompt assembler as the base
- *  layer when storage has no `system_prompt.md`. */
-export function defaultBasePrompt(env: AgentEnv): string {
-  return defaultSoul(env);
-}
-
 /** Public so bootstrap can use it as the identity layer when storage has
- *  no `memory/identity.md`. */
+ *  no `memory/identity.md`. The base soul is the constitution now, so this only
+ *  needs to supply a usable generic identity — never the old "unconfigured" stub. */
 export function defaultIdentity(env: AgentEnv): string {
   return defaultAgents(env);
 }
@@ -433,28 +462,16 @@ function applyCodexOAuthConfig(config: Record<string, unknown>): void {
   };
 }
 
-function defaultSoul(env: AgentEnv): string {
-  return `# SOUL
-
-You are a Knoxville AI platform agent (uid \`${env.AGENT_UID}\`) belonging
-to organization \`${env.AGENT_ORG}\`. Your system prompt has not been
-configured yet — ask the operator (via the console) to set it under
-\`memory/system_prompt.md\` in agent storage.
-
-Until then, behave as a careful, general-purpose assistant. Decline tasks
-that require domain authority you have not been granted.
-`;
-}
-
 function defaultAgents(env: AgentEnv): string {
-  return `# AGENTS
+  return `Identity: Knoxville AI platform agent \`${env.AGENT_UID}\`, serving
+organization \`${env.AGENT_ORG}\`.
 
-Identity: Knoxville platform agent \`${env.AGENT_UID}\` (org \`${env.AGENT_ORG}\`).
-
-Role slug: \`${env.AGENT_ROLE}\`. This is a general-purpose openclaw vessel;
-specific capabilities are added by installing skills into
-\`workspace/skills/\` and by attaching MCP servers in \`openclaw.json\`.
-`;
+This agent has not been given a specific charter yet, so operate as a capable,
+general-purpose assistant for your organization within the principles in your
+constitution. Your granted skills and connections (below, when present) define
+what you can do; lean on them, and build up your playbook and memory as you
+learn how this organization likes to work. An operator can give you a sharper
+identity any time from the console.`;
 }
 
 function defaultTools(): string {
