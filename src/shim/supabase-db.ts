@@ -224,22 +224,22 @@ export class MessagingDB {
   }
 
   /**
-   * Recent durable memories tied to this conversation, for the per-turn
-   * `# RECENT` injection (the live path for memory written mid-session, since
-   * SOUL's `# MEMORY` digest is only a boot snapshot). Fail-open like
-   * getCallerContext.
+   * The agent's most recently written durable memories, for the per-turn
+   * `# RECENT` injection — the live path for memory written mid-session, since
+   * SOUL's `# MEMORY` digest is only a boot snapshot. Not conversation-scoped:
+   * memories written via the `remember` tool are unlinked (an openclaw turn only
+   * knows the engine session id, not a public.conversations row), so recency is
+   * keyed on the agent, newest first. Fail-open like getCallerContext.
    */
   async getRecentMemories(
     agentUid: string,
-    conversationId: string,
-    limit = 6,
+    limit = 5,
   ): Promise<AgentMemoryRow[]> {
     try {
       const { data, error } = await this.client
         .from("agent_memories")
         .select("title,body,kind,tags")
         .eq("agent_uid", agentUid)
-        .eq("conversation_id", conversationId)
         .is("superseded_by", null)
         .order("created_at", { ascending: false })
         .limit(limit);

@@ -67,7 +67,6 @@ export async function buildDynamicContext(
   env: AgentEnv,
   principal: Principal,
   advisory: AdvisoryCaller,
-  conversationId: string,
 ): Promise<string | null> {
   let callerOrgId: string | null = null;
   let callerAgentUid: string | null = null;
@@ -122,11 +121,12 @@ export async function buildDynamicContext(
     sections.push(lines.join("\n"));
   }
 
-  // Conversation-scoped recent memory — the live view of anything written this
-  // session (SOUL's # MEMORY is only a boot snapshot).
-  const recent = await db.getRecentMemories(env.AGENT_UID, conversationId);
+  // Recent memory — the live view of anything the agent wrote lately (SOUL's
+  // # MEMORY is only a boot snapshot). Agent-scoped: model-written memories are
+  // not conversation-linked (see MessagingDB.getRecentMemories).
+  const recent = await db.getRecentMemories(env.AGENT_UID);
   if (recent.length > 0) {
-    const lines: string[] = ["## Recent memory (this conversation)"];
+    const lines: string[] = ["## Recent memory"];
     for (const m of recent) {
       const title = m.title ? `**${m.title.trim()}** — ` : "";
       lines.push(`- ${title}${m.body.trim()}`);
