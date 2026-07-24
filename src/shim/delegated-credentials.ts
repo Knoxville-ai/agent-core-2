@@ -130,6 +130,28 @@ export class DelegatedCredentialStore {
     return hit.creds;
   }
 
+  /**
+   * Creds of the SINGLE currently-live delegated turn, or `{}` when zero — or
+   * more than one — are staged.
+   *
+   * The exec-shim (see `docker/knox-python3-shim.py`) needs this because
+   * openclaw does not expose the session key to a skill's `exec` subprocess, so
+   * a shim running inside that subprocess can't ask for its own session by name.
+   * These agents serialize their turns (openclaw's main lane), so in practice
+   * there is exactly one live delegated turn when a skill runs, and returning it
+   * is correct. The ">1 → {}" rule is a deliberate FAIL-CLOSED guard: if two
+   * delegated turns ever overlap we return nothing (the skill surfaces its own
+   * auth error) rather than risk handing one caller's credential to another.
+   */
+  currentSingle(): DelegatedCredentials {
+    const live: DelegatedCredentials[] = [];
+    for (const [key, entry] of this.entries) {
+      if (entry.expiresAt <= this.now()) this.entries.delete(key);
+      else live.push(entry.creds);
+    }
+    return live.length === 1 ? live[0]! : {};
+  }
+
   /** Drop a session's creds — called when the turn ends. Idempotent. */
   clear(sessionKey: string): void {
     this.entries.delete(sessionKey);

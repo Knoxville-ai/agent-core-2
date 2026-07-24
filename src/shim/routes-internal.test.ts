@@ -37,6 +37,11 @@ function lookupUrl(sessionKey: string): URL {
   );
 }
 
+/** No `session_key` param — the exec-shim caller shape (resolved via currentSingle). */
+function currentUrl(): URL {
+  return new URL("http://localhost/internal/delegated-credentials");
+}
+
 describe("handleDelegatedCredentialsLookup", () => {
   it("returns the staged creds for a session key (gateway-token authed)", () => {
     const store = new DelegatedCredentialStore();
@@ -89,6 +94,51 @@ describe("handleDelegatedCredentialsLookup", () => {
         makeEnv(),
         store,
       ),
+    ).toThrow(HttpError);
+  });
+
+  // The exec-shim (docker/knox-python3-shim.py) hits this route WITHOUT a
+  // session_key, because openclaw exposes no session key to a skill's exec
+  // subprocess. The route then resolves the single currently-live turn.
+  it("no session_key → returns the single live turn's creds (exec-shim caller shape)", () => {
+    const store = new DelegatedCredentialStore();
+    store.set("a2a:conv-1", { SPORTSINC_API_KEY: "sekret" });
+    const { res, state } = fakeRes();
+
+    handleDelegatedCredentialsLookup(currentUrl(), fakeReq(`Bearer ${TOKEN}`), res, makeEnv(), store);
+
+    expect(state.status).toBe(200);
+    expect(JSON.parse(state.body)).toEqual({ credentials: { SPORTSINC_API_KEY: "sekret" } });
+  });
+
+  it("no session_key + two concurrent turns → {} (fail-closed, never guess the caller)", () => {
+    const store = new DelegatedCredentialStore();
+    store.set("a2a:conv-A", { SPORTSINC_API_KEY: "aaa" });
+    store.set("a2a:conv-B", { SPORTSINC_API_KEY: "bbb" });
+    const { res, state } = fakeRes();
+
+    handleDelegatedCredentialsLookup(currentUrl(), fakeReq(`Bearer ${TOKEN}`), res, makeEnv(), store);
+
+    expect(JSON.parse(state.body)).toEqual({ credentials: {} });
+  });
+
+  it("no session_key + nothing staged → {} (skill surfaces its own auth error)", () => {
+    const { res, state } = fakeRes();
+    handleDelegatedCredentialsLookup(
+      currentUrl(),
+      fakeReq(`Bearer ${TOKEN}`),
+      res,
+      makeEnv(),
+      new DelegatedCredentialStore(),
+    );
+    expect(JSON.parse(state.body)).toEqual({ credentials: {} });
+  });
+
+  it("still requires the gateway token even without a session_key", () => {
+    const store = new DelegatedCredentialStore();
+    store.set("a2a:conv-1", { SPORTSINC_API_KEY: "v" });
+    expect(() =>
+      handleDelegatedCredentialsLookup(currentUrl(), fakeReq(), fakeRes().res, makeEnv(), store),
     ).toThrow(HttpError);
   });
 });

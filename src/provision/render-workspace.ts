@@ -30,6 +30,19 @@ const DELEGATED_CREDS_PLUGIN_DIR = fileURLToPath(
 const SKILLS_VENV_BIN = "/opt/skills-venv/bin";
 
 /**
+ * Dir holding the delegated-credential exec shim (a `python3` that injects this
+ * turn's brokered creds, then re-execs the real venv python3 — see Dockerfile +
+ * docker/knox-python3-shim.py). It is prepended AHEAD of the venv so that on a
+ * skill's `python3 ...` the exec tool resolves the shim first. This is the
+ * runtime's per-turn credential-injection path for delegated A2A turns, which
+ * openclaw's chat-completions run can't reach via `before_tool_call` plugins.
+ * The shim itself re-execs `${SKILLS_VENV_BIN}/python3`, so `requests` etc. are
+ * still on hand. Only `python3` is shadowed; `uv`/`pip`/other bins still resolve
+ * to the venv. Scoped to the exec PATH only — boot-time python3 is unaffected.
+ */
+const EXEC_SHIM_BIN = "/opt/knox-exec-shim";
+
+/**
  * Renders an openclaw workspace from env vars + Supabase Storage, then
  * writes openclaw.json so `openclaw gateway` can boot cold against it.
  *
@@ -259,15 +272,19 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     mcp: {
       servers: mcpServers,
     },
-    // Make the skills venv's interpreter win on the exec tool's PATH. Skills
-    // shell out with a bare `python3 scripts/foo.py`; on host=gateway openclaw
-    // rebuilds that PATH from a minimal login shell and ignores env.PATH
-    // overrides, so the ONLY way the venv (which holds each skill's `install.uv`
-    // deps, e.g. `requests`) lands on PATH is this prepend. Applies to every
-    // agent, not just delegated ones — any Python skill needs it.
+    // Prepend, in order: (1) the delegated-credential exec shim, then (2) the
+    // skills venv. openclaw rebuilds the exec PATH from a minimal login shell
+    // and ignores per-call env.PATH, so `tools.exec.pathPrepend` is the only way
+    // to control what a skill's bare `python3 scripts/foo.py` resolves to. The
+    // shim goes first so it can inject this turn's brokered credentials (the
+    // delegated A2A path openclaw's chat-completions run can't reach via
+    // before_tool_call plugins) and then re-exec the venv python3 — which is why
+    // the venv still needs to be on PATH right behind it (for `requests` and for
+    // `uv`/`pip`, which the shim doesn't shadow). Applies to every agent; on a
+    // non-delegated turn the shim finds nothing staged and is a no-op.
     tools: {
       exec: {
-        pathPrepend: [SKILLS_VENV_BIN],
+        pathPrepend: [EXEC_SHIM_BIN, SKILLS_VENV_BIN],
       },
     },
     // We don't bind any native channels — all conversation flows through
