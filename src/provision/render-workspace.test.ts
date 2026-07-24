@@ -246,10 +246,11 @@ describe("buildOpenclawConfig tools.exec.pathPrepend", () => {
     );
   }
 
-  it("prepends the skills venv bin so exec's python3 finds install.uv deps", () => {
-    // Independent of A2A: every Python skill needs the venv on the exec PATH.
+  it("prepends the exec shim then the skills venv (order matters)", () => {
+    // The shim must resolve FIRST (it injects delegated creds then re-execs the
+    // venv python3); the venv sits right behind it for requests/uv/pip.
     const config = buildOpenclawConfig(makeEnv({}), "/ws");
-    expect(pathPrepend(config)).toEqual(["/opt/skills-venv/bin"]);
+    expect(pathPrepend(config)).toEqual(["/opt/knox-exec-shim", "/opt/skills-venv/bin"]);
   });
 
   it("is present even with the platform MCP + delegation plugin wired", () => {
@@ -260,7 +261,7 @@ describe("buildOpenclawConfig tools.exec.pathPrepend", () => {
       }),
       "/ws",
     );
-    expect(pathPrepend(config)).toEqual(["/opt/skills-venv/bin"]);
+    expect(pathPrepend(config)).toEqual(["/opt/knox-exec-shim", "/opt/skills-venv/bin"]);
   });
 });
 

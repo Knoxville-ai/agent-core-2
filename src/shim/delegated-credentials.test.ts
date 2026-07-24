@@ -85,6 +85,44 @@ describe("DelegatedCredentialStore", () => {
   });
 });
 
+describe("DelegatedCredentialStore.currentSingle (exec-shim, no session key)", () => {
+  it("zero staged turns → {} (nothing to inject)", () => {
+    expect(new DelegatedCredentialStore().currentSingle()).toEqual({});
+  });
+
+  it("exactly one staged turn → that turn's creds (the common case; turns serialize)", () => {
+    const store = new DelegatedCredentialStore();
+    store.set("a2a:conv-1", { SPORTSINC_API_KEY: "only-one" });
+    expect(store.currentSingle()).toEqual({ SPORTSINC_API_KEY: "only-one" });
+  });
+
+  it("two concurrent staged turns → {} (FAIL-CLOSED: never guess which caller)", () => {
+    const store = new DelegatedCredentialStore();
+    store.set("a2a:conv-A", { SPORTSINC_API_KEY: "aaa" });
+    store.set("a2a:conv-B", { SPORTSINC_API_KEY: "bbb" });
+    expect(store.currentSingle()).toEqual({});
+  });
+
+  it("resolves back to the survivor once the other concurrent turn is cleared", () => {
+    const store = new DelegatedCredentialStore();
+    store.set("a2a:conv-A", { SPORTSINC_API_KEY: "aaa" });
+    store.set("a2a:conv-B", { SPORTSINC_API_KEY: "bbb" });
+    expect(store.currentSingle()).toEqual({});
+    store.clear("a2a:conv-B");
+    expect(store.currentSingle()).toEqual({ SPORTSINC_API_KEY: "aaa" });
+  });
+
+  it("ignores an expired entry — an expired + a live turn still reads as the single live one", () => {
+    let now = 1000;
+    const store = new DelegatedCredentialStore({ ttlMs: 100, now: () => now });
+    store.set("a2a:stale", { SPORTSINC_API_KEY: "old" });
+    now = 1101; // 'stale' is now past its TTL
+    store.set("a2a:fresh", { SPORTSINC_API_KEY: "new" });
+    expect(store.currentSingle()).toEqual({ SPORTSINC_API_KEY: "new" });
+    expect(store.size()).toBe(1);
+  });
+});
+
 describe("credentialKeyNames", () => {
   it("returns sorted key names only (never values)", () => {
     expect(credentialKeyNames({ B_KEY: "secret-b", A_KEY: "secret-a" })).toEqual([
