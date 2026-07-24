@@ -3,7 +3,6 @@ import { loadEnv } from "./env.js";
 import { log } from "./log.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
 import { maybeStartOllama } from "./openclaw/ollama-process.js";
-import { MemoryCheckpoint } from "./provision/agent-memory.js";
 import { refreshManifest } from "./provision/manifest.js";
 import { restoreOAuthStore } from "./provision/oauth-store.js";
 import { assertStateDirWritable } from "./provision/state-dir.js";
@@ -26,18 +25,14 @@ async function main(): Promise<void> {
   //    silently lose all session/memory continuity, so we crash instead.
   assertStateDirWritable(env.OPENCLAW_STATE_DIR);
 
-  // 1. Bundle-driven bootstrap: fetch capabilities, install skills,
-  //    validate env, assemble SOUL.md, render the openclaw workspace.
-  //    Throws on missing required creds or skill version conflicts.
-  await bootstrap(env);
-
-  // 1b. Restore agent-owned memory (playbook.md + notes/) with volume-wins
-  //     precedence: keep the live copy on the M1 volume if present, else pull
-  //     the last checkpoint from Supabase (fresh container / re-provisioned
-  //     service). This runs AFTER bootstrap rendered the console-authored
-  //     prompts, and never touches them. See ./provision/agent-memory.ts.
-  const memory = MemoryCheckpoint.fromEnv(env);
-  await memory.restore();
+  // 1. Bundle-driven bootstrap: fetch capabilities, install skills, validate
+  //    env, restore agent-owned memory (playbook.md + notes/, volume-wins),
+  //    assemble SOUL.md (constitution + identity + capabilities + delegation +
+  //    memory digest + playbook), and render the openclaw workspace. Throws on
+  //    missing required creds or skill version conflicts. The returned `memory`
+  //    checkpoint is the one restored during boot — reuse it (do not construct a
+  //    second, which would double-restore).
+  const { memory } = await bootstrap(env);
 
   // 2. Refresh the agent's manifest so the console sees the boot.
   //    Don't fail boot if Storage is briefly unavailable — log and move on.

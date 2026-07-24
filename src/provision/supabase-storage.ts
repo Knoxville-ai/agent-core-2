@@ -32,6 +32,24 @@ export class AgentStorage {
     return `${this.prefix}/${rel.replace(/^\/+/, "")}`;
   }
 
+  /**
+   * Download an object by its RAW bucket key, ignoring the per-agent prefix.
+   * Used for org-agnostic platform assets (e.g. `platform/constitution.md`)
+   * that live at the bucket root, outside `orgs/{org}/agents/{uid}/`. Every
+   * caller is service-role. Soft-fails to null so boot never blocks on it.
+   */
+  async downloadShared(rel: string): Promise<string | null> {
+    const key = rel.replace(/^\/+/, "");
+    const { data, error } = await this.client.storage.from(BUCKET).download(key);
+    if (error) {
+      if (!error.message?.toLowerCase().includes("not found")) {
+        log.warn("storage.downloadShared failed", { key, error: error.message });
+      }
+      return null;
+    }
+    return await data.text();
+  }
+
   async downloadText(rel: string): Promise<string | null> {
     const key = this.key(rel);
     const { data, error } = await this.client.storage.from(BUCKET).download(key);

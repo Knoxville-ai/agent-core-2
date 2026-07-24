@@ -54,6 +54,11 @@ COPY --chown=agent:agent src ./src
 # delegated-credentials plugin is loaded via plugins.load.paths in openclaw.json
 # (see src/provision/render-workspace.ts), so the dir must exist in the image.
 COPY --chown=agent:agent openclaw-plugins ./openclaw-plugins
+# Platform constitution — the shared "soul" every agent boots with. Read at
+# runtime from /app/prompts/constitution.md (see loadConstitution in
+# src/provision/render-workspace.ts) as the guaranteed fallback when Storage has
+# no platform/constitution.md override. Not built by tsc, so copy it as-is.
+COPY --chown=agent:agent prompts ./prompts
 RUN npm run build && npm prune --omit=dev
 
 # --- Python toolchain for skills that declare `install.uv` -------------------
