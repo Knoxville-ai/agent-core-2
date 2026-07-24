@@ -83,6 +83,34 @@ export interface InsertAttachmentRow {
   height?: number;
 }
 
+/** A callee-owned preference row about a specific calling org/agent, from
+ *  `agent_caller_preferences` (console migration 0037). */
+export interface CallerPreferenceRow {
+  note: string;
+  key: string | null;
+  relationship: string | null;
+  tags: string[] | null;
+  salience: number | null;
+  pinned: boolean | null;
+  last_interaction_at: string | null;
+}
+
+/** A durable learned memory row, from `agent_memories` (console migration
+ *  0036). Only the fields the per-turn `# RECENT` injection needs. */
+export interface AgentMemoryRow {
+  title: string | null;
+  body: string;
+  kind: string | null;
+  tags: string[] | null;
+}
+
+export interface CallerContextQuery {
+  targetAgentUid: string;
+  callerAgentUid?: string | null;
+  callerOrgId?: string | null;
+  limit?: number;
+}
+
 export class MessagingDB {
   private readonly client: SupabaseClient;
 
@@ -134,6 +162,96 @@ export class MessagingDB {
       return [];
     }
     return (data ?? []) as MessageRow[];
+  }
+
+  /**
+   * Read what THIS agent has learned about a caller (org and/or agent) from
+   * `agent_caller_preferences`. Agent-specific rows and org-level rows (where
+   * `caller_agent_uid is null`) are both returned and merged, most-relevant
+   * first. All identifiers go through parameterized `.eq()`/`.is()` filters (no
+   * PostgREST filter-string interpolation). Fail-open: returns `[]` on any error
+   * — including "relation does not exist" before the migration is applied — so a
+   * turn never breaks because caller memory isn't available yet.
+   */
+  async getCallerContext(q: CallerContextQuery): Promise<CallerPreferenceRow[]> {
+    const limit = q.limit ?? 8;
+    const sel =
+      "note,key,relationship,tags,salience,pinned,last_interaction_at";
+    const rows: CallerPreferenceRow[] = [];
+    try {
+      if (q.callerAgentUid) {
+        const { data, error } = await this.client
+          .from("agent_caller_preferences")
+          .select(sel)
+          .eq("target_agent_uid", q.targetAgentUid)
+          .eq("caller_agent_uid", q.callerAgentUid)
+          .order("pinned", { ascending: false })
+          .order("salience", { ascending: false })
+          .order("last_interaction_at", { ascending: false })
+          .limit(limit);
+        if (error) {
+          log.warn("getCallerContext (agent) failed", { err: error.message });
+          return [];
+        }
+        rows.push(...((data ?? []) as CallerPreferenceRow[]));
+      }
+      if (q.callerOrgId) {
+        const { data, error } = await this.client
+          .from("agent_caller_preferences")
+          .select(sel)
+          .eq("target_agent_uid", q.targetAgentUid)
+          .eq("caller_org_id", q.callerOrgId)
+          .is("caller_agent_uid", null)
+          .order("pinned", { ascending: false })
+          .order("salience", { ascending: false })
+          .limit(limit);
+        if (!error) rows.push(...((data ?? []) as CallerPreferenceRow[]));
+      }
+    } catch (err) {
+      log.warn("getCallerContext threw", { err: String(err) });
+      return [];
+    }
+    // De-dupe by (key ?? note); keep first (most-relevant) occurrence.
+    const seen = new Set<string>();
+    const deduped: CallerPreferenceRow[] = [];
+    for (const r of rows) {
+      const id = r.key ?? r.note;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      deduped.push(r);
+    }
+    return deduped.slice(0, limit);
+  }
+
+  /**
+   * Recent durable memories tied to this conversation, for the per-turn
+   * `# RECENT` injection (the live path for memory written mid-session, since
+   * SOUL's `# MEMORY` digest is only a boot snapshot). Fail-open like
+   * getCallerContext.
+   */
+  async getRecentMemories(
+    agentUid: string,
+    conversationId: string,
+    limit = 6,
+  ): Promise<AgentMemoryRow[]> {
+    try {
+      const { data, error } = await this.client
+        .from("agent_memories")
+        .select("title,body,kind,tags")
+        .eq("agent_uid", agentUid)
+        .eq("conversation_id", conversationId)
+        .is("superseded_by", null)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (error) {
+        log.warn("getRecentMemories failed", { err: error.message });
+        return [];
+      }
+      return (data ?? []) as AgentMemoryRow[];
+    } catch (err) {
+      log.warn("getRecentMemories threw", { err: String(err) });
+      return [];
+    }
   }
 
   async insertMessage(opts: InsertMessageOptions): Promise<string | null> {

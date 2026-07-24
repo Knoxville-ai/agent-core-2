@@ -6,6 +6,7 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, type Principal } from "./auth.js";
+import { buildDynamicContext, parseAdvisoryCaller } from "./dynamic-context.js";
 import type { CancelRegistry } from "./cancel-registry.js";
 import { lookupCapabilities, type ModelCapabilities } from "./model-capabilities.js";
 import type {
@@ -159,6 +160,28 @@ export async function handleSendMessage(
     workspaceDir,
     conversationId,
   );
+
+  // DYNAMIC layer: recompute per-turn caller context (who is calling + what we
+  // have learned about them) and conversation-scoped recent memory, and prepend
+  // it as a leading `system` message. SOUL.md carries the STATIC identity;
+  // anything per-caller/per-turn must be injected here because SOUL is assembled
+  // once at boot. Fail-open — a missing table or a DB hiccup must never break a
+  // turn. (If the openclaw gateway is found to drop inbound system messages, fold
+  // this into a leading user-role preamble instead; see the rollout checklist.)
+  try {
+    const dynamic = await buildDynamicContext(
+      db,
+      env,
+      principal,
+      parseAdvisoryCaller(req.headers),
+      conversationId,
+    );
+    if (dynamic) openaiMessages.unshift({ role: "system", content: dynamic });
+  } catch (err) {
+    log.warn("dynamic context injection failed (non-fatal)", {
+      err: String(err),
+    });
+  }
 
   // 5. Reserve an assistant row; we stream into it.
   const assistantMessageId = await db.insertMessage({
