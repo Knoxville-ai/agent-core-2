@@ -144,12 +144,11 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
   // playbook.md is intentionally NOT written here — see the header note. It is
   // restored (volume-wins) and mirrored by MemoryCheckpoint (./agent-memory.ts).
 
-  const config = buildOpenclawConfig(env, ws);
-  await writeFile(
-    join(stateDir, "openclaw.json"),
-    JSON.stringify(config, null, 2),
-    "utf8",
-  );
+  // openclaw.json is also written earlier in bootstrap (before any skill
+  // install) so the `openclaw skills install` CLI validates against a current,
+  // valid config. Re-writing it here keeps renderWorkspace self-contained and
+  // idempotent — same env in, same file out.
+  await writeOpenclawConfig(env);
 
   log.info("workspace rendered", {
     stateDir,
@@ -225,6 +224,30 @@ export function parseExtraMcpServers(
     servers[name] = expand(cfg);
   }
   return { servers };
+}
+
+/**
+ * Write just `openclaw.json` (not SOUL/AGENTS/TOOLS) into the state dir.
+ *
+ * Called at TWO points in a boot: early in bootstrap — before any
+ * `openclaw skills install`, whose CLI loads + validates the config and
+ * refuses to run against an invalid one — and again from renderWorkspace at
+ * the end. The early write matters because the on-disk openclaw.json may be a
+ * stale, invalid config left by a previous failed boot (e.g. a since-fixed bad
+ * provider block); without a fresh valid file first, every boot-list skill
+ * install fails and the agent boots without its skills. buildOpenclawConfig is
+ * a pure function of env, so both writes produce identical bytes.
+ */
+export async function writeOpenclawConfig(env: AgentEnv): Promise<void> {
+  const stateDir = env.OPENCLAW_STATE_DIR;
+  const ws = join(stateDir, "workspace");
+  await mkdir(ws, { recursive: true });
+  const config = buildOpenclawConfig(env, ws);
+  await writeFile(
+    join(stateDir, "openclaw.json"),
+    JSON.stringify(config, null, 2),
+    "utf8",
+  );
 }
 
 /** Exported for unit tests — builds the openclaw.json object from env + the

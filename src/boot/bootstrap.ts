@@ -17,6 +17,7 @@ import {
   loadConstitution,
   loadPromptBlobs,
   renderWorkspace,
+  writeOpenclawConfig,
 } from "../provision/render-workspace.js";
 import { loadBootListSkills } from "../skills/boot-list.js";
 import { ClawhubSkillResolver } from "../skills/clawhub.js";
@@ -34,9 +35,10 @@ import type { InstalledSkill, SkillResolver } from "../skills/resolver.js";
  *   1. Fetch the agent's bundle via the platform MCP (`get_my_bundle`).
  *      Empty / no-MCP-configured is OK — the agent still boots as a
  *      vanilla openclaw vessel.
- *   2. Install every declared skill into `workspace/skills/`. Two
- *      capabilities requiring the same skill at different versions is a
- *      fatal error (SkillVersionConflictError).
+ *   2. Write a valid openclaw.json, then install every declared skill into
+ *      `workspace/skills/` (the install CLI validates the config, so it must be
+ *      current first). Two capabilities requiring the same skill at different
+ *      versions is a fatal error (SkillVersionConflictError).
  *   3. Validate every `required: true` envVarSpec is present in
  *      process.env under its alias. Fail loud with every missing key.
  *   4. Assemble SOUL.md: base prompt + identity + per-capability fragments.
@@ -69,6 +71,16 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   // persisted (no stale-skill drift). The single wipe here is shared so the
   // boot-list install doesn't clobber the bundle install and vice-versa.
   await resetWorkspaceSkills(workspaceSkillsDir);
+
+  // Write a valid openclaw.json BEFORE installing any skill. Skill installs
+  // shell out to `openclaw skills install`, whose CLI loads + validates the
+  // config and refuses to run against an invalid one. On a boot that follows a
+  // failed one — e.g. a since-fixed bad provider block, or a model switch — the
+  // on-disk openclaw.json is stale/invalid until renderWorkspace rewrites it at
+  // the end of boot, which would be too late: every skill install would fail
+  // and the agent would come up with no skills. renderWorkspace writes the same
+  // file again later; buildOpenclawConfig is pure so the bytes are identical.
+  await writeOpenclawConfig(env);
 
   let installedSkills: InstalledSkill[] = [];
   if (bundle) {

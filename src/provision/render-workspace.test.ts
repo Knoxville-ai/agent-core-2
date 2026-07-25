@@ -1,3 +1,7 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type { AgentEnv } from "../env.js";
@@ -6,6 +10,7 @@ import {
   DELEGATED_CREDS_PLUGIN_ID,
   LOCAL_OLLAMA_BASE_URL,
   parseExtraMcpServers,
+  writeOpenclawConfig,
 } from "./render-workspace.js";
 
 /** Minimal AgentEnv with sane defaults; override per-case. */
@@ -114,6 +119,33 @@ describe("buildOpenclawConfig model provider block", () => {
     expect(config.models).toBeUndefined();
     expect(config.auth).toBeDefined();
     expect(config.plugins).toBeDefined();
+  });
+});
+
+describe("writeOpenclawConfig", () => {
+  it("writes a valid openclaw.json to the state dir before skills install", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "knox-openclaw-"));
+    try {
+      await writeOpenclawConfig(
+        makeEnv({
+          OPENCLAW_STATE_DIR: dir,
+          LLM_PROVIDER: "openrouter",
+          LLM_MODEL: "qwen/qwen3.7-plus",
+          LLM_API_KEY: "sk-or-test",
+        }),
+      );
+      const raw = await readFile(join(dir, "openclaw.json"), "utf8");
+      const config = JSON.parse(raw) as Record<string, unknown>;
+      const agents = config.agents as { defaults: { model: { primary: string } } };
+      // OpenRouter via the built-in provider: <provider>/<slug> primary, and a
+      // providers.openrouter block carrying only the key (the built-in provider
+      // supplies the endpoint — no baseUrl, which is the key openclaw rejects if
+      // mis-cased).
+      expect(agents.defaults.model.primary).toBe("openrouter/qwen/qwen3.7-plus");
+      expect(providers(config)).toEqual({ openrouter: { apiKey: "sk-or-test" } });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
