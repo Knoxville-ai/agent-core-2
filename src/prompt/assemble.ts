@@ -145,7 +145,15 @@ export function assembleSystemPrompt(input: AssembleInput): string {
         "conversation, then `send_message` to ask and read the reply. For work " +
         "that may take minutes, use `start_task` + `wait_for_task` instead. " +
         "Only the agents listed here are reachable — do not attempt to contact " +
-        "any other agent.",
+        "any other agent.\n\n" +
+        "A reply from one of these agents may come back as a structured " +
+        "multiple-choice question instead of plain text (the agent needs a " +
+        "decision to continue). When that happens, first try to answer it " +
+        "yourself: `recall` your own memory and check your playbook for a " +
+        "standing preference that settles it, and if one does, answer the agent " +
+        "directly with `send_message`. Only escalate to your user — by asking " +
+        "them the same multiple-choice question — when you genuinely cannot " +
+        "decide, then relay their answer back to the agent that asked.",
     );
     parts.push("");
     parts.push(connParts.join("\n\n"));

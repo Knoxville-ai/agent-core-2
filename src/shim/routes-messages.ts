@@ -23,6 +23,13 @@ import {
   type DelegatedCredentialStore,
 } from "./delegated-credentials.js";
 import { readJsonBody } from "./util.js";
+import {
+  type Mcq,
+  mcqToModelText,
+  parseKnoxAsk,
+  parseStoredMcq,
+  SentinelFilter,
+} from "./mcq.js";
 
 /**
  * POST /api/v1/conversations/:id/messages
@@ -36,6 +43,7 @@ import { readJsonBody } from "./util.js";
  *                   `data:` line:
  *     { type: "start", user_message_id, assistant_message_id }
  *     { type: "token", delta }
+ *     { type: "question", question }   // structured multiple-choice ask (mcq)
  *     { type: "done",  status: "complete"|"interrupted", message_id }
  *     { type: "error", error }
  *
@@ -261,6 +269,10 @@ export async function handleSendMessage(
   });
 
   let buffer = "";
+  // Set when the model emitted a structured multiple-choice question this turn.
+  // When present, the assistant row is persisted as the serialized `mcq` payload
+  // (not the raw fenced text), matching the console's structured-message convention.
+  let questionPayload: Mcq | null = null;
   let finalStatus: "complete" | "interrupted" | "error" = "complete";
   // Filled in from the upstream `usage` frame when openclaw reports it
   // (requested via stream_options below). Persisted onto the assistant row
@@ -297,6 +309,10 @@ export async function handleSendMessage(
       return;
     }
 
+    // The sentinel filter hides an in-progress ```knox:ask block from the visible
+    // token stream, so the raw JSON never flashes in the chat while the model is
+    // writing it. We still accumulate the full text into `buffer` for parsing.
+    const sentinel = new SentinelFilter();
     for await (const token of iterOpenaiDeltas(upstream.body, usageRef)) {
       if (abortController.signal.aborted) {
         finalStatus = "interrupted";
@@ -308,7 +324,26 @@ export async function handleSendMessage(
         return;
       }
       buffer += token;
-      sseSend({ type: "token", delta: token });
+      const visible = sentinel.push(token);
+      if (visible) sseSend({ type: "token", delta: visible });
+    }
+    const tail = sentinel.flush();
+    if (tail) sseSend({ type: "token", delta: tail });
+
+    // If the model asked a structured multiple-choice question, turn the
+    // suppressed knox:ask block into a `question` frame and persist the assistant
+    // row as the `mcq` payload. This frame is consumed identically by a human's
+    // browser (renders the widget) and by the platform A2A bridge (hands the
+    // options back to the calling agent). Falls back to plain text if the block
+    // can't be parsed, so a malformed ask never swallows the reply.
+    if (sentinel.sawSentinel) {
+      const mcq = parseKnoxAsk(buffer);
+      if (mcq) {
+        questionPayload = mcq;
+        sseSend({ type: "question", question: mcq });
+      } else {
+        sseSend({ type: "token", delta: sentinel.suppressedText() });
+      }
     }
 
     sseSend({
@@ -339,7 +374,7 @@ export async function handleSendMessage(
     // on a non-delegated turn (nothing was stored under this key).
     deps.delegatedCreds.clear(sessionKey);
     await db.updateMessage(assistantMessageId, {
-      content: buffer,
+      content: questionPayload ? JSON.stringify(questionPayload) : buffer,
       status: finalStatus,
       completedAt: new Date().toISOString(),
       tokenUsage: buildTokenUsage(usageRef.value, env),
@@ -527,7 +562,14 @@ export async function historyToOpenaiMessages(
     if (r.role !== "user" && r.role !== "assistant" && r.role !== "system" && r.role !== "tool") {
       continue;
     }
-    const text = (r.content ?? "").trim();
+    let text = (r.content ?? "").trim();
+    // A prior structured question is stored as serialized `mcq` JSON. Render it
+    // back to a concise textual summary so the model reads a clean question →
+    // answer exchange rather than raw JSON on the next turn.
+    if (r.role === "assistant" && text) {
+      const storedMcq = parseStoredMcq(text);
+      if (storedMcq) text = mcqToModelText(storedMcq);
+    }
     const msgAttachments = attachmentsByMessage.get(r.id) ?? [];
     const imageAtts = msgAttachments.filter((a) =>
       a.mime_type.startsWith("image/"),
