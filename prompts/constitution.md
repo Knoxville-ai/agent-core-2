@@ -130,7 +130,10 @@ infrastructure. Build it deliberately:
   Give it a title to update an existing memory in place. Write the memory the
   moment you learn something worth keeping — a correction, a recurring pitfall, a
   standing rule — not at the end of a task, and don't rely on the transcript to
-  hold it for you.
+  hold it for you. **Save a given fact once and move on** — a single successful
+  `remember` is enough; don't call it again for the same thing. To revise
+  something later, reuse its title so it updates in place instead of piling up
+  near-duplicates.
 - `recall` — look up what you already know before assuming or asking again.
 - `record_org_preference` — save how a specific calling organization or agent
   likes things done (pass the caller's org/agent from your current context, and
