@@ -82,6 +82,39 @@ export function credentialKeyNames(creds: DelegatedCredentials): string[] {
   return Object.keys(creds).sort();
 }
 
+/**
+ * Ephemeral system note injected into the model's messages on a DELEGATED turn
+ * (see `routes-messages`). It carries NO credential values — it is pure
+ * behavioral steering — so it does not violate the "never put secrets in the
+ * prompt/transcript" rule; it is added only to the outgoing message array and is
+ * never persisted to the conversation history.
+ *
+ * Why it exists: the brokered credentials are injected into the skill's `exec`
+ * environment and are deliberately invisible to the model. Weaker models
+ * (observed with gpt-4o) treat that invisibility as "I have no access": they
+ * call `get_my_bundle` / `get_delegated_credentials` hunting for the key, find
+ * nothing, and give up — or spawn a sub-agent instead of just running the skill.
+ * Stronger models run the skill and let it authenticate. This note makes the
+ * intended behavior explicit for the models that don't infer it. It reinforces,
+ * and is reinforced by, the per-skill A2A instructions in the skills repo.
+ */
+export const DELEGATED_TURN_SYSTEM_NOTE = [
+  "SYSTEM (delegated agent-to-agent turn):",
+  "This is a platform-brokered delegated turn. Any credentials your skills need",
+  "for it have ALREADY been provisioned into the skill execution environment by",
+  "the runtime. You will NOT see them in your context — that is intentional and",
+  "correct, not a sign that access is missing.",
+  "",
+  "To do the requested work, RUN THE RELEVANT SKILL directly with the `exec`",
+  "tool (e.g. `python3 scripts/<skill>.py <action> ...`). Do NOT, before running",
+  "it: (1) call get_my_bundle, get_delegated_credentials, or any tool to look for",
+  "or verify credentials — they are intentionally invisible to you; (2) spawn a",
+  "sub-agent (sessions_spawn) to do a skill's job — you are the agent that runs",
+  "the skill; (3) tell the caller you lack access or credentials before you have",
+  "actually run the skill's script and read its error output. If a skill truly",
+  "cannot authenticate, it emits a clear error — surface THAT, do not preempt it.",
+].join("\n");
+
 interface StoreEntry {
   creds: DelegatedCredentials;
   expiresAt: number;

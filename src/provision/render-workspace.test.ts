@@ -6,6 +6,7 @@ import {
   DELEGATED_CREDS_PLUGIN_ID,
   LOCAL_OLLAMA_BASE_URL,
   parseExtraMcpServers,
+  parseToolsDeny,
 } from "./render-workspace.js";
 
 /** Minimal AgentEnv with sane defaults; override per-case. */
@@ -262,6 +263,74 @@ describe("buildOpenclawConfig tools.exec.pathPrepend", () => {
       "/ws",
     );
     expect(pathPrepend(config)).toEqual(["/opt/knox-exec-shim", "/opt/skills-venv/bin"]);
+  });
+});
+
+describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () => {
+  function tools(config: Record<string, unknown>): Record<string, unknown> {
+    return (config.tools as Record<string, unknown> | undefined) ?? {};
+  }
+
+  it("emits no profile/deny keys by default (unset → openclaw default, no restriction)", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({}), "/ws"));
+    expect(t.profile).toBeUndefined();
+    expect(t.deny).toBeUndefined();
+    // …but the exec shim/venv PATH is always present.
+    expect(t.exec).toBeDefined();
+  });
+
+  it("wires tools.profile when OPENCLAW_TOOLS_PROFILE is set", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({ OPENCLAW_TOOLS_PROFILE: "coding" }), "/ws"));
+    expect(t.profile).toBe("coding");
+  });
+
+  it("wires tools.deny (parsed) when OPENCLAW_TOOLS_DENY is set", () => {
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({ OPENCLAW_TOOLS_DENY: "group:sessions, sessions_spawn subagents" }),
+        "/ws",
+      ),
+    );
+    expect(t.deny).toEqual(["group:sessions", "sessions_spawn", "subagents"]);
+  });
+
+  it("keeps the exec pathPrepend intact alongside a deny list", () => {
+    const t = tools(
+      buildOpenclawConfig(makeEnv({ OPENCLAW_TOOLS_DENY: "group:sessions" }), "/ws"),
+    );
+    expect((t.exec as { pathPrepend?: string[] }).pathPrepend).toEqual([
+      "/opt/knox-exec-shim",
+      "/opt/skills-venv/bin",
+    ]);
+    expect(t.deny).toEqual(["group:sessions"]);
+  });
+});
+
+describe("parseToolsDeny", () => {
+  it("empty / missing → []", () => {
+    expect(parseToolsDeny(undefined)).toEqual([]);
+    expect(parseToolsDeny("")).toEqual([]);
+    expect(parseToolsDeny("   ")).toEqual([]);
+  });
+
+  it("splits on commas, spaces, and newlines", () => {
+    expect(parseToolsDeny("a, b,c\n d")).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("de-duplicates while preserving first-seen order", () => {
+    expect(parseToolsDeny("exec, group:sessions, exec, subagents")).toEqual([
+      "exec",
+      "group:sessions",
+      "subagents",
+    ]);
+  });
+});
+
+describe("buildOpenclawConfig bootstrapMaxChars", () => {
+  it("raises the SOUL truncation limit above openclaw's 12000 default", () => {
+    const config = buildOpenclawConfig(makeEnv({}), "/ws");
+    const defaults = (config.agents as { defaults: { bootstrapMaxChars?: number } }).defaults;
+    expect(defaults.bootstrapMaxChars).toBeGreaterThan(12000);
   });
 });
 
