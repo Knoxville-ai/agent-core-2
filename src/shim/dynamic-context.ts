@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import type { Principal } from "./auth.js";
+import { listKnowledgeNames } from "./knowledge-index.js";
 import type { CallerPreferenceRow, MessagingDB } from "./supabase-db.js";
 
 /**
@@ -67,7 +68,6 @@ export async function buildDynamicContext(
   env: AgentEnv,
   principal: Principal,
   advisory: AdvisoryCaller,
-  conversationId: string,
 ): Promise<string | null> {
   let callerOrgId: string | null = null;
   let callerAgentUid: string | null = null;
@@ -122,15 +122,30 @@ export async function buildDynamicContext(
     sections.push(lines.join("\n"));
   }
 
-  // Conversation-scoped recent memory — the live view of anything written this
-  // session (SOUL's # MEMORY is only a boot snapshot).
-  const recent = await db.getRecentMemories(env.AGENT_UID, conversationId);
+  // Recent memory — the live view of anything the agent wrote lately (SOUL's
+  // # MEMORY is only a boot snapshot). Agent-scoped: model-written memories are
+  // not conversation-linked (see MessagingDB.getRecentMemories).
+  const recent = await db.getRecentMemories(env.AGENT_UID);
   if (recent.length > 0) {
-    const lines: string[] = ["## Recent memory (this conversation)"];
+    const lines: string[] = ["## Recent memory"];
     for (const m of recent) {
       const title = m.title ? `**${m.title.trim()}** — ` : "";
       lines.push(`- ${title}${m.body.trim()}`);
     }
+    sections.push(lines.join("\n"));
+  }
+
+  // Knowledge library index — so the agent always knows which reference files
+  // exist and can `read_knowledge` them on demand, with no boot/redeploy when a
+  // file changes. Just names (never contents); the tool reads on demand.
+  const knowledge = await listKnowledgeNames(env);
+  if (knowledge.length > 0) {
+    const lines: string[] = [
+      "## Knowledge library",
+      "Reference files available to you. Call `read_knowledge` with a filename " +
+        "when one is relevant — don't guess at contents you can look up:",
+    ];
+    lines.push(...knowledge.map((n) => `- ${n}`));
     sections.push(lines.join("\n"));
   }
 
