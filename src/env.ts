@@ -90,6 +90,24 @@ const Schema = z.object({
   // "knoxville_platform" cannot be overridden here.
   OPENCLAW_MCP_SERVERS: z.string().optional(),
 
+  // Optional per-agent tool policy, passed through to openclaw's
+  // `tools.profile` / `tools.deny`. Default is unset → openclaw's own default
+  // (no restriction), so leaving these blank changes nothing.
+  //
+  // Use them to constrain SINGLE-PURPOSE provider/SME agents (e.g. a SanMar or
+  // Sports Inc agent that only runs one skill). Weaker models otherwise reach
+  // for the wrong tool — spawning a local sub-agent (`sessions_spawn`) or
+  // introspecting — instead of just running the skill. Removing those footguns
+  // makes `exec` the obvious path. NOTE: openclaw's session/sub-agent tools are
+  // LOCAL to this gateway and are NOT how Knoxville agents delegate to each
+  // other (that goes through the knoxville_platform MCP), so denying them does
+  // not affect real A2A delegation.
+  //   OPENCLAW_TOOLS_PROFILE — one of minimal|coding|messaging|full (base allowlist).
+  //   OPENCLAW_TOOLS_DENY    — comma/space-separated tool ids or groups, e.g.
+  //                            "group:sessions" or "sessions_spawn,subagents".
+  OPENCLAW_TOOLS_PROFILE: z.enum(["minimal", "coding", "messaging", "full"]).optional(),
+  OPENCLAW_TOOLS_DENY: z.string().optional(),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()

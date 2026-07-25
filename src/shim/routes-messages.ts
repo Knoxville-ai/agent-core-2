@@ -18,6 +18,7 @@ import type {
 import { BundleClient, type DelegatedCredentials } from "../bundle/client.js";
 import {
   credentialKeyNames,
+  DELEGATED_TURN_SYSTEM_NOTE,
   detectDelegatedTurn,
   type DelegatedCredentialStore,
 } from "./delegated-credentials.js";
@@ -235,6 +236,13 @@ export async function handleSendMessage(
         keys: credentialKeyNames(creds),
       });
     }
+    // Steer weaker models toward actually running the skill on this turn (the
+    // brokered creds live in the skill's exec env, invisible to the model, so a
+    // model that hunts for them concludes "no access" and bails). Prepended as a
+    // system message so it leads the turn. It carries NO credential values —
+    // behavioral guidance only — and is added ONLY to the outgoing message array
+    // here, never written back to the conversation history.
+    openaiMessages.unshift({ role: "system", content: DELEGATED_TURN_SYSTEM_NOTE });
   }
 
   res.writeHead(200, {
