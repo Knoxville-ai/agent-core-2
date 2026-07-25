@@ -84,3 +84,24 @@ export function lookupCapabilities(
   if (exact) return exact;
   return heuristicCapabilities(p, m) ?? DEFAULT;
 }
+
+/**
+ * Effective capabilities: an explicit override (from the console model
+ * catalog, delivered as LLM_MULTIMODAL / LLM_FILE_INPUT) wins; an undefined
+ * override falls back to the static lookupCapabilities table above. This is
+ * how a model the static table doesn't know about — e.g. an OpenRouter vision
+ * model provisioned behind LLM_PROVIDER=openai — still gets its images
+ * inlined. Mirror of the console's resolveModelCapabilities; keep precedence
+ * identical.
+ */
+export function resolveCapabilities(
+  provider: string,
+  model: string,
+  overrides: { multimodal?: boolean; fileInput?: boolean } = {},
+): ModelCapabilities {
+  const base = lookupCapabilities(provider, model);
+  return {
+    multimodal: overrides.multimodal ?? base.multimodal,
+    fileInput: overrides.fileInput ?? base.fileInput,
+  };
+}

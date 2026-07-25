@@ -8,7 +8,7 @@ import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, type Principal } from "./auth.js";
 import { buildDynamicContext, parseAdvisoryCaller } from "./dynamic-context.js";
 import type { CancelRegistry } from "./cancel-registry.js";
-import { lookupCapabilities, type ModelCapabilities } from "./model-capabilities.js";
+import { resolveCapabilities, type ModelCapabilities } from "./model-capabilities.js";
 import type {
   AttachmentRow,
   InsertAttachmentRow,
@@ -121,8 +121,13 @@ export async function handleSendMessage(
     attachmentsRaw,
   );
 
-  // 3. Model capabilities + warning for dropped attachment types.
-  const caps = lookupCapabilities(env.LLM_PROVIDER, env.LLM_MODEL);
+  // 3. Model capabilities + warning for dropped attachment types. Explicit
+  // catalog overrides (LLM_MULTIMODAL / LLM_FILE_INPUT) win over the static
+  // (provider, model) table so a runtime-added model still forwards media.
+  const caps = resolveCapabilities(env.LLM_PROVIDER, env.LLM_MODEL, {
+    multimodal: env.LLM_MULTIMODAL,
+    fileInput: env.LLM_FILE_INPUT,
+  });
   const warning = fallbackNote(insertedAttachments, caps, env.LLM_PROVIDER, env.LLM_MODEL);
   if (warning) {
     await db.insertMessage({
