@@ -154,12 +154,11 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
   // playbook.md is intentionally NOT written here — see the header note. It is
   // restored (volume-wins) and mirrored by MemoryCheckpoint (./agent-memory.ts).
 
-  const config = buildOpenclawConfig(env, ws);
-  await writeFile(
-    join(stateDir, "openclaw.json"),
-    JSON.stringify(config, null, 2),
-    "utf8",
-  );
+  // openclaw.json is also written earlier in bootstrap (before any skill
+  // install) so the `openclaw skills install` CLI validates against a current,
+  // valid config. Re-writing it here keeps renderWorkspace self-contained and
+  // idempotent — same env in, same file out.
+  await writeOpenclawConfig(env);
 
   log.info("workspace rendered", {
     stateDir,
@@ -235,6 +234,30 @@ export function parseExtraMcpServers(
     servers[name] = expand(cfg);
   }
   return { servers };
+}
+
+/**
+ * Write just `openclaw.json` (not SOUL/AGENTS/TOOLS) into the state dir.
+ *
+ * Called at TWO points in a boot: early in bootstrap — before any
+ * `openclaw skills install`, whose CLI loads + validates the config and
+ * refuses to run against an invalid one — and again from renderWorkspace at
+ * the end. The early write matters because the on-disk openclaw.json may be a
+ * stale, invalid config left by a previous failed boot (e.g. a since-fixed bad
+ * provider block); without a fresh valid file first, every boot-list skill
+ * install fails and the agent boots without its skills. buildOpenclawConfig is
+ * a pure function of env, so both writes produce identical bytes.
+ */
+export async function writeOpenclawConfig(env: AgentEnv): Promise<void> {
+  const stateDir = env.OPENCLAW_STATE_DIR;
+  const ws = join(stateDir, "workspace");
+  await mkdir(ws, { recursive: true });
+  const config = buildOpenclawConfig(env, ws);
+  await writeFile(
+    join(stateDir, "openclaw.json"),
+    JSON.stringify(config, null, 2),
+    "utf8",
+  );
 }
 
 /**
@@ -382,9 +405,10 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     // models.providers.<name> — there is no top-level `providers` key in the
     // schema. We emit this block whenever we have a key and/or a base URL:
     //   - hosted API model with a key → { apiKey }
-    //   - external OpenAI-compatible endpoint (Groq / DeepSeek / self-hosted
-    //     Ollama box) → { apiKey, baseURL } from LLM_API_KEY + LLM_BASE_URL
-    //   - in-container Ollama → { apiKey: "ollama", baseURL: loopback } with
+    //   - external OpenAI-compatible endpoint (Groq / DeepSeek / OpenRouter /
+    //     self-hosted Ollama box) → { apiKey, baseUrl } from LLM_API_KEY +
+    //     LLM_BASE_URL
+    //   - in-container Ollama → { apiKey: "ollama", baseUrl: loopback } with
     //     no LLM_API_KEY set (see buildProviderConfig)
     const providerConfig = buildProviderConfig(env);
     if (providerConfig) {
@@ -431,18 +455,19 @@ export const LOCAL_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
  * OAuth-only or default-credential provider). Encodes the base-URL + key
  * defaults so both the external-endpoint and in-container-Ollama paths work.
  *
- * NOTE: the `baseURL` key is assumed to be the schema sibling of `apiKey`
- * under a provider entry (camelCase, matching `apiKey`). Verify against
- * `openclaw config schema` for the pinned CLI if a provider override is
- * rejected — see README "Verification status".
+ * NOTE: the provider endpoint override key is `baseUrl` (the schema sibling
+ * of `apiKey` under a provider entry), verified against `openclaw config
+ * schema` for the pinned CLI (2026.5.20). openclaw rejects the camelCase
+ * `baseURL` with `models.providers.<provider>: Invalid input` and refuses to
+ * start, so this casing matters — see README "Verification status".
  */
 function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
   const provider = env.LLM_PROVIDER.trim().toLowerCase();
 
   // Endpoint: explicit override wins; else the ollama provider falls back to
   // the in-container server. Every other provider uses openclaw's built-in
-  // hosted default (no baseURL emitted).
-  const baseURL =
+  // hosted default (no baseUrl emitted).
+  const baseUrl =
     env.LLM_BASE_URL ?? (provider === "ollama" ? LOCAL_OLLAMA_BASE_URL : undefined);
 
   // Key: use LLM_API_KEY when present. Ollama's OpenAI-compatible endpoint
@@ -452,7 +477,7 @@ function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
 
   const cfg: Record<string, unknown> = {};
   if (apiKey) cfg.apiKey = apiKey;
-  if (baseURL) cfg.baseURL = baseURL;
+  if (baseUrl) cfg.baseUrl = baseUrl;
   return Object.keys(cfg).length > 0 ? cfg : null;
 }
 

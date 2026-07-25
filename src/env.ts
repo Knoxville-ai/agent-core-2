@@ -26,7 +26,7 @@ const Schema = z.object({
   LLM_API_KEY: z.string().optional().default(""),
 
   // Optional provider base URL override. When set it is written into
-  // openclaw.json as models.providers.<LLM_PROVIDER>.baseURL so the agent
+  // openclaw.json as models.providers.<LLM_PROVIDER>.baseUrl so the agent
   // can talk to ANY OpenAI-compatible endpoint instead of the provider's
   // hosted default. Two uses:
   //   - external cheap inference (Groq / DeepSeek / Together / OpenRouter /
@@ -34,6 +34,26 @@ const Schema = z.object({
   //   - in-container Ollama (LLM_PROVIDER=ollama) — left unset here and
   //     defaulted to the loopback Ollama server by buildOpenclawConfig.
   LLM_BASE_URL: z.string().url().optional(),
+
+  // Explicit input-modality overrides, set by the console from the model
+  // catalog (public.models.multimodal / file_input). Tri-state: unset =
+  // undefined = fall back to the static (provider, model) table in
+  // model-capabilities.ts; "true"/"1" = force-enable; anything else = force-
+  // disable. Lets a runtime-added model the static table can't know about
+  // (e.g. an OpenRouter vision model behind LLM_PROVIDER=openai) still get its
+  // images/files forwarded. See resolveCapabilities.
+  LLM_MULTIMODAL: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v === undefined || v === "" ? undefined : v === "true" || v === "1",
+    ),
+  LLM_FILE_INPUT: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v === undefined || v === "" ? undefined : v === "true" || v === "1",
+    ),
 
   // Model auth mode. "api_key" (default) uses LLM_API_KEY. "oauth" wires
   // the OpenClaw OpenAI-Codex (ChatGPT) OAuth profile instead — the token

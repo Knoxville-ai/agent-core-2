@@ -1,3 +1,7 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type { AgentEnv } from "../env.js";
@@ -7,6 +11,7 @@ import {
   LOCAL_OLLAMA_BASE_URL,
   parseExtraMcpServers,
   parseToolsDeny,
+  writeOpenclawConfig,
 } from "./render-workspace.js";
 
 /** Minimal AgentEnv with sane defaults; override per-case. */
@@ -47,7 +52,7 @@ describe("buildOpenclawConfig model provider block", () => {
     expect(agents.defaults.model.primary).toBe("openai/gpt-5.4-mini");
   });
 
-  it("hosted API model with a key → { apiKey } only, no baseURL", () => {
+  it("hosted API model with a key → { apiKey } only, no baseUrl", () => {
     const config = buildOpenclawConfig(
       makeEnv({ LLM_PROVIDER: "anthropic", LLM_API_KEY: "sk-ant-123" }),
       "/ws",
@@ -55,7 +60,7 @@ describe("buildOpenclawConfig model provider block", () => {
     expect(providers(config)).toEqual({ anthropic: { apiKey: "sk-ant-123" } });
   });
 
-  it("external OpenAI-compatible endpoint → { apiKey, baseURL }", () => {
+  it("external OpenAI-compatible endpoint → { apiKey, baseUrl }", () => {
     const config = buildOpenclawConfig(
       makeEnv({
         LLM_PROVIDER: "openai",
@@ -66,17 +71,17 @@ describe("buildOpenclawConfig model provider block", () => {
       "/ws",
     );
     expect(providers(config)).toEqual({
-      openai: { apiKey: "gsk_groqkey", baseURL: "https://api.groq.com/openai/v1" },
+      openai: { apiKey: "gsk_groqkey", baseUrl: "https://api.groq.com/openai/v1" },
     });
   });
 
-  it("in-container ollama (no key, no base URL) → loopback baseURL + placeholder key", () => {
+  it("in-container ollama (no key, no base URL) → loopback baseUrl + placeholder key", () => {
     const config = buildOpenclawConfig(
       makeEnv({ LLM_PROVIDER: "ollama", LLM_MODEL: "llama3", LLM_API_KEY: "" }),
       "/ws",
     );
     expect(providers(config)).toEqual({
-      ollama: { apiKey: "ollama", baseURL: LOCAL_OLLAMA_BASE_URL },
+      ollama: { apiKey: "ollama", baseUrl: LOCAL_OLLAMA_BASE_URL },
     });
   });
 
@@ -90,7 +95,7 @@ describe("buildOpenclawConfig model provider block", () => {
       "/ws",
     );
     expect(providers(config)).toEqual({
-      ollama: { apiKey: "ollama", baseURL: "http://gpu-box.local:11434/v1" },
+      ollama: { apiKey: "ollama", baseUrl: "http://gpu-box.local:11434/v1" },
     });
   });
 
@@ -115,6 +120,33 @@ describe("buildOpenclawConfig model provider block", () => {
     expect(config.models).toBeUndefined();
     expect(config.auth).toBeDefined();
     expect(config.plugins).toBeDefined();
+  });
+});
+
+describe("writeOpenclawConfig", () => {
+  it("writes a valid openclaw.json to the state dir before skills install", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "knox-openclaw-"));
+    try {
+      await writeOpenclawConfig(
+        makeEnv({
+          OPENCLAW_STATE_DIR: dir,
+          LLM_PROVIDER: "openrouter",
+          LLM_MODEL: "qwen/qwen3.7-plus",
+          LLM_API_KEY: "sk-or-test",
+        }),
+      );
+      const raw = await readFile(join(dir, "openclaw.json"), "utf8");
+      const config = JSON.parse(raw) as Record<string, unknown>;
+      const agents = config.agents as { defaults: { model: { primary: string } } };
+      // OpenRouter via the built-in provider: <provider>/<slug> primary, and a
+      // providers.openrouter block carrying only the key (the built-in provider
+      // supplies the endpoint — no baseUrl, which is the key openclaw rejects if
+      // mis-cased).
+      expect(agents.defaults.model.primary).toBe("openrouter/qwen/qwen3.7-plus");
+      expect(providers(config)).toEqual({ openrouter: { apiKey: "sk-or-test" } });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
