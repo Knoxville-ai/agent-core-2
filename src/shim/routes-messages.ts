@@ -188,7 +188,6 @@ export async function handleSendMessage(
       env,
       principal,
       parseAdvisoryCaller(req.headers),
-      conversationId,
     );
     if (dynamic) openaiMessages.unshift({ role: "system", content: dynamic });
   } catch (err) {
