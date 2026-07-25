@@ -26,7 +26,7 @@ const Schema = z.object({
   LLM_API_KEY: z.string().optional().default(""),
 
   // Optional provider base URL override. When set it is written into
-  // openclaw.json as models.providers.<LLM_PROVIDER>.baseURL so the agent
+  // openclaw.json as models.providers.<LLM_PROVIDER>.baseUrl so the agent
   // can talk to ANY OpenAI-compatible endpoint instead of the provider's
   // hosted default. Two uses:
   //   - external cheap inference (Groq / DeepSeek / Together / OpenRouter /
