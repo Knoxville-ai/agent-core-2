@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CALLER_KIND_HEADER,
   CONVERSATION_ID_HEADER,
+  DELEGATED_TURN_SYSTEM_NOTE,
   DELEGATION_CONNECTION_HEADER,
   DelegatedCredentialStore,
   credentialKeyNames,
@@ -129,5 +130,22 @@ describe("credentialKeyNames", () => {
       "A_KEY",
       "B_KEY",
     ]);
+  });
+});
+
+describe("DELEGATED_TURN_SYSTEM_NOTE", () => {
+  it("steers the model to run the skill via exec and NOT introspect for creds", () => {
+    const note = DELEGATED_TURN_SYSTEM_NOTE;
+    expect(note).toMatch(/exec/);
+    // Names the exact wrong turns a weak model takes (see the gpt-4o logs).
+    expect(note).toMatch(/get_my_bundle/);
+    expect(note).toMatch(/get_delegated_credentials/);
+    expect(note).toMatch(/sessions_spawn/);
+  });
+
+  it("is pure guidance — carries no credential VALUE (no KEY=value assignment)", () => {
+    // The note may name tools/keys, but must never embed a secret value. Guard
+    // against an accidental edit that pastes a `SOMETHING=<value>` pair in.
+    expect(DELEGATED_TURN_SYSTEM_NOTE).not.toMatch(/[A-Z0-9_]+=\S/);
   });
 });

@@ -43,6 +43,16 @@ const SKILLS_VENV_BIN = "/opt/skills-venv/bin";
 const EXEC_SHIM_BIN = "/opt/knox-exec-shim";
 
 /**
+ * Max characters per workspace bootstrap file (SOUL.md) before openclaw
+ * truncates it in the injected context (`agents.defaults.bootstrapMaxChars`,
+ * openclaw default 12000). The console-authored SOUL.md already runs ~12.5k on
+ * real agents, so at the default openclaw silently drops the tail — which is
+ * exactly where turn-behavior/delegation guidance tends to live. Bump it to give
+ * comfortable headroom; still far under openclaw's 60000 bootstrapTotalMaxChars.
+ */
+const BOOTSTRAP_MAX_CHARS = 24000;
+
+/**
  * Renders an openclaw workspace from env vars + Supabase Storage, then
  * writes openclaw.json so `openclaw gateway` can boot cold against it.
  *
@@ -198,6 +208,26 @@ export function parseExtraMcpServers(
   return { servers };
 }
 
+/**
+ * Parse `OPENCLAW_TOOLS_DENY` (comma/space/newline-separated tool ids or groups)
+ * into a de-duplicated, order-preserving list for openclaw's `tools.deny`. An
+ * empty / missing value yields `[]` (no deny entry is emitted at all). Exported
+ * for unit tests.
+ */
+export function parseToolsDeny(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of raw.split(/[\s,]+/)) {
+    const t = tok.trim();
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
 /** Exported for unit tests — builds the openclaw.json object from env + the
  *  rendered workspace path. */
 export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
@@ -228,6 +258,9 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     mcpServers[name] = cfg;
   }
 
+  // Optional per-agent tool deny-list (see env.ts / the tools block below).
+  const toolsDeny = parseToolsDeny(env.OPENCLAW_TOOLS_DENY);
+
   // openclaw.json shape derived from `openclaw config schema` for the
   // pinned CLI version. openclaw 2026.5.x rejects unknown top-level keys
   // with "<root>: Invalid input", so anything we emit here must match the
@@ -236,6 +269,9 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     agents: {
       defaults: {
         workspace,
+        // Stop openclaw truncating the (already ~12.5k) SOUL.md at its 12000
+        // default, which silently drops the tail of the system prompt.
+        bootstrapMaxChars: BOOTSTRAP_MAX_CHARS,
         model: {
           primary: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
         },
@@ -282,10 +318,19 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     // the venv still needs to be on PATH right behind it (for `requests` and for
     // `uv`/`pip`, which the shim doesn't shadow). Applies to every agent; on a
     // non-delegated turn the shim finds nothing staged and is a no-op.
+    //
+    // Optional per-agent tool policy (OPENCLAW_TOOLS_PROFILE / _DENY): default
+    // unset → openclaw's own default (no restriction). Ops can set these on a
+    // single-purpose provider/SME agent to strip footgun tools (e.g.
+    // `group:sessions` — local sub-agent spawning, which a weak model reaches
+    // for instead of running the skill, and which is NOT the Knoxville
+    // cross-agent delegation path anyway). See env.ts.
     tools: {
       exec: {
         pathPrepend: [EXEC_SHIM_BIN, SKILLS_VENV_BIN],
       },
+      ...(env.OPENCLAW_TOOLS_PROFILE ? { profile: env.OPENCLAW_TOOLS_PROFILE } : {}),
+      ...(toolsDeny.length > 0 ? { deny: toolsDeny } : {}),
     },
     // We don't bind any native channels — all conversation flows through
     // the shim's HTTP surface, which is what the knoxville console talks to.
