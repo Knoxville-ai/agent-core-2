@@ -289,6 +289,27 @@ export function parseToolsDeny(raw: string | undefined): string[] {
   return out;
 }
 
+/** Recognized case-insensitive off-switches for OPENCLAW_HEARTBEAT_EVERY, all
+ *  normalized to the disabling `every:"0"`. */
+const HEARTBEAT_OFF_VALUES = new Set(["", "off", "0", "none", "disabled", "false", "no"]);
+
+/**
+ * Resolve `agents.defaults.heartbeat.every` from OPENCLAW_HEARTBEAT_EVERY.
+ *
+ * Returns "0" (disabled) unless the operator opts back in with an explicit
+ * openclaw duration. openclaw's heartbeat runner treats a zero/blank interval as
+ * "don't schedule" (resolveHeartbeatIntervalMs → null → the agent is skipped and
+ * the gateway logs "heartbeat: disabled"), so "0" is the schema-valid off switch
+ * — there is no `enabled` flag in openclaw's HeartbeatSchema. Any other value is
+ * passed through verbatim as the cadence; if it isn't a parseable duration
+ * openclaw resolves it to null and the heartbeat stays safely disabled rather
+ * than the container failing to boot. Exported for unit tests.
+ */
+export function resolveHeartbeatEvery(env: AgentEnv): string {
+  const raw = (env.OPENCLAW_HEARTBEAT_EVERY ?? "").trim();
+  return HEARTBEAT_OFF_VALUES.has(raw.toLowerCase()) ? "0" : raw;
+}
+
 /** Exported for unit tests — builds the openclaw.json object from env + the
  *  rendered workspace path. */
 export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
@@ -336,6 +357,17 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
         model: {
           primary: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
         },
+        // Autonomous heartbeat. openclaw enables a periodic heartbeat turn on
+        // the default (`main`) agent by default at 30m — a full model inference
+        // (system prompt + every tool schema, for a ~300-char "nothing to do"
+        // ack delivered nowhere) that fires 24/7 even while the agent is idle.
+        // That is the overnight/weekend cost leak: a reactive vessel bills one
+        // full input every 30 minutes for no user-visible work. We emit every:"0"
+        // by default so openclaw's runner skips scheduling ("heartbeat:
+        // disabled"); OPENCLAW_HEARTBEAT_EVERY re-enables it per-agent for the
+        // rare genuinely-autonomous agent. Schema-valid for the pinned CLI
+        // (agents.defaults.heartbeat.every).
+        heartbeat: { every: resolveHeartbeatEvery(env) },
         // GPT-5 / Codex models otherwise stall on "plan-only" turns and
         // rationalize NOT acting (e.g. falsely claiming they have no shell
         // access) instead of calling `exec`. The strict-agentic contract
