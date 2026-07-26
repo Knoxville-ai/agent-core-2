@@ -1,0 +1,8 @@
+{
+  "name": "knox-report-outcome",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "OpenClaw plugin: stamp the platform conversation id onto the agent's report_outcome MCP call so the model never has to know or type it."
+}

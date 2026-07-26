@@ -11,6 +11,7 @@ import {
   LOCAL_OLLAMA_BASE_URL,
   parseExtraMcpServers,
   parseToolsDeny,
+  REPORT_OUTCOME_PLUGIN_ID,
   writeOpenclawConfig,
 } from "./render-workspace.js";
 
@@ -222,7 +223,7 @@ describe("buildOpenclawConfig mcp.servers block", () => {
   });
 });
 
-describe("buildOpenclawConfig delegated-credentials plugin", () => {
+describe("buildOpenclawConfig platform plugins", () => {
   function plugins(config: Record<string, unknown>): {
     load?: { paths?: string[] };
     entries?: Record<string, unknown>;
@@ -230,7 +231,7 @@ describe("buildOpenclawConfig delegated-credentials plugin", () => {
     return (config.plugins as { load?: { paths?: string[] }; entries?: Record<string, unknown> }) ?? {};
   }
 
-  it("wires the plugin (load path + enabled entry) when PLATFORM_MCP_URL is set", () => {
+  it("wires both plugins (load paths + enabled entries) when PLATFORM_MCP_URL is set", () => {
     const config = buildOpenclawConfig(
       makeEnv({
         PLATFORM_MCP_URL: "https://console.example/api/mcp",
@@ -240,12 +241,16 @@ describe("buildOpenclawConfig delegated-credentials plugin", () => {
     );
     const p = plugins(config);
     expect(p.entries?.[DELEGATED_CREDS_PLUGIN_ID]).toEqual({ enabled: true });
+    expect(p.entries?.[REPORT_OUTCOME_PLUGIN_ID]).toEqual({ enabled: true });
     expect(
       (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/delegated-credentials")),
     ).toBe(true);
+    expect(
+      (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/report-outcome")),
+    ).toBe(true);
   });
 
-  it("does NOT wire the plugin when there is no PLATFORM_MCP_URL (no A2A possible)", () => {
+  it("does NOT wire the plugins when there is no PLATFORM_MCP_URL (no platform MCP reachable)", () => {
     const config = buildOpenclawConfig(makeEnv({}), "/ws");
     expect(config.plugins).toBeUndefined();
   });
@@ -268,6 +273,7 @@ describe("buildOpenclawConfig delegated-credentials plugin", () => {
     expect(p.entries?.codex).toEqual({ enabled: true });
     // …alongside ours.
     expect(p.entries?.[DELEGATED_CREDS_PLUGIN_ID]).toEqual({ enabled: true });
+    expect(p.entries?.[REPORT_OUTCOME_PLUGIN_ID]).toEqual({ enabled: true });
   });
 });
 
