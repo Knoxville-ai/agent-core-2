@@ -80,6 +80,32 @@ describe("authorizeConversation", () => {
     ).rejects.toMatchObject({ status: 403 });
   });
 
+  it("still rejects a cross-org agent when the conversation has no drive-thru binding (0046)", async () => {
+    const c = conv({ drive_through_connection_id: null } as Partial<Conversation>);
+    await expect(
+      authorizeConversation(
+        "conv-1",
+        { ...agent, orgId: "someone-else" },
+        db(c),
+        env,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("allows a cross-org agent for a drive-thru-delegated conversation (0046)", async () => {
+    const c = conv({
+      drive_through_connection_id: "dt-conn-1",
+    } as Partial<Conversation>);
+    await expect(
+      authorizeConversation(
+        "conv-1",
+        { ...agent, orgId: "someone-else" },
+        db(c),
+        env,
+      ),
+    ).resolves.toMatchObject({ id: "conv-1" });
+  });
+
   it("still requires org membership for a user-owned conversation", async () => {
     const c = conv({ user_id: "user-123" });
     await expect(

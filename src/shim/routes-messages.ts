@@ -431,11 +431,22 @@ export async function authorizeConversation(
     throw new HttpError(404, "wrong agent");
   }
   if (principal.kind === "agent") {
-    // Agent-to-agent authorization (the outbound delegation allowlist) is now
-    // enforced console-side in the MCP call path — start_agent_conversation
-    // rejects a caller that isn't bound to this agent before a conversation is
-    // ever opened. Here we only assert same-org.
-    if (principal.orgId !== env.AGENT_ORG) {
+    // Agent-to-agent authorization (the outbound delegation allowlist) is
+    // enforced console-side in the MCP call path — start_agent_conversation /
+    // start_conversation reject a caller that isn't bound to this agent/listing
+    // before a conversation is ever opened.
+    //
+    // Same-org A2A stays strict: an agent principal must be in this agent's org.
+    // The ONE exception is a curated cross-org drive-thru call — the console
+    // stamps drive_through_connection_id when an operator-bound caller opens the
+    // conversation, and mints an honest A2A token carrying the caller's real
+    // org. Permit those, and only those, across the org boundary (console
+    // migration 0046). Credential sharing on such a turn is still limited to the
+    // operator-selected set and pulled + audited via get_delegated_credentials.
+    if (
+      principal.orgId !== env.AGENT_ORG &&
+      !conversation.drive_through_connection_id
+    ) {
       throw new HttpError(403, "cross-org call forbidden");
     }
   } else if (conversation.user_id !== null) {
