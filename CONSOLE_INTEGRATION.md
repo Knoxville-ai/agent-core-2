@@ -175,6 +175,28 @@ the prompt wording and the call gate agree. Both bundle fields are optional on t
 wire — an older console omits them and the vessel defaults to "none / curated-only"
 (`src/bundle/client.ts`).
 
+### Cross-org credential sharing on a drive-thru call (console 0046)
+
+A drive-thru connection can share the caller's own credentials with THIS agent
+when it's the vendor being called. That is a **cross-org delegated turn**, which
+touches three vessel behaviors:
+
+- **`authorizeConversation` (`src/shim/routes-messages.ts`)** — same-org A2A still
+  requires `principal.orgId === AGENT_ORG`. The one exception: a conversation
+  stamped with `drive_through_connection_id` (set by the console when an
+  operator-bound caller opened it) may be reached by an agent principal from
+  another org. Nothing else crosses the boundary.
+- **Delegated-credential pull** — such a turn arrives with a real A2A token
+  (`principal.kind === "agent"`) plus `X-Knox-Caller-Kind: agent`, so
+  `detectDelegatedTurn` fires exactly as for same-org and the vessel pulls the
+  operator-selected creds from `get_delegated_credentials` (the broker resolves
+  the drive-thru binding, releases only the allow-listed subset, audits it).
+  These inject into the skill/exec env only — never the prompt or transcript.
+- **`buildDynamicContext` (`src/shim/dynamic-context.ts`)** — a cross-org agent
+  caller is labeled **cross_org / unverified** (not same_org), so the model is
+  told the caller identity is platform-asserted even though the operator-approved
+  credentials are available to its tools.
+
 ## Storage contract (unchanged from CONTRACT.md)
 
 The shim reads/writes the same paths the console already manages:

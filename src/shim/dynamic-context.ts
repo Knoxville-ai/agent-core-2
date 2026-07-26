@@ -75,12 +75,21 @@ export async function buildDynamicContext(
   let relationship = "unknown";
 
   if (principal.kind === "agent") {
-    // Same-org delegation — verified. (authorizeConversation already asserted
-    // principal.orgId === env.AGENT_ORG for agent principals.)
     callerAgentUid = principal.agentUid;
     callerOrgId = principal.orgId;
-    verified = true;
-    relationship = "same_org";
+    if (principal.orgId === env.AGENT_ORG) {
+      // Same-org delegation — identity verified.
+      verified = true;
+      relationship = "same_org";
+    } else {
+      // Cross-org drive-thru delegation (console 0046): the caller authenticated
+      // as an agent and the console authorized the binding, but it is NOT in
+      // this agent's org. Operator-approved credential sharing still applies
+      // (delivered out-of-band via the delegated-credentials broker), but the
+      // caller identity itself is cross-org — never treat it as same-org.
+      verified = false;
+      relationship = "cross_org";
+    }
   } else if (advisory.orgId || advisory.agentUid) {
     // Cross-org drive-through — platform-asserted, unverified.
     callerOrgId = advisory.orgId;
