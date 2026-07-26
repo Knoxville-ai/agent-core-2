@@ -115,6 +115,43 @@ same tiny surface. The full wire contract lives in
 [`BYOA.md`](./BYOA.md); the console renders a user-facing version at
 `/drive-throughs/byoa`.
 
+## Organization transfer
+
+The console can move an agent to another org (agent overview → "Transfer to
+another org"; see console `CONTRACT.md` → "Agent organization transfer" and
+migration `0043`). **No vessel code change is required** — this section just
+records what the vessel already relies on so it stays true.
+
+A transfer keeps the **same service, the same volume, and the same `AGENT_UID`**;
+the console changes **`AGENT_ORG` to the destination org and redeploys**, having
+first moved the Storage tree to `orgs/{newOrg}/agents/{uid}/` and flipped the
+agent's DB rows (including `conversations.org_id`) to the new org.
+
+What that relies on, all already true today:
+
+- `AGENT_ORG` is read from the environment on **every boot** (`src/env.ts`) and
+  the Storage prefix is derived from it fresh
+  (`src/provision/supabase-storage.ts`: `orgs/${AGENT_ORG}/agents/${AGENT_UID}`),
+  so a redeploy with the new value transparently points the vessel at the moved
+  tree. Nothing caches the old org on the volume.
+- `manifest.json` is re-rendered from `AGENT_ORG` on boot
+  (`src/provision/manifest.ts`); the console also rewrites its `org_id` during
+  the move so it's correct even before the next boot.
+- Request-time org checks (`conversation.org_id === env.AGENT_ORG`,
+  `principal.orgId === env.AGENT_ORG` in `src/shim/routes-messages.ts` /
+  `routes-interrupt.ts`) keep working because the conversation rows were moved
+  to the new org in the same operation. Until the redeploy lands, the still-old
+  `AGENT_ORG` container will (correctly) reject the just-moved conversations —
+  the redeploy is what completes the move.
+- The **volume** (openclaw session transcripts + memory index, and the
+  write-back copy of `playbook.md` / `state/notes/`) is org-independent and
+  rides along on the same service, so agent memory survives the move intact.
+
+Agent-to-agent connections and MCP-server bindings do **not** survive (they're
+org-scoped and dropped by the console); if the agent depended on a delegation
+target or an org MCP server, that has to be re-established in the destination
+org.
+
 ## Storage contract (unchanged from CONTRACT.md)
 
 The shim reads/writes the same paths the console already manages:
