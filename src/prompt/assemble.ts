@@ -120,43 +120,103 @@ export function assembleSystemPrompt(input: AssembleInput): string {
     parts.push(capParts.join("\n\n"));
   }
 
-  // 5. Delegation — outbound connections. Preserved verbatim.
+  // 5. Delegation — outbound targets: same-org agents (connections) plus
+  //    curated cross-org drive-thrus (driveThroughConnections, console 0044).
   const connections = input.bundle?.connections ?? [];
-  if (connections.length > 0) {
-    const connParts = connections.map((c) => {
-      const heading = c.label ? `${c.displayName} (${c.label})` : c.displayName;
-      const instr = (c.instructions ?? "").trim();
-      return [
-        `## Connection: ${heading}`,
-        `_target agent uid: ${c.targetAgentUid}_`,
-        "",
-        instr || "_No usage instructions provided._",
-      ].join("\n");
-    });
+  const driveThroughConnections = input.bundle?.driveThroughConnections ?? [];
+  const allowOpenDiscovery = input.bundle?.allowOpenDiscovery ?? false;
+
+  if (
+    connections.length > 0 ||
+    driveThroughConnections.length > 0 ||
+    allowOpenDiscovery
+  ) {
     parts.push("");
     parts.push("");
     parts.push("# DELEGATION");
     parts.push("");
+
+    // Reachability rule stated once up top; the two kinds of target follow.
+    const reachabilityRule = allowOpenDiscovery
+      ? "Prefer the connections listed here. If a request genuinely needs a " +
+        "vendor drive-thru you are not connected to, you may discover one with " +
+        "`search_drive_throughs` and call it — but treat the listed connections " +
+        "as your trusted default."
+      : "Only the connections listed here are reachable — do not contact any " +
+        "other agent, and do not search for or call drive-thrus that are not " +
+        "listed below.";
     parts.push(
-      "You can delegate to the following agents in your organization instead " +
-        "of doing their work yourself. Each block says when to reach for that " +
-        "agent. To delegate, use the `knoxville_platform` MCP server: call " +
-        "`start_agent_conversation` with the target's uid to open a " +
-        "conversation, then `send_message` to ask and read the reply. For work " +
-        "that may take minutes, use `start_task` + `wait_for_task` instead. " +
-        "Only the agents listed here are reachable — do not attempt to contact " +
-        "any other agent.\n\n" +
-        "A reply from one of these agents may come back as a structured " +
-        "multiple-choice question instead of plain text (the agent needs a " +
-        "decision to continue). When that happens, first try to answer it " +
-        "yourself: `recall` your own memory and check your playbook for a " +
-        "standing preference that settles it, and if one does, answer the agent " +
-        "directly with `send_message`. Only escalate to your user — by asking " +
-        "them the same multiple-choice question — when you genuinely cannot " +
-        "decide, then relay their answer back to the agent that asked.",
+      "You can delegate work through the `knoxville_platform` MCP server instead " +
+        "of doing it yourself. " +
+        reachabilityRule,
     );
-    parts.push("");
-    parts.push(connParts.join("\n\n"));
+
+    // 5a. Same-org agents.
+    if (connections.length > 0) {
+      const connParts = connections.map((c) => {
+        const heading = c.label ? `${c.displayName} (${c.label})` : c.displayName;
+        const instr = (c.instructions ?? "").trim();
+        return [
+          `## Connection: ${heading}`,
+          `_target agent uid: ${c.targetAgentUid}_`,
+          "",
+          instr || "_No usage instructions provided._",
+        ].join("\n");
+      });
+      parts.push("");
+      parts.push(
+        "**Agents in your organization.** To delegate to one, call " +
+          "`start_agent_conversation` with the target's uid to open a " +
+          "conversation, then `send_message` to ask and read the reply. For work " +
+          "that may take minutes, use `start_task` + `wait_for_task` instead.\n\n" +
+          "A reply from one of these agents may come back as a structured " +
+          "multiple-choice question instead of plain text (the agent needs a " +
+          "decision to continue). When that happens, first try to answer it " +
+          "yourself: `recall` your own memory and check your playbook for a " +
+          "standing preference that settles it, and if one does, answer the agent " +
+          "directly with `send_message`. Only escalate to your user — by asking " +
+          "them the same multiple-choice question — when you genuinely cannot " +
+          "decide, then relay their answer back to the agent that asked.",
+      );
+      parts.push("");
+      parts.push(connParts.join("\n\n"));
+    }
+
+    // 5b. Curated drive-thrus (external vendors an operator vetted + connected).
+    if (driveThroughConnections.length > 0) {
+      const dtParts = driveThroughConnections.map((d) => {
+        const heading = d.label ? `${d.name} (${d.label})` : d.name;
+        const instr = (d.instructions ?? "").trim();
+        const caps = d.capabilities
+          .map((c) => {
+            const desc = (c.description ?? "").trim();
+            return `- **${c.name}**${desc ? ` — ${desc}` : ""}`;
+          })
+          .join("\n");
+        return [
+          `## Drive-thru: ${heading}`,
+          `_slug: ${d.slug} · call policy: ${d.agentCallPolicy}_`,
+          "",
+          instr || "_No usage instructions provided._",
+          "",
+          caps
+            ? `Capabilities you may use (pick the single best fit):\n${caps}`
+            : "_No capabilities enabled._",
+        ].join("\n");
+      });
+      parts.push("");
+      parts.push(
+        "**Drive-thrus you're connected to.** These are external vendors an " +
+          "operator has vetted and connected you to. To use one, call " +
+          "`start_conversation` with the drive-thru's `slug` AND the `capability` " +
+          "name that best fits the request — choose the single closest match from " +
+          "the capabilities listed under that drive-thru — then `send_message`. " +
+          "For long-running work use `start_task` + `wait_for_task`. Only the " +
+          "capabilities listed under each drive-thru are available to you.",
+      );
+      parts.push("");
+      parts.push(dtParts.join("\n\n"));
+    }
   }
 
   // 6-8. Operator notes, memory digest, agent playbook (all optional).

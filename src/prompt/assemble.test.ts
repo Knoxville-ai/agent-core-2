@@ -64,4 +64,67 @@ describe("assembleSystemPrompt — DELEGATION", () => {
     expect(out).toContain("## Connection: Inventory");
     expect(out).toContain("_No usage instructions provided._");
   });
+
+  it("renders a curated drive-thru connection with its capabilities and call recipe", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: bundle({
+        driveThroughConnections: [
+          {
+            slug: "vendor-x",
+            name: "Vendor X",
+            shortDescription: "Blank apparel supplier",
+            instructions: "Use for restock POs and delivery issues.",
+            agentCallPolicy: "authenticated",
+            capabilities: [
+              { name: "Order Placement", description: "Submit a purchase order", actionType: "order" },
+              { name: "Customer Service", description: "Delivery + returns", actionType: "support" },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(out).toContain("# DELEGATION");
+    expect(out).toContain("## Drive-thru: Vendor X");
+    expect(out).toContain("slug: vendor-x");
+    expect(out).toContain("Order Placement");
+    expect(out).toContain("Customer Service");
+    // Drive-thrus are reached via start_conversation(slug, capability), not the
+    // agent-uid delegation recipe.
+    expect(out).toContain("start_conversation");
+    expect(out).toContain("`capability`");
+  });
+
+  it("restricts to listed connections when open discovery is off", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: bundle({
+        allowOpenDiscovery: false,
+        driveThroughConnections: [
+          {
+            slug: "vendor-x",
+            name: "Vendor X",
+            shortDescription: "",
+            instructions: "",
+            agentCallPolicy: "open",
+            capabilities: [{ name: "General", description: "", actionType: "chat" }],
+          },
+        ],
+      }),
+    });
+    expect(out).toContain("do not search for or call drive-thrus that are not");
+    expect(out).not.toContain("you may discover one with");
+  });
+
+  it("permits open discovery when the flag is on", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: bundle({ allowOpenDiscovery: true }),
+    });
+    expect(out).toContain("# DELEGATION");
+    expect(out).toContain("search_drive_throughs");
+  });
 });

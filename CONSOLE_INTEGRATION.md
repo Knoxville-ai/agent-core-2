@@ -147,10 +147,33 @@ What that relies on, all already true today:
   write-back copy of `playbook.md` / `state/notes/`) is org-independent and
   rides along on the same service, so agent memory survives the move intact.
 
-Agent-to-agent connections and MCP-server bindings do **not** survive (they're
-org-scoped and dropped by the console); if the agent depended on a delegation
-target or an org MCP server, that has to be re-established in the destination
-org.
+Same-org agent-to-agent connections and MCP-server bindings do **not** survive
+(they're org-scoped and dropped by the console); if the agent depended on a
+same-org delegation target or an org MCP server, that has to be re-established in
+the destination org. **Cross-org drive-thru connections DO follow the agent** —
+they point at external public listings, not source-org internal resources (see
+"Delegation targets" below).
+
+## Delegation targets (bundle `connections` + `driveThroughConnections`)
+
+`get_my_bundle` returns two kinds of outbound target, both rendered into the
+boot prompt's `# DELEGATION` section by `src/prompt/assemble.ts`:
+
+- `connections` — same-org agents, reached with `start_agent_conversation(uid)`
+  then `send_message`.
+- `driveThroughConnections` (console migration `0044`) — curated cross-org
+  **drive-thrus** an operator vetted and connected this agent to, each with the
+  subset of capabilities toggled on. Reached with `start_conversation(slug,
+  capability)` then `send_message`; the agent picks the best-fit capability from
+  the ones listed. Plus `allowOpenDiscovery` (default false): when false the
+  prompt tells the agent it may ONLY use its listed connections; when true it may
+  also `search_drive_throughs` and call unbound listings.
+
+The hard limit is enforced console-side (`agent-bridge.ts#resolveListingForChat`
+refuses an agent's call to an unbound drive-thru unless `allowOpenDiscovery`), so
+the prompt wording and the call gate agree. Both bundle fields are optional on the
+wire — an older console omits them and the vessel defaults to "none / curated-only"
+(`src/bundle/client.ts`).
 
 ## Storage contract (unchanged from CONTRACT.md)
 
