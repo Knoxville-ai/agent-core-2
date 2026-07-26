@@ -78,8 +78,46 @@ export interface DelegationConnection {
   instructions: string;
 }
 
+/**
+ * A public-safe capability summary on a bound drive-thru — enough for the agent
+ * to choose the best fit for a request. No owner-only routing/prompt/skill
+ * internals (those never leave the vendor's org).
+ */
+export interface DriveThroughCapabilitySummary {
+  id?: string | null;
+  name: string;
+  description: string;
+  actionType: string;
+  examples?: string[];
+}
+
+/**
+ * A curated, cross-org drive-thru connection (console migration 0044): a
+ * vendor's PUBLIC listing an operator explicitly bound this agent to, with the
+ * capabilities toggled on. Surfaced into the boot prompt's DELEGATION section so
+ * the agent reasons "my connections → their capabilities → best fit" over a
+ * trusted set — never blind search. Reached with `start_conversation(slug,
+ * capability)` on the knoxville_platform MCP server. Mirrors the console
+ * `get_my_bundle.driveThroughConnections` wire shape.
+ */
+export interface DriveThroughConnection {
+  slug: string;
+  name: string;
+  shortDescription: string;
+  label?: string | null;
+  instructions: string;
+  agentCallPolicy: "open" | "authenticated" | "approved";
+  capabilities: DriveThroughCapabilitySummary[];
+}
+
 export interface AgentBundle {
   agent: { uid: string; orgId: string };
   assignments: BundleAssignment[];
   connections: DelegationConnection[];
+  /** Curated cross-org drive-thru bindings the caller agent may reach (0044).
+   *  Optional on the wire — an older console omits it (defaults to none). */
+  driveThroughConnections?: DriveThroughConnection[];
+  /** Whether this agent may ALSO search + call unbound drive-thrus. Optional;
+   *  defaults to false (curated connections only). */
+  allowOpenDiscovery?: boolean;
 }

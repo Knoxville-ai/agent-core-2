@@ -102,6 +102,14 @@ export class BundleClient {
     if (!Array.isArray(bundle.connections)) {
       bundle.connections = [];
     }
+    // Cross-org drive-thru connections (0044) are newer still — default to none
+    // / curated-only for a console that predates them.
+    if (!Array.isArray(bundle.driveThroughConnections)) {
+      bundle.driveThroughConnections = [];
+    }
+    if (typeof bundle.allowOpenDiscovery !== "boolean") {
+      bundle.allowOpenDiscovery = false;
+    }
     return bundle;
   }
 
