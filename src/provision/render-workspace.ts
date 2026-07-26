@@ -15,6 +15,15 @@ const DELEGATED_CREDS_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/delegated-credentials", import.meta.url),
 );
 
+/** Id + on-disk directory of the report-outcome OpenClaw plugin (see
+ *  `openclaw-plugins/report-outcome`). It stamps the conversation id onto the
+ *  agent's `report_outcome` MCP call so the model never has to know or type it.
+ *  Resolved relative to this module the same way as the plugin above. */
+export const REPORT_OUTCOME_PLUGIN_ID = "knox-report-outcome";
+const REPORT_OUTCOME_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/report-outcome", import.meta.url),
+);
+
 /** The platform constitution shipped in the image (see `prompts/constitution.md`).
  *  Resolved relative to this module so it works from both `src/` (tests) and
  *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
@@ -454,18 +463,24 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     }
   }
 
-  // Knox delegated-credentials injector plugin — the OpenClaw half of the
-  // agent-to-agent credential consumer (see openclaw-plugins/). Only wired when
-  // the platform MCP is configured, since that is the only path by which a
-  // delegated turn can arrive. Merges into any `plugins` block a prior step
-  // (e.g. Codex OAuth) already set rather than clobbering it.
+  // Knox OpenClaw plugins that ride the platform MCP — the delegated-credentials
+  // injector (the A2A credential consumer) and the report-outcome injector (which
+  // stamps the conversation id onto the agent's `report_outcome` call). Both are
+  // only wired when the platform MCP is configured, since that is the only path by
+  // which a delegated turn can arrive or `report_outcome` can be sent. Merges into
+  // any `plugins` block a prior step (e.g. Codex OAuth) already set rather than
+  // clobbering it.
   if (env.PLATFORM_MCP_URL) {
     const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
     const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
     const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
-    plugins.load = { ...load, paths: [...paths, DELEGATED_CREDS_PLUGIN_DIR] };
+    plugins.load = {
+      ...load,
+      paths: [...paths, DELEGATED_CREDS_PLUGIN_DIR, REPORT_OUTCOME_PLUGIN_DIR],
+    };
     const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
     entries[DELEGATED_CREDS_PLUGIN_ID] = { enabled: true };
+    entries[REPORT_OUTCOME_PLUGIN_ID] = { enabled: true };
     plugins.entries = entries;
     config.plugins = plugins;
   }
