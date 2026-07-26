@@ -11,6 +11,7 @@ import {
   LOCAL_OLLAMA_BASE_URL,
   parseExtraMcpServers,
   parseToolsDeny,
+  resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
 
@@ -120,6 +121,37 @@ describe("buildOpenclawConfig model provider block", () => {
     expect(config.models).toBeUndefined();
     expect(config.auth).toBeDefined();
     expect(config.plugins).toBeDefined();
+  });
+});
+
+describe("buildOpenclawConfig heartbeat (autonomous idle-inference cost)", () => {
+  const heartbeat = (config: Record<string, unknown>) =>
+    (config.agents as { defaults: { heartbeat?: { every?: string } } }).defaults.heartbeat;
+
+  it("disables the heartbeat by default (unset → every:'0' → openclaw skips scheduling)", () => {
+    expect(heartbeat(buildOpenclawConfig(makeEnv({}), "/ws"))).toEqual({ every: "0" });
+  });
+
+  it.each(["off", "none", "0", "disabled", "false", "no", "", "  OFF  "])(
+    "treats %j as an off switch → every:'0'",
+    (value) => {
+      const config = buildOpenclawConfig(makeEnv({ OPENCLAW_HEARTBEAT_EVERY: value }), "/ws");
+      expect(heartbeat(config)).toEqual({ every: "0" });
+    },
+  );
+
+  it("passes an explicit duration through to re-enable the tick per-agent", () => {
+    const config = buildOpenclawConfig(makeEnv({ OPENCLAW_HEARTBEAT_EVERY: "8h" }), "/ws");
+    expect(heartbeat(config)).toEqual({ every: "8h" });
+  });
+
+  it("trims surrounding whitespace on an explicit duration", () => {
+    expect(resolveHeartbeatEvery(makeEnv({ OPENCLAW_HEARTBEAT_EVERY: "  30m " }))).toBe("30m");
+  });
+
+  it("resolveHeartbeatEvery maps unset/off to '0'", () => {
+    expect(resolveHeartbeatEvery(makeEnv({}))).toBe("0");
+    expect(resolveHeartbeatEvery(makeEnv({ OPENCLAW_HEARTBEAT_EVERY: "Off" }))).toBe("0");
   });
 });
 

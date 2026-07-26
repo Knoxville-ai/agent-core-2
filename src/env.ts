@@ -108,6 +108,24 @@ const Schema = z.object({
   OPENCLAW_TOOLS_PROFILE: z.enum(["minimal", "coding", "messaging", "full"]).optional(),
   OPENCLAW_TOOLS_DENY: z.string().optional(),
 
+  // Autonomous heartbeat cadence → openclaw.json agents.defaults.heartbeat.every.
+  //
+  // openclaw runs a periodic "heartbeat" turn on the default (`main`) agent: a
+  // FULL model inference (the entire system prompt + every tool schema replayed
+  // for a tiny "nothing to do" ack, whose delivery target defaults to "none").
+  // It is ON by default at 30m for the default agent EVEN WHEN IDLE, so a vessel
+  // that no one is messaging still bills ~one full input every 30 minutes,
+  // around the clock — the overnight/weekend inference cost with no user-visible
+  // output. These agents are reactive (all conversation arrives via the shim),
+  // so that autonomous tick is pure waste here. We therefore DISABLE it by
+  // default (see resolveHeartbeatEvery) and expose this per-agent opt-in:
+  //   unset / "" / "off" / "0" / "none" / "disabled" → heartbeat disabled
+  //   any openclaw duration ("8h", "2h", "30m", …)   → re-enabled at that cadence
+  // Emitting every:"0" makes openclaw's heartbeat runner skip scheduling
+  // (resolveHeartbeatIntervalMs → null → "heartbeat: disabled"); a bad duration
+  // parses to null and stays safely disabled rather than failing boot.
+  OPENCLAW_HEARTBEAT_EVERY: z.string().optional(),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()
