@@ -1,12 +1,22 @@
-// Pure, dependency-free logic for the report-outcome plugin, split out from
-// index.js so it can be unit-tested without loading the OpenClaw SDK.
+// Pure, dependency-free logic for the conversation-id injector plugin, split out
+// from index.js so it can be unit-tested without loading the OpenClaw SDK.
 //
-// The platform `report_outcome` MCP tool closes the current session with a
-// self-reported status + summary (see knoxville-ai-console CONTRACT.md, migration
-// 0039). `conversation_id` is REQUIRED by that tool, but the MODEL does not know
-// it — the runtime does. This module derives the conversation id from the
-// OpenClaw session key and stamps it onto the tool call so the model never has to
-// (and never gets to) type it.
+// Two platform MCP tools need the id of the conversation the agent is currently
+// serving, and in BOTH cases the model has no way to know it — the runtime does:
+//
+//   report_outcome  closes the session with a self-reported status + summary
+//                   (console CONTRACT.md, migration 0039).
+//   start_task      hands long-running work to another agent (migration 0047).
+//                   Its `conversation_id` is the CALLER's session — where the
+//                   task card renders and where the result is delivered when the
+//                   work lands. Omit it and the task still runs, but silently
+//                   becomes fire-and-forget: no card, and nobody is ever woken
+//                   with the answer. That is exactly what happened before this
+//                   plugin covered it.
+//
+// This module derives the conversation id from the OpenClaw session key and
+// stamps it onto the tool call so the model never has to (and never gets to)
+// type it.
 
 /**
  * The platform's session-closing tool. OpenClaw may surface an MCP server's tool
@@ -18,9 +28,22 @@
  */
 const REPORT_OUTCOME_SUFFIX = /(^|[.:/]|__)report_outcome$/;
 
+/** The platform's long-running-task starter. Same namespacing rules. */
+const START_TASK_SUFFIX = /(^|[.:/]|__)start_task$/;
+
 /** True when `toolName` is the platform `report_outcome` tool (bare or prefixed). */
 export function isReportOutcomeTool(toolName) {
   return typeof toolName === "string" && REPORT_OUTCOME_SUFFIX.test(toolName);
+}
+
+/** True when `toolName` is the platform `start_task` tool (bare or prefixed). */
+export function isStartTaskTool(toolName) {
+  return typeof toolName === "string" && START_TASK_SUFFIX.test(toolName);
+}
+
+/** True for any tool this plugin stamps a conversation id onto. */
+export function needsConversationId(toolName) {
+  return isReportOutcomeTool(toolName) || isStartTaskTool(toolName);
 }
 
 /**
@@ -68,3 +91,16 @@ export function buildOutcomeParams(params, conversationId) {
   if (base.conversation_id === conversationId) return null;
   return { ...base, conversation_id: conversationId };
 }
+
+/**
+ * Stamp the runtime-derived `conversation_id` onto a COPY of the start_task
+ * params. Identical rules to buildOutcomeParams — the runtime is authoritative
+ * and overrides anything the model supplied, because the model cannot know this
+ * id and a guessed one would silently misroute the task's result to another
+ * session (or to none at all).
+ *
+ * Deliberately shares the implementation: the two tools want the same value
+ * derived the same way, and letting them drift is how one of them ends up
+ * unstamped.
+ */
+export const buildStartTaskParams = buildOutcomeParams;

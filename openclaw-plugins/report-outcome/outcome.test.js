@@ -2,9 +2,77 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildOutcomeParams,
+  buildStartTaskParams,
   conversationIdFromSessionKey,
   isReportOutcomeTool,
+  isStartTaskTool,
+  needsConversationId,
 } from "./outcome.js";
+
+describe("isStartTaskTool", () => {
+  it("matches the bare and server-prefixed tool name", () => {
+    expect(isStartTaskTool("start_task")).toBe(true);
+    expect(isStartTaskTool("knoxville_platform.start_task")).toBe(true);
+    expect(isStartTaskTool("knoxville_platform:start_task")).toBe(true);
+    expect(isStartTaskTool("knoxville_platform__start_task")).toBe(true);
+  });
+
+  it("does not match neighbouring task tools", () => {
+    for (const name of [
+      "wait_for_task",
+      "get_task_result",
+      "cancel_task",
+      "report_task_progress",
+      "start_tasks",
+    ]) {
+      expect(isStartTaskTool(name), name).toBe(false);
+    }
+  });
+});
+
+describe("needsConversationId", () => {
+  it("covers both tools that require a runtime-supplied conversation id", () => {
+    expect(needsConversationId("report_outcome")).toBe(true);
+    expect(needsConversationId("start_task")).toBe(true);
+  });
+
+  it("leaves every other tool alone", () => {
+    for (const name of ["exec", "send_message", "wait_for_task", "recall"]) {
+      expect(needsConversationId(name), name).toBe(false);
+    }
+  });
+});
+
+describe("buildStartTaskParams", () => {
+  it("stamps the caller's conversation id so the task gets a card and a callback", () => {
+    // Without this the task still runs, but parent_conversation_id is null:
+    // no card in the thread and nobody is ever woken with the result. That was
+    // a real failure in the field, not a hypothetical.
+    const out = buildStartTaskParams(
+      { slug: "sanmar", instructions: "check inventory" },
+      "conv-1",
+    );
+    expect(out).toEqual({
+      slug: "sanmar",
+      instructions: "check inventory",
+      conversation_id: "conv-1",
+    });
+  });
+
+  it("overrides a conversation id the model invented", () => {
+    const out = buildStartTaskParams(
+      { instructions: "x", conversation_id: "guessed" },
+      "conv-1",
+    );
+    expect(out.conversation_id).toBe("conv-1");
+  });
+
+  it("leaves the call unchanged from a task session (a sub-task has no conversation)", () => {
+    expect(
+      buildStartTaskParams({ instructions: "x" }, conversationIdFromSessionKey("task:t-1")),
+    ).toBeNull();
+  });
+});
 
 describe("isReportOutcomeTool", () => {
   it("matches the bare and server-prefixed tool name", () => {
