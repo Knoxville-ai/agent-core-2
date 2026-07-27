@@ -59,6 +59,16 @@ export class TaskReporter {
       opts.sleepImpl ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
+  /** Origin of the callback URL, for diagnostics. Never the path (task id) or
+   *  the body (token). */
+  private origin(): string {
+    try {
+      return new URL(this.url).origin;
+    } catch {
+      return "(unparseable)";
+    }
+  }
+
   private headers(): Record<string, string> {
     return {
       Authorization: `Bearer ${this.token}`,
@@ -79,17 +89,57 @@ export class TaskReporter {
         headers: this.headers(),
         body: JSON.stringify(body),
         signal: controller.signal,
+        // A redirect is a FAILURE, not something to chase. Following one is how
+        // an auth gateway silently swallows a report: 302 -> login page -> 200
+        // HTML, which every naive success check reads as "recorded".
+        redirect: "manual",
       });
-      if (!res.ok) {
+
+      const contentType = res.headers.get("content-type") ?? "";
+
+      if (!res.ok || res.type === "opaqueredirect" || res.status >= 300) {
         const text = await res.text().catch(() => "");
         log.warn("task report rejected", {
           task_id: this.taskId,
           status: res.status,
+          content_type: contentType,
+          location: res.headers.get("location") ?? undefined,
           body: text.slice(0, 300),
         });
         return { ok: false, cancelRequested: false, terminal: false };
       }
-      const parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+
+      // A 2xx is NOT proof the platform recorded anything. An auth gateway or a
+      // deployment-protection interstitial in front of the console answers 200
+      // with an HTML page, and the original version of this method returned
+      // ok:true for it — so every heartbeat, progress note, and terminal result
+      // "succeeded" while the task row sat untouched at status='running' with
+      // nothing in the log to show for it. Verify the response is actually ours:
+      // JSON, and carrying the `ok` flag every task-callback route returns.
+      if (!contentType.includes("application/json")) {
+        const text = await res.text().catch(() => "");
+        log.warn("task report got a non-JSON response (not the task API)", {
+          task_id: this.taskId,
+          status: res.status,
+          content_type: contentType,
+          url_origin: this.origin(),
+          body: text.slice(0, 300),
+        });
+        return { ok: false, cancelRequested: false, terminal: false };
+      }
+
+      const parsed = (await res.json().catch(() => null)) as
+        | Record<string, unknown>
+        | null;
+      if (!parsed || parsed.ok !== true) {
+        log.warn("task report response did not confirm the write", {
+          task_id: this.taskId,
+          status: res.status,
+          body: JSON.stringify(parsed ?? null).slice(0, 300),
+        });
+        return { ok: false, cancelRequested: false, terminal: false };
+      }
+
       return {
         ok: true,
         cancelRequested: parsed.cancel_requested === true,
