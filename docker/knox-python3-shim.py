@@ -5,25 +5,45 @@ WHY THIS EXISTS
 ---------------
 On a platform-brokered agent-to-agent (A2A) turn, the runtime pulls the caller's
 shared credentials and must expose them to the skill's `exec` subprocess for that
-one turn (see BYOA.md / the delegated-credentials design). The intended path was
-an openclaw `before_tool_call` plugin that rewrites the exec tool's `env`.
+one turn (see BYOA.md / the delegated-credentials design). The intended path is an
+openclaw `before_tool_call` plugin that rewrites the exec tool's `env`, keyed by
+`ctx.sessionKey`.
 
-That plugin works on the agent's native/heartbeat runs, but NOT on the turns that
-matter: the shim proxies delegated turns through openclaw's OpenAI-compatible
-`/v1/chat/completions` endpoint, whose embedded run does NOT fire `before_tool_call`
-hooks. openclaw also (a) rebuilds the exec PATH so only `tools.exec.pathPrepend`
-survives, (b) inherits the gateway's fixed process env for exec (the shim can't
-mutate it per-turn), (c) offers no per-request env passthrough, and (d) exposes no
-session id to the exec subprocess. So there is no in-openclaw hook that can inject
-per-turn env on the delegated path.
+THAT PLUGIN IS THE PRIMARY PATH, and it works on the chat-completions turns too.
+Verified against openclaw 2026.5.20:
+
+  x-openclaw-session-key  (set by the shim)
+    -> resolveGatewayRequestContext   (dist/http-utils, reads the header)
+    -> pi-embedded-runner sandboxSessionKey
+    -> catalogToolHookContext.sessionKey  (dist/selection)
+    -> runBeforeToolCallHook(ctx)     (dist/tool-split, wraps EVERY tool)
+    -> plugin injects params.env
+    -> execSchema.env                 (dist/bash-tools.schemas)
+    -> subprocess environment
+
+An earlier version of this comment claimed the embedded run does not fire
+`before_tool_call`. That is not true of 2026.5.20, and the claim is what forced
+delegated work to run one turn at a time. If you are debugging a credential
+problem, re-verify the chain above before assuming the plugin is not firing.
+
+THIS SHIM IS NOW A FALLBACK, for the case where the plugin genuinely did not run
+(an older openclaw, a tool profile that strips plugins, an exec host that bypasses
+the wrapper). It is strictly less capable than the plugin: openclaw exposes no
+session id to the exec subprocess, so the shim cannot ask "my session's
+credentials" — only "the single live delegated turn" — and must return nothing
+when several overlap. Anything relying on the shim is therefore limited to one
+delegated turn at a time; anything on the plugin path is not.
 
 WHAT THIS DOES
 --------------
 It is placed FIRST on the exec tool's PATH (via `tools.exec.pathPrepend`), so a
 skill's bare `python3 ...` resolves here. It then, strictly best-effort:
 
-  1. pulls the current delegated turn's credentials from the shim's loopback route
-     using the gateway token already present in the exec env, and
+  0. checks for the plugin's injection marker (KNOX_DELEGATED_CREDS_INJECTED). If
+     it is set, the parallel-safe path already ran and this shim does nothing but
+     re-exec — no loopback call, no single-turn restriction.
+  1. otherwise pulls the current delegated turn's credentials from the shim's
+     loopback route using the gateway token already present in the exec env, and
   2. exports each `ENV_KEY=value` into the environment (never overwriting a value
      the caller already set), then
   3. re-execs the REAL interpreter (`/opt/skills-venv/bin/python3`) with the
@@ -35,8 +55,9 @@ GUARANTEES
     swallowed and the real interpreter is exec'd with the env unchanged.
   * NEVER logs the secret VALUES. It logs only the injected key NAMES (to stderr),
     matching the names-only rule the rest of the runtime follows.
-  * Per-turn isolation is enforced on the SHIM side (`currentSingle` returns creds
-    only when exactly one delegated turn is live; these agents serialize turns).
+  * Per-turn isolation on the FALLBACK path is enforced shim-side (`currentSingle`
+    returns creds only when exactly one delegated turn is live). On the primary
+    (plugin) path isolation is by session key, so concurrency is unrestricted.
 """
 
 import os
@@ -57,9 +78,21 @@ def _valid_env_key(key):
     return all(ch.isalnum() or ch == "_" for ch in key)
 
 
+# Set by the before_tool_call plugin when it has already injected this call's
+# credentials (see openclaw-plugins/delegated-credentials/inject.js). Its presence
+# means the parallel-safe path ran and this shim must not second-guess it.
+_PLUGIN_MARKER = "KNOX_DELEGATED_CREDS_INJECTED"
+
+
 def _augment_env():
     """Best-effort: fetch this turn's delegated creds and export them. Silent on
     any failure — the caller's env is simply left as-is."""
+    if os.environ.get(_PLUGIN_MARKER):
+        # The plugin already injected, keyed by session. Doing our own
+        # single-turn lookup here could only ever be worse: it would add a
+        # loopback round-trip and, with several delegated turns live, return
+        # nothing at all. Stand down.
+        return
     token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
     if not token:
         return

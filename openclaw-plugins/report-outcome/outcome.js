@@ -33,6 +33,13 @@ export function isReportOutcomeTool(toolName) {
  */
 export function conversationIdFromSessionKey(sessionKey) {
   if (typeof sessionKey !== "string") return null;
+  // A `task:<taskId>` session is a long-running task executor, not a session
+  // that can be closed (console migration 0047). Everything after the colon
+  // there is a TASK id, and stamping it as a conversation id would send the
+  // platform a close for a conversation that does not exist. A task reports its
+  // own terminal state through the task callback API instead, and the
+  // conversation it ran in is closed by the normal idle sweep.
+  if (sessionKey.startsWith("task:")) return null;
   const sep = sessionKey.indexOf(":");
   if (sep === -1) return null;
   const id = sessionKey.slice(sep + 1).trim();

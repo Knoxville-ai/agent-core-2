@@ -211,8 +211,10 @@ export function assembleSystemPrompt(input: AssembleInput): string {
           "`start_conversation` with the drive-thru's `slug` AND the `capability` " +
           "name that best fits the request — choose the single closest match from " +
           "the capabilities listed under that drive-thru — then `send_message`. " +
-          "For long-running work use `start_task` + `wait_for_task`. Only the " +
-          "capabilities listed under each drive-thru are available to you.",
+          "For work that may take more than a couple of minutes use `start_task` " +
+          "and end your turn — the result is delivered back to this conversation " +
+          "when it lands. Only the capabilities listed under each drive-thru are " +
+          "available to you.",
       );
       parts.push("");
       parts.push(dtParts.join("\n\n"));

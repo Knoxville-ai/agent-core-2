@@ -16,6 +16,13 @@ import {
 import { handleHealth, handleReady } from "./routes-health.js";
 import { handleInterrupt } from "./routes-interrupt.js";
 import { handleSendMessage } from "./routes-messages.js";
+import {
+  handleTaskCancel,
+  handleTaskList,
+  handleTaskStart,
+  type TasksDeps,
+} from "./routes-tasks.js";
+import { TaskRunner } from "./task-runner.js";
 import { DelegatedCredentialStore } from "./delegated-credentials.js";
 import { handleDelegatedCredentialsLookup } from "./routes-internal.js";
 import {
@@ -46,6 +53,10 @@ export function startShim(
   // Per-turn delegated-credential store, shared between the message route
   // (writer) and the loopback lookup route (reader for the gateway plugin).
   const delegatedCreds = new DelegatedCredentialStore();
+  // Long-running task executor. Detached from every HTTP request: the task
+  // routes hand work to it and return 202, and it reports back to the platform
+  // on its own schedule (see task-runner.ts).
+  const taskRunner = new TaskRunner({ env, db, memory, delegatedCreds });
   const oauth: OAuthDeps = {
     env,
     db,
@@ -54,7 +65,17 @@ export function startShim(
   };
 
   const server = createServer((req, res) => {
-    void route(req, res, env, db, cancels, oauth, memory, delegatedCreds).catch((err) => {
+    void route(
+      req,
+      res,
+      env,
+      db,
+      cancels,
+      oauth,
+      memory,
+      delegatedCreds,
+      taskRunner,
+    ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
         if (!res.headersSent) {
@@ -86,10 +107,12 @@ export function startShim(
     server.listen(env.AGENT_HTTP_PORT, "0.0.0.0", () => {
       log.info("shim listening", { port: env.AGENT_HTTP_PORT });
       resolve({
-        close: () =>
-          new Promise<void>((r) => {
+        close: async () => {
+          await taskRunner.shutdown();
+          await new Promise<void>((r) => {
             server.close(() => r());
-          }),
+          });
+        },
       });
     });
   });
@@ -104,6 +127,7 @@ async function route(
   oauth: OAuthDeps,
   memory: MemoryCheckpoint,
   delegatedCreds: DelegatedCredentialStore,
+  taskRunner: TaskRunner,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -207,6 +231,25 @@ async function route(
         cancels,
       });
     }
+  }
+
+  // Long-running tasks (console migration 0047). Same bearer gate as the
+  // messaging routes — a task start is authorized exactly like the synchronous
+  // turn it replaces — but it NEVER runs the work inline: it 202s and the
+  // runner takes over, so the task outlives this request by design.
+  if (path === "/api/v1/tasks" || path.startsWith("/api/v1/tasks/")) {
+    const tasks: TasksDeps = { env, db, runner: taskRunner };
+    if (path === "/api/v1/tasks") {
+      if (method === "POST") return handleTaskStart(principal, req, res, tasks);
+      if (method === "GET") return handleTaskList(res, tasks);
+      throw new HttpError(405, "method not allowed");
+    }
+    const cancelMatch = /^\/api\/v1\/tasks\/([^/]+)\/cancel$/.exec(path);
+    if (cancelMatch) {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      return handleTaskCancel(cancelMatch[1]!, principal, req, res, tasks);
+    }
+    throw new HttpError(404, `no route for ${method} ${path}`);
   }
 
   // /api/v1/agents/:uid/files/...  (legacy attachment surface — placeholder)

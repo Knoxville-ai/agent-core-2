@@ -52,6 +52,10 @@ import {
  * row, and updates the row's status + final content on done.
  */
 
+/** How often to emit an SSE comment during a silent stretch of a turn. Well
+ *  inside the ~60s idle window edge proxies enforce. */
+const KEEPALIVE_INTERVAL_MS = 15_000;
+
 interface AttachmentInput {
   storage_path?: unknown;
   mime_type?: unknown;
@@ -262,6 +266,25 @@ export async function handleSendMessage(
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
+  // Keepalive. A turn that spends minutes inside one tool call emits no token
+  // deltas, and an idle HTTP connection is exactly what an edge proxy reaps
+  // (Railway's is ~60s) — which surfaced as "the agent just stopped replying"
+  // on precisely the slow turns that mattered. An SSE comment line is ignored
+  // by every conformant client (the console's reader skips non-`data:` lines,
+  // and the A2A bridge's parser does too) but it keeps bytes moving.
+  //
+  // Note this only buys a turn more time; it is NOT how long work should be
+  // done. Anything that runs for many minutes belongs in a task (routes-tasks),
+  // which holds no connection at all.
+  const keepalive = setInterval(() => {
+    try {
+      res.write(`: keepalive ${Date.now()}\n\n`);
+    } catch {
+      /* stream already torn down; the finally below clears the timer */
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+  keepalive.unref?.();
+
   sseSend({
     type: "start",
     user_message_id: userMessageId,
@@ -369,6 +392,7 @@ export async function handleSendMessage(
       }
     }
   } finally {
+    clearInterval(keepalive);
     // Drop any delegated credentials staged for this turn. The turn is over, so
     // they must not outlive it (nor race a concurrent turn). Idempotent + safe
     // on a non-delegated turn (nothing was stored under this key).
@@ -403,7 +427,7 @@ export async function handleSendMessage(
  * turn, so a broker hiccup degrades to "no delegated creds" rather than a failed
  * reply.
  */
-async function fetchDelegatedCredentialsForTurn(
+export async function fetchDelegatedCredentialsForTurn(
   env: AgentEnv,
   conversationId: string,
 ): Promise<DelegatedCredentials> {
@@ -767,7 +791,7 @@ function fallbackNote(
 }
 
 /** OpenAI-compatible usage block, as emitted on the final stream frame. */
-interface OpenaiUsage {
+export interface OpenaiUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
@@ -780,7 +804,7 @@ interface OpenaiUsage {
  * (`input_tokens` / `output_tokens` / `total_tokens`). Returns undefined when
  * the gateway reported no usage so we don't overwrite the column with zeros.
  */
-function buildTokenUsage(
+export function buildTokenUsage(
   usage: OpenaiUsage | null,
   env: AgentEnv,
 ): Record<string, unknown> | undefined {
@@ -811,7 +835,7 @@ function buildTokenUsage(
  * Captures the trailing `usage` frame (requested via stream_options) into
  * `usageRef` as a side channel so the caller can persist token counts.
  */
-async function* iterOpenaiDeltas(
+export async function* iterOpenaiDeltas(
   body: ReadableStream<Uint8Array>,
   usageRef?: { value: OpenaiUsage | null },
 ): AsyncGenerator<string> {
