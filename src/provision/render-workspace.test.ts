@@ -12,6 +12,7 @@ import {
   parseExtraMcpServers,
   parseToolsDeny,
   REPORT_OUTCOME_PLUGIN_ID,
+  TASK_PROGRESS_PLUGIN_ID,
   resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
@@ -263,7 +264,48 @@ describe("buildOpenclawConfig platform plugins", () => {
     return (config.plugins as { load?: { paths?: string[] }; entries?: Record<string, unknown> }) ?? {};
   }
 
-  it("wires both plugins (load paths + enabled entries) when PLATFORM_MCP_URL is set", () => {
+  /**
+   * Every plugin directory this module wires into openclaw.json MUST ship an
+   * `openclaw.plugin.json` manifest and a `package.json`, or openclaw refuses to
+   * start AT ALL:
+   *
+   *   Gateway failed to start: Invalid config at .../openclaw.json.
+   *   plugins: plugin: plugin manifest not found: .../<dir>/openclaw.plugin.json
+   *
+   * That is a boot crash-loop on every agent running the image, not a degraded
+   * feature — a plugin added with only its code is a fleet-wide outage. This
+   * test walks the real directories on disk so a new plugin cannot be wired
+   * without its manifest.
+   */
+  it("every wired plugin directory ships a manifest and a package.json", async () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+      "/ws",
+    );
+    const paths = plugins(config).load?.paths ?? [];
+    expect(paths.length).toBeGreaterThan(0);
+
+    for (const dir of paths) {
+      const manifestRaw = await readFile(join(dir, "openclaw.plugin.json"), "utf8");
+      const manifest = JSON.parse(manifestRaw) as { id?: string };
+      const pkgRaw = await readFile(join(dir, "package.json"), "utf8");
+      const pkg = JSON.parse(pkgRaw) as { name?: string; type?: string; main?: string };
+
+      // The manifest id is the key openclaw looks the plugin up by, so it must
+      // match the `entries` key this module writes.
+      expect(
+        Object.keys(plugins(config).entries ?? {}),
+        `${dir}: manifest id must match an enabled entry`,
+      ).toContain(manifest.id);
+      expect(pkg.type, `${dir}: plugins are ESM`).toBe("module");
+      expect(pkg.main, `${dir}: entrypoint`).toBe("index.js");
+    }
+  });
+
+  it("wires all three plugins (load paths + enabled entries) when PLATFORM_MCP_URL is set", () => {
     const config = buildOpenclawConfig(
       makeEnv({
         PLATFORM_MCP_URL: "https://console.example/api/mcp",
@@ -279,6 +321,10 @@ describe("buildOpenclawConfig platform plugins", () => {
     ).toBe(true);
     expect(
       (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/report-outcome")),
+    ).toBe(true);
+    expect(p.entries?.[TASK_PROGRESS_PLUGIN_ID]).toEqual({ enabled: true });
+    expect(
+      (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/task-progress")),
     ).toBe(true);
   });
 

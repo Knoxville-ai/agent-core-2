@@ -1,0 +1,12 @@
+{
+  "id": "knox-task-progress",
+  "name": "Knox Task Progress",
+  "description": "Stamp the platform task id onto the agent's report_task_progress MCP call so the model never has to know or type it.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
