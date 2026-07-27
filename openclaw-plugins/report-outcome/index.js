@@ -4,6 +4,8 @@ import {
   buildOutcomeParams,
   conversationIdFromSessionKey,
   isReportOutcomeTool,
+  isStartTaskTool,
+  needsConversationId,
 } from "./outcome.js";
 
 /**
@@ -34,23 +36,33 @@ import {
 
 export default definePluginEntry({
   id: "knox-report-outcome",
-  name: "Knox Report Outcome",
+  name: "Knox Conversation Id Injector",
   description:
-    "Stamp the platform conversation id onto the agent's report_outcome MCP call so the model never has to know or type it.",
+    "Stamp the platform conversation id onto the agent's report_outcome and start_task MCP calls so the model never has to know or type it.",
   register(api) {
     api.on(
       "before_tool_call",
       async (event, ctx) => {
-        if (!isReportOutcomeTool(event?.toolName)) return;
+        const toolName = event?.toolName;
+        if (!needsConversationId(toolName)) return;
         const sessionKey = ctx?.sessionKey;
         const conversationId = conversationIdFromSessionKey(sessionKey);
+        const label = isStartTaskTool(toolName) ? "start_task" : "report_outcome";
         if (!conversationId) {
-          // No usable session key → let the call through unchanged. Fail-open:
-          // the platform rejects a missing/blank conversation_id, and the
-          // console idle-sweep backstops the session close.
+          // No usable session key → let the call through unchanged. Fail-open,
+          // but the two tools degrade differently, so say which:
+          //   report_outcome — the platform rejects a blank conversation_id and
+          //     the console idle-sweep backstops the session close.
+          //   start_task — the task still runs, but with no parent session it
+          //     posts no card and wakes nobody. On a `task:` session key that is
+          //     correct (a sub-task has no conversation); anywhere else it means
+          //     a result is about to go undelivered.
           console.error(
-            `[knox-report-outcome] report_outcome with no derivable conversation id ` +
-              `(session=${sessionKey ?? "undefined"})`,
+            `[knox-report-outcome] ${label} with no derivable conversation id ` +
+              `(session=${sessionKey ?? "undefined"})` +
+              (isStartTaskTool(toolName)
+                ? " — the task will run without a parent session: no card, no callback"
+                : ""),
           );
           return;
         }
@@ -59,7 +71,7 @@ export default definePluginEntry({
         // conversation_id is the session's own id (not a secret) — safe to log.
         console.error(
           `[knox-report-outcome] stamped conversation_id=${conversationId} onto ` +
-            `report_outcome (session=${sessionKey})`,
+            `${label} (session=${sessionKey})`,
         );
         return { params };
       },

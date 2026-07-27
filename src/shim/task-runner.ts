@@ -287,6 +287,24 @@ export class TaskRunner {
             session_key: sessionKey,
             keys: credentialKeyNames(creds),
           });
+        } else {
+          // A delegated task that receives NOTHING is almost always a config
+          // problem — the connection exists but shares no credentials — and its
+          // natural symptom is a skill failing to authenticate several minutes
+          // later, deep in the task, where the real cause is invisible. Say it
+          // here instead, both in the log and on the caller's task card.
+          log.warn("delegated task staged NO credentials", {
+            task_id: spec.taskId,
+            session_key: sessionKey,
+            conversation_id: spec.conversationId,
+            shares_credentials_claimed: spec.sharesCredentials,
+          });
+          await reporter.event(
+            "error",
+            "This task was delegated, but the connection released no credentials. " +
+              "Skills that need them will fail to authenticate. Check the " +
+              "connection's shared-credential list in the console.",
+          );
         }
       }
 
@@ -509,6 +527,9 @@ export function buildTaskPrompt(spec: TaskSpec): string {
     "- If you cannot finish, say so plainly in that final message and explain " +
       "how far you got. A partial answer with its limits stated is worth much " +
       "more than an optimistic one.",
+    "- Do NOT call `report_outcome`. That tool closes a chat session and a task " +
+      "is not one; the platform will reject the call. Finishing this turn IS how " +
+      "you report — the runtime records your result the moment you stop.",
     "- Do not ask clarifying questions — there is nobody on the other end of " +
       "this turn to answer them. Make a reasonable call, state the assumption " +
       "you made, and continue.",
