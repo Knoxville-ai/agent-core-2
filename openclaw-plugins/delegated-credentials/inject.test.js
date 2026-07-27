@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildInjectedParams, isExecTool, parseCredentialsResponse } from "./inject.js";
+import {
+  buildInjectedParams,
+  INJECTION_MARKER_ENV,
+  isExecTool,
+  parseCredentialsResponse,
+} from "./inject.js";
 
 describe("isExecTool", () => {
   it("true only for the host-exec tool(s)", () => {
@@ -20,8 +25,25 @@ describe("buildInjectedParams", () => {
     );
     expect(out).toEqual({
       command: "python3 sportslink.py",
-      env: { SPORTSINC_API_KEY: "sekret" },
+      env: { SPORTSINC_API_KEY: "sekret", [INJECTION_MARKER_ENV]: "1" },
     });
+  });
+
+  it("stamps the marker so the exec shim stands down", () => {
+    // The shim is the fallback injector and is capped at one delegated turn at
+    // a time. When this plugin (which keys by session and is therefore safe
+    // with any number of concurrent turns) has already run, the shim must not
+    // second-guess it. The marker is that signal — and it carries only a count,
+    // never a value.
+    const out = buildInjectedParams({ command: "x" }, { A: "1", B: "2" });
+    expect(out.env[INJECTION_MARKER_ENV]).toBe("2");
+    expect(out.env[INJECTION_MARKER_ENV]).not.toContain("1;");
+  });
+
+  it("does not stamp the marker when there was nothing to inject", () => {
+    // No creds → null → the tool call is left completely unchanged, so the shim
+    // still gets its chance on a turn this plugin could not serve.
+    expect(buildInjectedParams({ command: "x" }, {})).toBeNull();
   });
 
   it("returns null when there are no creds (no-op → tool call unchanged)", () => {
@@ -35,7 +57,12 @@ describe("buildInjectedParams", () => {
       { command: "x", env: { SPORTSINC_API_KEY: "explicit", OTHER: "1" } },
       { SPORTSINC_API_KEY: "delegated", NEW_KEY: "n" },
     );
-    expect(out.env).toEqual({ SPORTSINC_API_KEY: "explicit", OTHER: "1", NEW_KEY: "n" });
+    expect(out.env).toEqual({
+      SPORTSINC_API_KEY: "explicit",
+      OTHER: "1",
+      NEW_KEY: "n",
+      [INJECTION_MARKER_ENV]: "2",
+    });
   });
 
   it("does not mutate the input params", () => {
@@ -46,7 +73,7 @@ describe("buildInjectedParams", () => {
 
   it("drops non-string values and invalid env-var-name keys", () => {
     expect(buildInjectedParams({}, { GOOD: "v", "bad-key": "v", NUM: 3 })).toEqual({
-      env: { GOOD: "v" },
+      env: { GOOD: "v", [INJECTION_MARKER_ENV]: "1" },
     });
   });
 });

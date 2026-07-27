@@ -9,12 +9,19 @@ import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 /**
  * Scheduling tests for the task runner.
  *
- * The property under test is the one that is expensive to get wrong: a
- * credential-carrying (delegated) task must never run concurrently with another
- * one, because the exec shim's credential lookup is fail-closed when two
- * delegated turns overlap (see DelegatedCredentialStore.currentSingle). With
- * hour-long tasks that overlap would otherwise be routine, and the symptom —
- * skills silently losing their credentials — is very hard to trace back here.
+ * Two properties matter here, and they pull in opposite directions:
+ *
+ *  1. In the DEFAULT (parallel) mode, credential-carrying tasks must run
+ *     concurrently like any other. An SME agent whose whole job is accepting
+ *     delegations may have a hundred live at once; serializing them would defeat
+ *     the purpose. This is safe because the openclaw before_tool_call plugin
+ *     injects credentials keyed by ctx.sessionKey, so each task gets its own
+ *     caller's secrets.
+ *
+ *  2. In the SERIAL fallback mode — for a deployment where that plugin path is
+ *     unavailable and the exec shim's fail-closed currentSingle() is the only
+ *     injector — at most one credential-carrying task runs at a time, and
+ *     ordinary tasks are still never stuck behind it.
  */
 
 function makeEnv(overrides: Partial<AgentEnv> = {}): AgentEnv {
@@ -29,11 +36,16 @@ function makeEnv(overrides: Partial<AgentEnv> = {}): AgentEnv {
     AGENT_MAX_CONCURRENT_TASKS: 2,
     AGENT_MAX_QUEUED_TASKS: 5,
     AGENT_TASK_HEARTBEAT_SECONDS: 30,
+    AGENT_DELEGATED_TASK_MODE: "parallel",
     ...overrides,
   } as unknown as AgentEnv;
 }
 
-function makeSpec(id: string, delegated: boolean): TaskSpec {
+function makeSpec(
+  id: string,
+  delegated: boolean,
+  sharesCredentials = delegated,
+): TaskSpec {
   return {
     taskId: id,
     instructions: `do ${id}`,
@@ -43,8 +55,12 @@ function makeSpec(id: string, delegated: boolean): TaskSpec {
     callbackToken: "tok",
     deadlineAt: null,
     delegated,
+    sharesCredentials,
   };
 }
+
+const serialEnv = (overrides: Partial<AgentEnv> = {}) =>
+  makeEnv({ AGENT_DELEGATED_TASK_MODE: "serial", ...overrides } as Partial<AgentEnv>);
 
 /**
  * A runner whose actual turn execution is replaced by a promise the test
@@ -99,9 +115,34 @@ describe("TaskRunner scheduling", () => {
     expect([...inFlight].sort()).toEqual(["b", "c"]);
   });
 
-  it("runs at most one delegated task at a time, whatever the general cap is", async () => {
-    const { runner, inFlight, finish } = makeRunner(
+  it("runs delegated tasks CONCURRENTLY by default — the SME-agent case", async () => {
+    // The whole point: an agent whose only job is credential-carrying delegated
+    // work must not be throttled to one at a time.
+    const { runner, inFlight } = makeRunner(
       makeEnv({ AGENT_MAX_CONCURRENT_TASKS: 8 } as Partial<AgentEnv>),
+    );
+    for (const id of ["d1", "d2", "d3", "d4", "d5"]) {
+      runner.accept(makeSpec(id, true));
+    }
+    await new Promise((r) => setImmediate(r));
+
+    expect([...inFlight].sort()).toEqual(["d1", "d2", "d3", "d4", "d5"]);
+    expect(runner.queuedCount).toBe(0);
+  });
+
+  it("still honours the general cap for delegated tasks", async () => {
+    const { runner, inFlight, finish } = makeRunner(makeEnv());
+    for (const id of ["d1", "d2", "d3"]) runner.accept(makeSpec(id, true));
+    await new Promise((r) => setImmediate(r));
+
+    expect([...inFlight].sort()).toEqual(["d1", "d2"]);
+    await finish("d1");
+    expect([...inFlight].sort()).toEqual(["d2", "d3"]);
+  });
+
+  it("serial mode: runs at most one credential-carrying task at a time", async () => {
+    const { runner, inFlight, finish } = makeRunner(
+      serialEnv({ AGENT_MAX_CONCURRENT_TASKS: 8 }),
     );
     for (const id of ["d1", "d2", "d3"]) runner.accept(makeSpec(id, true));
     await new Promise((r) => setImmediate(r));
@@ -116,8 +157,22 @@ describe("TaskRunner scheduling", () => {
     expect([...inFlight]).toEqual(["d3"]);
   });
 
-  it("does not let a long delegated task block ordinary work behind it", async () => {
-    const { runner, inFlight, finish } = makeRunner(makeEnv());
+  it("serial mode: a delegation that shares nothing is not serialized", async () => {
+    // No credentials means nothing can collide in the store, so there is no
+    // reason to make these queue.
+    const { runner, inFlight } = makeRunner(
+      serialEnv({ AGENT_MAX_CONCURRENT_TASKS: 8 }),
+    );
+    for (const id of ["d1", "d2", "d3"]) {
+      runner.accept(makeSpec(id, true, false));
+    }
+    await new Promise((r) => setImmediate(r));
+
+    expect([...inFlight].sort()).toEqual(["d1", "d2", "d3"]);
+  });
+
+  it("serial mode: a long delegated task never blocks ordinary work", async () => {
+    const { runner, inFlight, finish } = makeRunner(serialEnv());
     // Two delegated tasks queued first, then ordinary ones. The second
     // delegated task cannot start, but the ordinary tasks must not wait on it.
     runner.accept(makeSpec("d1", true));
@@ -133,8 +188,8 @@ describe("TaskRunner scheduling", () => {
     expect([...inFlight].sort()).toEqual(["d2", "n1", "n2"]);
   });
 
-  it("frees the credential lane when a delegated task throws", async () => {
-    const env = makeEnv();
+  it("serial mode: frees the credential lane when a delegated task throws", async () => {
+    const env = serialEnv();
     const runner = new TaskRunner({
       env,
       db: {} as MessagingDB,

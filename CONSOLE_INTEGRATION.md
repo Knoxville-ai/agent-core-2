@@ -406,23 +406,51 @@ delegated message turn, and the shim stages the pulled credentials for the life
 of the task, re-staging them on every heartbeat so the store's 10-minute TTL
 never expires under an hour-long job.
 
-**Delegated tasks run one at a time.** This is a correctness constraint, not a
-tuning choice, and it is the least obvious thing in this system. On the
-chat-completions path openclaw fires no `before_tool_call` hooks and gives the
-exec subprocess no session key, so the only working credential-injection point is
-the exec shim (`docker/knox-python3-shim.py`), which asks the store for *the
-single live delegated turn* (`DelegatedCredentialStore.currentSingle`). That
-method returns nothing when two delegated turns overlap — fail-closed, so one
-caller's secret can never reach another's skill. With synchronous turns the
-overlap window was seconds; an hour-long delegated task would make collisions
-routine and the symptom (skills reporting auth errors for no visible reason)
-nearly untraceable. The runner therefore serializes the credential lane while
-ordinary tasks continue to run `AGENT_MAX_CONCURRENT_TASKS`-wide.
+**Delegated tasks run concurrently.** Credentials are injected per SESSION, not
+per process, so a vessel can run any number of credential-carrying tasks at once
+— which is the whole point for an SME agent whose job is accepting delegations.
+Each task runs under its own `task:<taskId>` session key; the openclaw
+`before_tool_call` plugin reads `ctx.sessionKey`, resolves that session's
+credentials, and merges them into the exec tool's `env` for that one call. Two
+concurrent tasks never share a lookup key, so they can never see each other's
+secrets.
 
-What remains unsolved: a delegated *message* turn arriving while a delegated task
-runs still overlaps and still fails closed. It is now logged loudly by
-`currentSingle` so it is diagnosable. A real fix needs openclaw to expose the
-session key to exec subprocesses.
+Verified against openclaw 2026.5.20 — the chain is worth recording, because an
+earlier version of this document (and the comment in `knox-python3-shim.py`)
+asserted the opposite and that mistake cost a lot of throughput:
+
+| Step | Where |
+| --- | --- |
+| shim sets `x-openclaw-session-key` | `src/shim/task-runner.ts` |
+| gateway reads the header | `dist/http-utils` → `resolveGatewayRequestContext` |
+| embedded runner derives `sandboxSessionKey` | `dist/selection` |
+| it lands in `catalogToolHookContext.sessionKey` | `dist/selection` |
+| every tool is wrapped with the hook | `dist/tool-split` (`pi-embedded-runner/tool-split.ts`) |
+| plugin injects `params.env` | `openclaw-plugins/delegated-credentials` |
+| exec accepts a per-call env map | `dist/bash-tools.schemas` (`env: Type.Optional(Type.Record(...))`) |
+
+There is a second, weaker injector — the exec shim
+(`docker/knox-python3-shim.py`), which runs *inside* the subprocess. openclaw
+gives that subprocess no session key, so it can only ask for "the single live
+delegated turn" (`DelegatedCredentialStore.currentSingle`) and must return
+nothing when several overlap. That is fail-closed and safe, but it caps delegated
+throughput at one turn at a time. The plugin now stamps
+`KNOX_DELEGATED_CREDS_INJECTED` into the injected env, and the shim stands down
+when it sees it — so the parallel-safe path always wins and the shim only matters
+where the plugin does not fire at all.
+
+**If the plugin path is unavailable** (an openclaw old enough to skip
+`before_tool_call` on the embedded run, a `tools.profile` that strips plugins, an
+exec host that bypasses the wrapper), set `AGENT_DELEGATED_TASK_MODE=serial`.
+That restores a lane of one for credential-carrying tasks, keeping
+`currentSingle` correct by construction at the cost of delegated throughput.
+Ordinary tasks are never blocked behind that lane in either mode, and a
+delegation that shares no credentials is never put in it (the console tells the
+vessel via `shares_credentials` on the start payload).
+
+The symptom of the plugin not firing is skills reporting missing credentials
+under concurrency, with `[delegated-credentials] N delegated turns live at once`
+in the vessel log. That log line is the signal to flip the mode.
 
 ### Session keys
 

@@ -34,6 +34,7 @@ interface TaskStartBody {
   callback_token?: unknown;
   deadline_at?: unknown;
   delegated?: unknown;
+  shares_credentials?: unknown;
 }
 
 export interface TasksDeps {
@@ -110,6 +111,11 @@ export async function handleTaskStart(
     callbackToken,
     deadlineAt: str(body.deadline_at),
     delegated,
+    // Only meaningful in AGENT_DELEGATED_TASK_MODE=serial, where it keeps a
+    // delegation that shares nothing out of the serialized lane. Default to
+    // "assume it might" when the platform doesn't say, so an older console
+    // never accidentally un-serializes a task that does carry secrets.
+    sharesCredentials: delegated && body.shares_credentials !== false,
   };
 
   if (!deps.runner.accept(spec)) {

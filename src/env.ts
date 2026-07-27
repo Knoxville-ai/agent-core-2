@@ -139,6 +139,30 @@ const Schema = z.object({
     .default("3")
     .transform((v) => Math.max(1, Number.parseInt(v, 10) || 3)),
 
+  // How credential-carrying (delegated) tasks share the vessel.
+  //
+  //   parallel (default) — they run like any other task, up to
+  //     AGENT_MAX_CONCURRENT_TASKS. Correct because the openclaw
+  //     `before_tool_call` plugin injects credentials keyed by ctx.sessionKey,
+  //     so every concurrent task gets exactly its own caller's secrets. This is
+  //     what an SME agent whose whole job is accepting delegations needs.
+  //
+  //   serial — at most ONE credential-carrying task at a time. The fallback for
+  //     a deployment where the plugin path is not available (an openclaw old
+  //     enough that the embedded run skips before_tool_call, a tools.profile
+  //     that strips plugins, an exec host that bypasses the wrapper). There the
+  //     only injector is the exec shim, which openclaw gives no session key and
+  //     which therefore fails closed whenever two delegated turns overlap —
+  //     correct, but it caps delegated throughput at 1.
+  //
+  // Flip to `serial` if skills start reporting missing credentials under load;
+  // that is the signature of the plugin path not firing. See
+  // CONSOLE_INTEGRATION.md "Credentials on a delegated task".
+  AGENT_DELEGATED_TASK_MODE: z
+    .enum(["parallel", "serial"])
+    .optional()
+    .default("parallel"),
+
   // Tasks accepted but not yet started. A full queue rejects new starts with a
   // 429 so the platform fails the task loudly instead of silently sitting on it.
   AGENT_MAX_QUEUED_TASKS: z

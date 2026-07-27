@@ -23,6 +23,23 @@ export function isExecTool(toolName) {
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
+ * Marker exported alongside the credentials so the exec shim can tell that THIS
+ * plugin already handled the call and skip its own loopback fetch.
+ *
+ * This matters because the two paths have different safety properties. The
+ * plugin knows `ctx.sessionKey`, so it looks credentials up per session and is
+ * safe with any number of concurrent delegated turns. The shim runs inside the
+ * exec subprocess, which openclaw gives no session key, so it can only ask for
+ * "the single live delegated turn" and must fail closed when several overlap.
+ * The marker is what lets the parallel-safe path take precedence instead of the
+ * two racing to inject the same values.
+ *
+ * It carries no secret — just the fact that injection happened, and how many
+ * keys — so it is safe in the subprocess env and in logs.
+ */
+export const INJECTION_MARKER_ENV = "KNOX_DELEGATED_CREDS_INJECTED";
+
+/**
  * Merge delegated creds into a COPY of the exec tool's `params.env` and return
  * the new params object, or `null` when there is nothing to inject (so the
  * caller returns void = "no change" to OpenClaw).
@@ -47,6 +64,8 @@ export function buildInjectedParams(params, creds) {
   for (const k of keys) {
     if (!(k in mergedEnv)) mergedEnv[k] = creds[k];
   }
+  // Tell the exec shim this call is already handled (see INJECTION_MARKER_ENV).
+  mergedEnv[INJECTION_MARKER_ENV] = String(keys.length);
   return { ...base, env: mergedEnv };
 }
 

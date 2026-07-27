@@ -26,35 +26,38 @@ import { TaskReporter } from "./task-reporter.js";
  * can kill it. Progress and the final result travel back over the platform's
  * task callback API (see task-reporter.ts).
  *
- * ── Two lanes, and why ────────────────────────────────────────────────────
+ * ── Concurrency and delegated credentials ─────────────────────────────────
  *
- * Ordinary tasks run up to AGENT_MAX_CONCURRENT_TASKS at a time.
+ * Tasks run up to AGENT_MAX_CONCURRENT_TASKS at a time, INCLUDING the ones
+ * carrying credentials another agent shared. That matters: an SME agent whose
+ * entire job is accepting delegations and running long jobs with brokered
+ * secrets may have a hundred of them live at once, each for a different caller.
  *
- * DELEGATED tasks — the ones carrying credentials another agent shared — run
- * strictly ONE at a time, in their own lane. That is not a throughput
- * preference, it is a correctness requirement, and it is worth being precise
- * about because it is the least obvious constraint in this system:
+ * What makes that safe is that credentials are injected per SESSION, not per
+ * process. Each task runs under its own `task:<taskId>` session key; the
+ * openclaw `before_tool_call` plugin reads `ctx.sessionKey`, looks that session's
+ * credentials up in the store, and merges them into the exec tool's `env` for
+ * that one call. Concurrent tasks never see each other's secrets because they
+ * never share a lookup key. Verified against openclaw 2026.5.20:
  *
- *   The credentials for a delegated turn are injected into the skill's exec
- *   environment. On the chat-completions path openclaw does not fire
- *   `before_tool_call` hooks and does not expose the session key to the exec
- *   subprocess, so the only working injection point is the exec shim
- *   (docker/knox-python3-shim.py), which asks the store for "the credentials of
- *   the single live delegated turn" (DelegatedCredentialStore.currentSingle).
- *   That method deliberately returns NOTHING when two delegated turns overlap —
- *   fail-closed, so one caller's secret can never reach another's skill.
+ *   x-openclaw-session-key -> resolveGatewayRequestContext -> embedded runner
+ *   sandboxSessionKey -> catalogToolHookContext.sessionKey -> runBeforeToolCallHook
+ *   -> plugin injects params.env -> execSchema.env -> subprocess
  *
- * With synchronous turns that overlap window was seconds and collisions were
- * rare. An hour-long delegated task would make them the norm, and the symptom
- * would be silent: skills would start reporting auth errors for no visible
- * reason. Serializing the credential lane keeps `currentSingle` correct by
- * construction for task-vs-task overlap.
+ * There is a second, weaker injector: the exec shim
+ * (docker/knox-python3-shim.py), which runs inside the subprocess. openclaw gives
+ * that subprocess no session key, so it can only ask for "the single live
+ * delegated turn" (DelegatedCredentialStore.currentSingle) and must return
+ * nothing when several overlap — fail-closed, so one caller's secret can never
+ * reach another's skill, but also capped at one delegated turn at a time. The
+ * plugin now stamps a marker into the env so the shim stands down when the
+ * parallel-safe path already ran; the shim only matters where the plugin does
+ * not fire at all.
  *
- * What this does NOT solve: a delegated *message* turn arriving while a
- * delegated task is running still overlaps, and still fails closed. That is the
- * pre-existing behavior, now logged loudly (see the store's currentSingle) so it
- * is diagnosable rather than mysterious. Fixing it properly needs openclaw to
- * expose the session key to exec subprocesses.
+ * `AGENT_DELEGATED_TASK_MODE=serial` is the escape hatch for such a deployment:
+ * it puts credential-carrying tasks back in a lane of one, so `currentSingle`
+ * stays correct by construction. Ordinary tasks are never blocked behind that
+ * lane in either mode.
  */
 
 export interface TaskSpec {
@@ -68,6 +71,15 @@ export interface TaskSpec {
   deadlineAt: string | null;
   /** Platform's view of whether this task's turns are delegated. */
   delegated: boolean;
+  /**
+   * Whether the authorizing connection actually shares at least one credential.
+   *
+   * Distinct from `delegated`: plenty of delegations share nothing, and those
+   * tasks never touch the credential store, so in `serial` mode they have no
+   * reason to queue behind the lane. Absent (older platform), we assume a
+   * delegated task may carry credentials.
+   */
+  sharesCredentials: boolean;
 }
 
 export type TaskState = "queued" | "running" | "finished";
@@ -77,7 +89,8 @@ interface TrackedTask {
   state: TaskState;
   abort: AbortController;
   startedAt: number;
-  /** True when this task holds (or wants) the serialized credential lane. */
+  /** True when this task holds (or wants) the serialized credential lane.
+   *  Only ever set in `serial` mode — in `parallel` mode there is no lane. */
   usesCredentialLane: boolean;
 }
 
@@ -116,12 +129,16 @@ export class TaskRunner {
     task_id: string;
     state: TaskState;
     delegated: boolean;
+    credential_lane: boolean;
     started_at: number;
   }> {
     return [...this.tasks.values()].map((t) => ({
       task_id: t.spec.taskId,
       state: t.state,
-      delegated: t.usesCredentialLane,
+      delegated: t.spec.delegated,
+      // Whether this task is serialized behind the credential lane — the thing
+      // an operator actually wants to see when delegated throughput looks low.
+      credential_lane: t.usesCredentialLane,
       started_at: t.startedAt,
     }));
   }
@@ -135,17 +152,27 @@ export class TaskRunner {
     if (this.tasks.has(spec.taskId)) return true; // idempotent re-delivery
     if (this.queue.length >= this.deps.env.AGENT_MAX_QUEUED_TASKS) return false;
 
+    // The serialized lane is only for a deployment that cannot use the
+    // per-session plugin path, and even there only for tasks that actually
+    // carry credentials — a delegation sharing nothing has nothing to collide.
+    const usesCredentialLane =
+      this.deps.env.AGENT_DELEGATED_TASK_MODE === "serial" &&
+      spec.delegated &&
+      spec.sharesCredentials;
+
     this.tasks.set(spec.taskId, {
       spec,
       state: "queued",
       abort: new AbortController(),
       startedAt: Date.now(),
-      usesCredentialLane: spec.delegated,
+      usesCredentialLane,
     });
     this.queue.push(spec.taskId);
     log.info("task accepted", {
       task_id: spec.taskId,
       delegated: spec.delegated,
+      shares_credentials: spec.sharesCredentials,
+      credential_lane: usesCredentialLane,
       queued: this.queue.length,
     });
     this.pump();
