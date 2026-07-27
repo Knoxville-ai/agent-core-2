@@ -37,6 +37,15 @@ describe("conversationIdFromSessionKey", () => {
     expect(conversationIdFromSessionKey(undefined)).toBeNull();
     expect(conversationIdFromSessionKey(null)).toBeNull();
   });
+
+  it("returns null for a task session — a task id is not a conversation id", () => {
+    // A long-running task executor runs under `task:<taskId>` (console 0047).
+    // Reading the suffix as a conversation id would send the platform a close
+    // for a conversation that does not exist; a task reports its terminal state
+    // through the task callback API instead.
+    expect(conversationIdFromSessionKey("task:11111111-2222-3333")).toBeNull();
+    expect(conversationIdFromSessionKey("task:")).toBeNull();
+  });
 });
 
 describe("buildOutcomeParams", () => {

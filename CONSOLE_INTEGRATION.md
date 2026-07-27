@@ -350,12 +350,87 @@ Identical to v0.2 for the endpoints the console actually calls:
 | `DELETE /skills/{slug}` | Removes `workspace/skills/{slug}` and reloads the gateway. Returns `{ ok: true }`. Slug is path-traversal-guarded. Gateway-token auth. |
 | `GET    /skills/search?q=…` | Returns **501** (registry search not wired); the console treats 501 as "search unavailable," not an error. |
 | `*    /api/v1/agents/:uid/files/...` | Legacy conversation-attachment surface. Still returns 501 for vessel agents; the console treats 501 the same as "not supported on this agent." |
+| `POST /api/v1/tasks` | Start a long-running task. Body: `{ task_id, instructions, title, conversation_id, callback_url, callback_token, deadline_at, delegated }`. **Returns 202 immediately** and runs the work detached — the console treats any other status as a failed start. Same bearer gate as the messaging routes. |
+| `POST /api/v1/tasks/:id/cancel` | Advisory cancel poke. Returns `{ ok: true, cancelling }`. The platform's `cancel_requested` flag is authoritative; this only shortens reaction time from one heartbeat to immediate. |
+| `GET  /api/v1/tasks` | What this vessel is working on: `{ active, queued, max_concurrent, tasks: [{ task_id, state, delegated, started_at }] }`. |
 
 `/files/*` is confined to an allowlist: the image code at `/app` and the
 rendered agent workspace at `<OPENCLAW_STATE_DIR>/workspace`. The openclaw
 state dir itself is **not** browsable, since `openclaw.json` there holds the
 LLM API key and the OAuth-store pointer. Symlinks are resolved (`realpath`)
 and re-checked against the allowlist so a link can't escape a root.
+
+## Long-running tasks (console migration 0047)
+
+The messaging surface above is bounded by whatever timeout sits between the
+console and the vessel — a Vercel function ceiling, an edge proxy's idle window,
+a browser that navigated away. Work that outlives those goes through a **task**
+instead, which is bound to no request at all.
+
+```
+console  ──POST /api/v1/tasks──▶  shim          202 Accepted (immediately)
+                                    │
+                                    ├─ TaskRunner picks it up, runs the turn
+                                    │  under session key `task:<taskId>`
+                                    │
+   ◀──PATCH /api/tasks/{id}─────────┤  heartbeat + progress, every ~30s
+   ◀──POST  /api/tasks/{id}/events──┤  timeline entries (report_task_progress)
+   ◀──PATCH /api/tasks/{id}─────────┘  terminal: status + summary + result
+        │
+        └─▶ console wakes the CALLING session with the result
+```
+
+**Auth on the way back** is a per-task callback token the console mints at start
+and passes in the body. It is scoped to one task id and grants nothing else,
+which is why an externally-hosted (BYOA) agent can use the same surface — the
+old "long-running tasks aren't supported for BYOA" restriction existed only
+because a self-hosted agent had no way to write a result back, and that is now
+solved.
+
+**Liveness, not duration.** A task is never failed for taking long. It is failed
+for going silent: the console's reaper fails any running task whose heartbeat is
+older than `TASK_HEARTBEAT_GRACE_SECONDS`, and separately enforces the task's
+`deadline_at` as an outer cost bound. Keep `AGENT_TASK_HEARTBEAT_SECONDS` well
+under the console's grace window.
+
+### Credentials on a delegated task
+
+A task started by another agent gets **exactly the same credential scope** as the
+synchronous turn it replaces, and by the same mechanism: the platform's broker
+authorizes a `get_delegated_credentials` pull off the CONVERSATION, so the
+console always opens a conversation for the task and stamps it with the binding
+(`delegation_connection_id` same-org, `drive_through_connection_id` cross-org)
+that authorized the call. The start request carries the same A2A bearer and the
+same `X-Knox-Caller-Kind: agent` / `X-Knox-Delegation-Connection-Id` headers as a
+delegated message turn, and the shim stages the pulled credentials for the life
+of the task, re-staging them on every heartbeat so the store's 10-minute TTL
+never expires under an hour-long job.
+
+**Delegated tasks run one at a time.** This is a correctness constraint, not a
+tuning choice, and it is the least obvious thing in this system. On the
+chat-completions path openclaw fires no `before_tool_call` hooks and gives the
+exec subprocess no session key, so the only working credential-injection point is
+the exec shim (`docker/knox-python3-shim.py`), which asks the store for *the
+single live delegated turn* (`DelegatedCredentialStore.currentSingle`). That
+method returns nothing when two delegated turns overlap — fail-closed, so one
+caller's secret can never reach another's skill. With synchronous turns the
+overlap window was seconds; an hour-long delegated task would make collisions
+routine and the symptom (skills reporting auth errors for no visible reason)
+nearly untraceable. The runner therefore serializes the credential lane while
+ordinary tasks continue to run `AGENT_MAX_CONCURRENT_TASKS`-wide.
+
+What remains unsolved: a delegated *message* turn arriving while a delegated task
+runs still overlaps and still fails closed. It is now logged loudly by
+`currentSingle` so it is diagnosable. A real fix needs openclaw to expose the
+session key to exec subprocesses.
+
+### Session keys
+
+`task:<taskId>` — distinct from `webchat:<conversationId>` and
+`a2a:<conversationId>`. Two plugins read it: `knox-task-progress` derives the
+task id from it to stamp `report_task_progress` calls, and `knox-report-outcome`
+deliberately **ignores** `task:` keys (a task id is not a conversation id, and a
+task reports its terminal state through the callback API instead).
 
 ## Image attachments on disk
 

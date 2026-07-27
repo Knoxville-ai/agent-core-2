@@ -126,6 +126,36 @@ const Schema = z.object({
   // parses to null and stays safely disabled rather than failing boot.
   OPENCLAW_HEARTBEAT_EVERY: z.string().optional(),
 
+  // ── Long-running tasks (console migration 0047) ──────────────────────────
+  //
+  // How many tasks this vessel executes at once. Tasks run detached from any
+  // HTTP request, so this is the real throughput knob — and the real cost knob,
+  // since every lane is a concurrent model stream.
+  //
+  // NOTE the separate credential lane below: this cap governs ordinary tasks.
+  AGENT_MAX_CONCURRENT_TASKS: z
+    .string()
+    .optional()
+    .default("3")
+    .transform((v) => Math.max(1, Number.parseInt(v, 10) || 3)),
+
+  // Tasks accepted but not yet started. A full queue rejects new starts with a
+  // 429 so the platform fails the task loudly instead of silently sitting on it.
+  AGENT_MAX_QUEUED_TASKS: z
+    .string()
+    .optional()
+    .default("50")
+    .transform((v) => Math.max(1, Number.parseInt(v, 10) || 50)),
+
+  // How often a running task reports proof-of-life to the platform. Must stay
+  // comfortably under the console's TASK_HEARTBEAT_GRACE_SECONDS (default 300s)
+  // or healthy tasks get reaped as dead.
+  AGENT_TASK_HEARTBEAT_SECONDS: z
+    .string()
+    .optional()
+    .default("30")
+    .transform((v) => Math.max(5, Number.parseInt(v, 10) || 30)),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()
