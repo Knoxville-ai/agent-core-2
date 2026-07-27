@@ -47,6 +47,17 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+/** Origin of a URL for logging — never the path, which carries the task id, and
+ *  never the query. Returns the raw value when it will not parse, since an
+ *  unparseable callback URL is itself the thing worth seeing. */
+function safeOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return `(unparseable: ${url.slice(0, 60)})`;
+  }
+}
+
 export async function handleTaskStart(
   principal: Principal,
   req: IncomingMessage,
@@ -129,6 +140,11 @@ export async function handleTaskStart(
     task_id: taskId,
     delegated,
     conversation_id: conversationId,
+    // The origin we will report progress and results to. Logged because a
+    // wrong one is invisible otherwise: the task runs perfectly, every callback
+    // is refused, and the platform sees a task that never finishes. If this
+    // reads as localhost or the platform's own internal host, that is the bug.
+    callback_origin: safeOrigin(callbackUrl),
     active: deps.runner.activeCount,
   });
 
