@@ -35,6 +35,7 @@ interface TaskStartBody {
   deadline_at?: unknown;
   delegated?: unknown;
   shares_credentials?: unknown;
+  resume_prompt?: unknown;
 }
 
 export interface TasksDeps {
@@ -127,6 +128,9 @@ export async function handleTaskStart(
     // "assume it might" when the platform doesn't say, so an older console
     // never accidentally un-serializes a task that does carry secrets.
     sharesCredentials: delegated && body.shares_credentials !== false,
+    // Set only when the platform is re-dispatching a task that paused on a human
+    // escalation (0048): the human's decision, delivered as the resume turn.
+    resumePrompt: str(body.resume_prompt),
   };
 
   if (!deps.runner.accept(spec)) {

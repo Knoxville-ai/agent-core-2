@@ -12,6 +12,71 @@ function bundle(over: Partial<AgentBundle> = {}): AgentBundle {
   };
 }
 
+function capabilityAssignment(over: Record<string, unknown> = {}) {
+  return {
+    listing: {
+      id: "l1",
+      slug: "odoo",
+      name: "Odoo",
+      listingStatus: "live",
+      availability: "live",
+    },
+    capability: {
+      id: "cap1",
+      name: "Place purchase order",
+      description: "Create and confirm a PO",
+      actionType: "purchase_order.create",
+      mode: "transactional" as const,
+      requiresHumanApproval: false,
+      requiresUserAuth: false,
+      promptFragment: "Use this to place a PO with a vendor.",
+      ...over,
+    },
+  };
+}
+
+describe("assembleSystemPrompt — approval-gated capabilities (0048)", () => {
+  it("renders the escalate_to_human approval instruction for a gated capability", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: bundle({
+        assignments: [capabilityAssignment({ requiresHumanApproval: true })],
+      }),
+    });
+    expect(out).toContain("## Capability: Place purchase order");
+    expect(out).toContain("Human approval required");
+    expect(out).toContain("escalate_to_human");
+    expect(out).toContain('kind: "approval"');
+  });
+
+  it("still renders a gated capability that has no prompt fragment", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: bundle({
+        assignments: [
+          capabilityAssignment({ requiresHumanApproval: true, promptFragment: null }),
+        ],
+      }),
+    });
+    expect(out).toContain("## Capability: Place purchase order");
+    expect(out).toContain("Human approval required");
+  });
+
+  it("adds no approval instruction when the capability is not gated", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: bundle({
+        assignments: [capabilityAssignment({ requiresHumanApproval: false })],
+      }),
+    });
+    expect(out).toContain("## Capability: Place purchase order");
+    expect(out).not.toContain("Human approval required");
+  });
+});
+
 describe("assembleSystemPrompt — DELEGATION", () => {
   it("omits the DELEGATION section when there are no connections", () => {
     const out = assembleSystemPrompt({

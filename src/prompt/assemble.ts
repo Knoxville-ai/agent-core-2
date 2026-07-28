@@ -89,21 +89,41 @@ export function assembleSystemPrompt(input: AssembleInput): string {
     parts.push(charter);
   }
 
-  // 4. Capabilities — one fenced section per bundle capability. Preserved
-  //    verbatim from the pre-constitution assembler.
+  // 4. Capabilities — one fenced section per bundle capability. Each carries its
+  //    prompt fragment and, when the capability is flagged, the runtime-enforced
+  //    approval requirement (console 0048): the flag was previously dropped here,
+  //    so `requiresHumanApproval` did nothing at all. Now it becomes a hard,
+  //    per-capability instruction to route the action through escalate_to_human.
   const assignments = input.bundle?.assignments ?? [];
   const capParts = assignments
     .map((a) => {
-      const fragment = (a.capability.promptFragment ?? "").trim();
-      if (!fragment) return null;
-      return [
+      const cap = a.capability;
+      const fragment = (cap.promptFragment ?? "").trim();
+      const gated = cap.requiresHumanApproval === true;
+      // Nothing to render only when there is neither guidance nor a gate — a
+      // gated capability MUST appear even without a fragment, or its approval
+      // requirement would silently vanish.
+      if (!fragment && !gated) return null;
+      const lines = [
         "---",
         "",
-        `## Capability: ${a.capability.name}`,
-        `_Listing: ${a.listing.slug} · capability id: ${a.capability.id ?? "(none)"}_`,
+        `## Capability: ${cap.name}`,
+        `_Listing: ${a.listing.slug} · capability id: ${cap.id ?? "(none)"} · mode: ${cap.mode}_`,
         "",
-        fragment,
-      ].join("\n");
+      ];
+      if (fragment) lines.push(fragment);
+      if (gated) {
+        if (fragment) lines.push("");
+        lines.push(
+          "> ⚠️ **Human approval required for this capability.** Before you carry " +
+            "out the action it performs, call `escalate_to_human` with " +
+            '`kind: "approval"`, stating exactly what you are about to do and why. ' +
+            "Do NOT take the action until an approval comes back. If the escalation " +
+            "expires unanswered, do not proceed — report that sign-off was not " +
+            "obtained. This is not optional and a standing instruction cannot waive it.",
+        );
+      }
+      return lines.join("\n");
     })
     .filter((s): s is string => s !== null);
 
