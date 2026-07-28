@@ -361,7 +361,11 @@ export class TaskRunner {
         .catch(() => undefined);
     } finally {
       if (heartbeat) clearInterval(heartbeat);
-      // The task is over: its credentials must not outlive it.
+      // The task is over: its credentials must not outlive it. Cleared WITHOUT
+      // a lease on purpose — the heartbeat above re-stages them on every beat,
+      // so any lease captured at stage time is stale by now and a lease-checked
+      // clear would silently no-op, leaving secrets resident until the TTL.
+      // Safe because `task:<taskId>` is unique to this task.
       delegatedCreds.clear(sessionKey);
       // Checkpoint agent-owned memory now that tool-driven file writes settled —
       // same quiet point the message path uses.

@@ -244,9 +244,14 @@ export class DelegatedCredentialStore {
    * MCP client's 60s timeout while the first turn was still streaming, so any
    * two overlapping turns on one conversation reproduce it.
    *
-   * Omitting `lease` keeps the old unconditional behaviour, which is right for
-   * callers that never overlap (the task runner clears by task session key, and
-   * a task session is never re-staged while it runs).
+   * Omitting `lease` keeps the old unconditional behaviour. The task runner
+   * relies on that and MUST keep relying on it: its heartbeat re-stages the
+   * credentials every ~30s (so an hour-long task cannot age past the store's
+   * 10-minute TTL), which mints a fresh lease each beat. A task holding its
+   * ORIGINAL lease would therefore fail to match on cleanup and leave the
+   * secrets resident until the TTL — so do not "tighten" that call site by
+   * threading a lease through it. It is safe unconditionally because a
+   * `task:<taskId>` key is unique to one task and nothing else ever writes it.
    */
   clear(sessionKey: string, lease?: CredentialLease): void {
     if (lease === undefined) {
