@@ -510,6 +510,17 @@ where it paused. If the escalation expires unanswered, the resume carries a fail
 payload's `resume_prompt` and the `TaskSpec.resumePrompt` it becomes are the only
 task-surface additions.
 
+### Approval-gated capabilities
+
+A bundle capability with `requiresHumanApproval: true` is enforced at prompt-assembly
+time: `src/prompt/assemble.ts` renders a hard instruction into that capability's
+`# CAPABILITIES` block — call `escalate_to_human` with `kind:"approval"` before taking
+the action, and do not proceed until approved (or, if it expires, do not proceed at
+all). The flag was already on the wire (`BundleCapability.requiresHumanApproval`) but
+was previously dropped at assembly, so it did nothing; now it drives the escalation
+gate. A gated capability renders even when it has no `promptFragment`, so its
+requirement can never silently vanish.
+
 ## Image attachments on disk
 
 The console uploads chat images to the `chat-attachments` bucket and sends
