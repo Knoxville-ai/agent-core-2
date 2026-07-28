@@ -69,6 +69,28 @@ re-verify them (they are exactly what the integration test below checks):
 1. `api.on("before_tool_call", handler)` runs per tool call, with `ctx.sessionKey`
    available, and returning `{ params }` **rewrites the params used for
    execution** (`docs/plugins/hooks.md`).
+
+   ⚠️ **Only on the chat-completions transport.** Confirmed in production on
+   2026-07-28: an agent running `provider=openai api=openai-responses`
+   (`gpt-5.4`) loaded this plugin — and `knox-report-outcome` and
+   `knox-task-progress` — and **never ran the hook once**, across dozens of tool
+   calls. The identical image on `provider=openrouter api=openai-completions`
+   runs it on every call. Nothing is logged when it silently does not fire; the
+   only tell is the absence of
+   `[plugins] [hooks] running before_tool_call` in the vessel log.
+
+   Every agent must therefore be configured with an **OpenRouter** model (or
+   another chat-completions provider). A native-OpenAI model silently loses
+   delegated credentials, conversation-id stamping, and task-id stamping at
+   once. Check any agent with:
+
+   ```bash
+   grep -o "api=openai-[a-z]*" /home/agent/.openclaw/tmp/openclaw-1001/openclaw-*.log | sort -u
+   ```
+
+   The console makes the credential half fail closed rather than leak, and
+   refuses to start a task it could never deliver — but neither is a substitute
+   for choosing the right provider.
 2. The agent host-run tool is named **`exec`** and accepts an **`env`**
    (`Record<string,string>`) param that is layered onto the subprocess
    environment (`src/agents/bash-tools*`). OpenClaw sanitises env overrides and
