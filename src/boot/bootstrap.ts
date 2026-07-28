@@ -10,7 +10,7 @@ import {
 import type { AgentBundle } from "../bundle/types.js";
 import type { AgentEnv } from "../env.js";
 import { log } from "../log.js";
-import { assembleSystemPrompt } from "../prompt/assemble.js";
+import { assembleSystemPrompt, parseEscalatedTools } from "../prompt/assemble.js";
 import { MemoryCheckpoint } from "../provision/agent-memory.js";
 import {
   defaultIdentity,
@@ -151,6 +151,7 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
     operatorNotes: blobs.playbookSeed,
     memoryDigest,
     playbook,
+    escalatedTools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
   });
   await renderWorkspace({ env, assembledSoul: systemPrompt, blobs });
 

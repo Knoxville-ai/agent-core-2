@@ -107,6 +107,13 @@ const Schema = z.object({
   //                            "group:sessions" or "sessions_spawn,subagents".
   OPENCLAW_TOOLS_PROFILE: z.enum(["minimal", "coding", "messaging", "full"]).optional(),
   OPENCLAW_TOOLS_DENY: z.string().optional(),
+  //   OPENCLAW_TOOLS_ESCALATE — comma/space-separated tool ids the console flagged
+  //                            as requiring human approval before use. Rendered
+  //                            into SOUL.md as a `# TOOL APPROVALS` instruction
+  //                            (see prompt/assemble.ts) that routes each flagged
+  //                            tool through `escalate_to_human` (console 0048) —
+  //                            the same gate as an approval-gated capability.
+  OPENCLAW_TOOLS_ESCALATE: z.string().optional(),
 
   // Autonomous heartbeat cadence → openclaw.json agents.defaults.heartbeat.every.
   //

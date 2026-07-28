@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assembleSystemPrompt } from "./assemble.js";
+import { assembleSystemPrompt, parseEscalatedTools } from "./assemble.js";
 import type { AgentBundle } from "../bundle/types.js";
 
 function bundle(over: Partial<AgentBundle> = {}): AgentBundle {
@@ -74,6 +74,61 @@ describe("assembleSystemPrompt — approval-gated capabilities (0048)", () => {
     });
     expect(out).toContain("## Capability: Place purchase order");
     expect(out).not.toContain("Human approval required");
+  });
+});
+
+describe("assembleSystemPrompt — TOOL APPROVALS (0048)", () => {
+  it("renders the escalate_to_human gate listing each flagged tool", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: null,
+      escalatedTools: [
+        "odoo_production__sales_confirm_order",
+        "odoo_production__ap_create_vendor_bill",
+      ],
+    });
+    expect(out).toContain("# TOOL APPROVALS");
+    expect(out).toContain("`odoo_production__sales_confirm_order`");
+    expect(out).toContain("`odoo_production__ap_create_vendor_bill`");
+    expect(out).toContain("escalate_to_human");
+    expect(out).toContain('kind: "approval"');
+  });
+
+  it("adds no section when no tools are flagged", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: null,
+    });
+    expect(out).not.toContain("# TOOL APPROVALS");
+  });
+
+  it("ignores blank entries and adds no section when all are blank", () => {
+    const out = assembleSystemPrompt({
+      constitution: "BASE",
+      identity: "ID",
+      bundle: null,
+      escalatedTools: ["", "   "],
+    });
+    expect(out).not.toContain("# TOOL APPROVALS");
+  });
+});
+
+describe("parseEscalatedTools", () => {
+  it("splits on commas / whitespace / newlines and de-dupes, order-preserving", () => {
+    expect(parseEscalatedTools("a__x, a__y a__x\nb__z")).toEqual([
+      "a__x",
+      "a__y",
+      "b__z",
+    ]);
+  });
+
+  it("returns [] for missing / blank / non-string input", () => {
+    expect(parseEscalatedTools(undefined)).toEqual([]);
+    expect(parseEscalatedTools(null)).toEqual([]);
+    expect(parseEscalatedTools("")).toEqual([]);
+    expect(parseEscalatedTools("   ")).toEqual([]);
   });
 });
 
