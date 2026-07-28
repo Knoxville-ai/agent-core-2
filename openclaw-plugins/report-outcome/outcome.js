@@ -31,6 +31,11 @@ const REPORT_OUTCOME_SUFFIX = /(^|[.:/]|__)report_outcome$/;
 /** The platform's long-running-task starter. Same namespacing rules. */
 const START_TASK_SUFFIX = /(^|[.:/]|__)start_task$/;
 
+/** The platform's human-escalation tool (console migration 0048). Its
+ *  `conversation_id` is the session being parked — the one the human's answer is
+ *  delivered back into — which is exactly the session the agent is serving. */
+const ESCALATE_TO_HUMAN_SUFFIX = /(^|[.:/]|__)escalate_to_human$/;
+
 /**
  * Every platform tool that needs the id of the session the agent is serving,
  * and the PARAM each one wants it under.
@@ -46,6 +51,7 @@ const START_TASK_SUFFIX = /(^|[.:/]|__)start_task$/;
 const CONVERSATION_ID_TOOLS = [
   { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
   { suffix: START_TASK_SUFFIX, param: "conversation_id" },
+  { suffix: ESCALATE_TO_HUMAN_SUFFIX, param: "conversation_id" },
   {
     suffix: /(^|[.:/]|__)start_conversation$/,
     param: "caller_conversation_id",
@@ -64,6 +70,11 @@ export function isReportOutcomeTool(toolName) {
 /** True when `toolName` is the platform `start_task` tool (bare or prefixed). */
 export function isStartTaskTool(toolName) {
   return typeof toolName === "string" && START_TASK_SUFFIX.test(toolName);
+}
+
+/** True when `toolName` is the platform `escalate_to_human` tool. */
+export function isEscalateToHumanTool(toolName) {
+  return typeof toolName === "string" && ESCALATE_TO_HUMAN_SUFFIX.test(toolName);
 }
 
 /**

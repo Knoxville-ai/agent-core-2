@@ -5,6 +5,7 @@ import {
   buildStartTaskParams,
   conversationIdFromSessionKey,
   isReportOutcomeTool,
+  isEscalateToHumanTool,
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
@@ -14,6 +15,11 @@ describe("conversationIdParamFor", () => {
   it("uses conversation_id for the tools that act ON a session", () => {
     expect(conversationIdParamFor("report_outcome")).toBe("conversation_id");
     expect(conversationIdParamFor("knoxville_platform__start_task")).toBe(
+      "conversation_id",
+    );
+    // escalate_to_human parks the session it names (0048), so it takes the same
+    // conversation_id the runtime stamps for report_outcome.
+    expect(conversationIdParamFor("knoxville_platform__escalate_to_human")).toBe(
       "conversation_id",
     );
   });
@@ -51,6 +57,20 @@ describe("buildOutcomeParams with an explicit param name", () => {
         "caller_conversation_id",
       ),
     ).toBeNull();
+  });
+});
+
+describe("isEscalateToHumanTool", () => {
+  it("matches the bare and server-prefixed tool name", () => {
+    expect(isEscalateToHumanTool("escalate_to_human")).toBe(true);
+    expect(isEscalateToHumanTool("knoxville_platform.escalate_to_human")).toBe(true);
+    expect(isEscalateToHumanTool("knoxville_platform__escalate_to_human")).toBe(true);
+  });
+
+  it("does not match neighbouring tools", () => {
+    for (const name of ["report_outcome", "start_task", "send_message", null]) {
+      expect(isEscalateToHumanTool(name), String(name)).toBe(false);
+    }
   });
 });
 
