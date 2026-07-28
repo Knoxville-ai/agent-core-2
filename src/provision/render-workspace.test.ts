@@ -13,7 +13,6 @@ import {
   parseToolsDeny,
   REPORT_OUTCOME_PLUGIN_ID,
   TASK_PROGRESS_PLUGIN_ID,
-  TOOL_ESCALATION_PLUGIN_ID,
   resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
@@ -306,7 +305,7 @@ describe("buildOpenclawConfig platform plugins", () => {
     }
   });
 
-  it("wires all four plugins (load paths + enabled entries) when PLATFORM_MCP_URL is set", () => {
+  it("wires all three plugins (load paths + enabled entries) when PLATFORM_MCP_URL is set", () => {
     const config = buildOpenclawConfig(
       makeEnv({
         PLATFORM_MCP_URL: "https://console.example/api/mcp",
@@ -326,10 +325,6 @@ describe("buildOpenclawConfig platform plugins", () => {
     expect(p.entries?.[TASK_PROGRESS_PLUGIN_ID]).toEqual({ enabled: true });
     expect(
       (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/task-progress")),
-    ).toBe(true);
-    expect(p.entries?.[TOOL_ESCALATION_PLUGIN_ID]).toEqual({ enabled: true });
-    expect(
-      (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/tool-escalation")),
     ).toBe(true);
   });
 

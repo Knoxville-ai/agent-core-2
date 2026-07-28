@@ -47,6 +47,33 @@ export interface AssembleInput {
   memoryDigest?: string | null;
   /** Optional agent-owned playbook (`workspace/playbook.md`). */
   playbook?: string | null;
+  /**
+   * Runtime tool ids the operator flagged as requiring human approval before use
+   * (from the console per-tool policy, delivered as `OPENCLAW_TOOLS_ESCALATE`).
+   * Rendered as a hard `# TOOL APPROVALS` instruction that routes each call
+   * through `escalate_to_human` (console 0048) — the same mechanism as an
+   * approval-gated capability. Empty/absent -> no section.
+   */
+  escalatedTools?: string[];
+}
+
+/**
+ * Parse `OPENCLAW_TOOLS_ESCALATE` (comma / whitespace / newline separated tool
+ * ids, e.g. `odoo_production__sales_confirm_order`) into a de-duplicated,
+ * order-preserving list. Empty / missing -> `[]`. Never throws.
+ */
+export function parseEscalatedTools(raw: string | undefined | null): string[] {
+  if (!raw || typeof raw !== "string") return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of raw.split(/[\s,]+/)) {
+    const t = tok.trim();
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
 }
 
 const SELF_EDITING_FOOTER = `You have durable memory that outlives this session, reached through the
@@ -138,6 +165,34 @@ export function assembleSystemPrompt(input: AssembleInput): string {
     );
     parts.push("");
     parts.push(capParts.join("\n\n"));
+  }
+
+  // 4b. Tool approvals — per-tool "requires escalation" gates from the console
+  //     (delivered as OPENCLAW_TOOLS_ESCALATE). Mirrors the capability gate
+  //     above: a hard, non-waivable instruction to route each flagged tool call
+  //     through escalate_to_human (console 0048), the only surface a human has to
+  //     approve. Rendered only when at least one tool is flagged.
+  const escalatedTools = (input.escalatedTools ?? []).filter(
+    (t) => typeof t === "string" && t.trim() !== "",
+  );
+  if (escalatedTools.length > 0) {
+    parts.push("");
+    parts.push("");
+    parts.push("# TOOL APPROVALS");
+    parts.push("");
+    parts.push(
+      "The following tools require **human approval before each use**:",
+    );
+    parts.push("");
+    parts.push(escalatedTools.map((t) => `- \`${t}\``).join("\n"));
+    parts.push("");
+    parts.push(
+      "Before calling any tool listed above, call `escalate_to_human` with " +
+        '`kind: "approval"`, stating exactly what you are about to do and why. ' +
+        "Do NOT call the tool until an approval comes back. If the escalation " +
+        "expires unanswered, do not call it — report that sign-off was not " +
+        "obtained. This is not optional and a standing instruction cannot waive it.",
+    );
   }
 
   // 5. Delegation — outbound targets: same-org agents (connections) plus

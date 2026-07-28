@@ -34,17 +34,6 @@ const TASK_PROGRESS_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/task-progress", import.meta.url),
 );
 
-/** Id + on-disk directory of the tool-escalation OpenClaw plugin (see
- *  `openclaw-plugins/tool-escalation`). It reads OPENCLAW_TOOLS_ESCALATE (the
- *  console-composed set of tools an operator flagged as needing human approval)
- *  and gates each listed tool via a `before_tool_call` requireApproval, so the
- *  run suspends until a human approves. Resolved the same way as the plugins
- *  above. */
-export const TOOL_ESCALATION_PLUGIN_ID = "knox-tool-escalation";
-const TOOL_ESCALATION_PLUGIN_DIR = fileURLToPath(
-  new URL("../../openclaw-plugins/tool-escalation", import.meta.url),
-);
-
 /** The platform constitution shipped in the image (see `prompts/constitution.md`).
  *  Resolved relative to this module so it works from both `src/` (tests) and
  *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
@@ -486,14 +475,12 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
 
   // Knox OpenClaw plugins that ride the platform MCP — the delegated-credentials
   // injector (the A2A credential consumer), the report-outcome injector (which
-  // stamps the conversation id onto the agent's `report_outcome` call), the
+  // stamps the conversation id onto the agent's `report_outcome` call), and the
   // task-progress injector (which stamps the task id onto `report_task_progress`
-  // during a long-running task), and the tool-escalation gate (which suspends a
-  // flagged tool for human approval). All are only wired when the platform MCP is
-  // configured, since that is the only path by which a delegated turn can arrive,
-  // either report can be sent, or an approval can be brokered. Merges into any
-  // `plugins` block a prior step (e.g. Codex OAuth) already set rather than
-  // clobbering it.
+  // during a long-running task). All are only wired when the platform MCP is
+  // configured, since that is the only path by which a delegated turn can arrive
+  // or either report can be sent. Merges into any `plugins` block a prior step
+  // (e.g. Codex OAuth) already set rather than clobbering it.
   if (env.PLATFORM_MCP_URL) {
     const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
     const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
@@ -505,14 +492,12 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
         DELEGATED_CREDS_PLUGIN_DIR,
         REPORT_OUTCOME_PLUGIN_DIR,
         TASK_PROGRESS_PLUGIN_DIR,
-        TOOL_ESCALATION_PLUGIN_DIR,
       ],
     };
     const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
     entries[DELEGATED_CREDS_PLUGIN_ID] = { enabled: true };
     entries[REPORT_OUTCOME_PLUGIN_ID] = { enabled: true };
     entries[TASK_PROGRESS_PLUGIN_ID] = { enabled: true };
-    entries[TOOL_ESCALATION_PLUGIN_ID] = { enabled: true };
     plugins.entries = entries;
     config.plugins = plugins;
   }
