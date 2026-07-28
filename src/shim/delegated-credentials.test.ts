@@ -68,6 +68,40 @@ describe("DelegatedCredentialStore", () => {
     expect(store.get("a2a:conv-B")).toEqual({ SPORTSINC_API_KEY: "bbb" });
   });
 
+  it("a finishing turn does not wipe a newer turn's creds on the SAME session", () => {
+    // Observed in production on 2026-07-28. The caller's MCP client timed out at
+    // 60s and the model re-sent the message while the first turn was still
+    // streaming, so two turns were live on one a2a conversation:
+    //
+    //   turn 2 stages → turn 1 ends and clears → turn 2 runs → creds=0 keys=[]
+    //
+    // The delegated agent then answered that the vendor's API credentials
+    // "aren't configured". Clearing by lease makes turn 1's clear a no-op.
+    const store = new DelegatedCredentialStore();
+    const lease1 = store.set("a2a:conv-1", { SANMAR_USERNAME: "u" });
+    const lease2 = store.set("a2a:conv-1", { SANMAR_USERNAME: "u" });
+    expect(lease2).not.toBe(lease1);
+
+    store.clear("a2a:conv-1", lease1);
+    expect(store.get("a2a:conv-1")).toEqual({ SANMAR_USERNAME: "u" });
+
+    // Turn 2's own clear still works — creds never outlive the last live turn.
+    store.clear("a2a:conv-1", lease2);
+    expect(store.get("a2a:conv-1")).toEqual({});
+  });
+
+  it("lease 0 (nothing staged) clears nothing", () => {
+    // A non-delegated turn stages nothing and gets lease 0; its `finally` must
+    // not evict a delegated turn that happens to share the session key.
+    const store = new DelegatedCredentialStore();
+    const lease = store.set("a2a:conv-1", { SANMAR_USERNAME: "u" });
+    expect(store.set("a2a:conv-1", {})).toBe(0);
+    store.clear("a2a:conv-1", 0);
+    expect(store.get("a2a:conv-1")).toEqual({ SANMAR_USERNAME: "u" });
+    store.clear("a2a:conv-1", lease);
+    expect(store.get("a2a:conv-1")).toEqual({});
+  });
+
   it("does not store empty credentials or an empty session key", () => {
     const store = new DelegatedCredentialStore();
     store.set("a2a:conv-1", {});

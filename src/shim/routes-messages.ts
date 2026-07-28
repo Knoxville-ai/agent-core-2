@@ -20,6 +20,7 @@ import {
   credentialKeyNames,
   DELEGATED_TURN_SYSTEM_NOTE,
   detectDelegatedTurn,
+  type CredentialLease,
   type DelegatedCredentialStore,
 } from "./delegated-credentials.js";
 import { readJsonBody } from "./util.js";
@@ -236,9 +237,14 @@ export async function handleSendMessage(
   // `finally` below. A non-delegated turn skips this entirely, so its skills see
   // no delegated env — keyed isolation, no cross-turn leakage.
   const delegated = detectDelegatedTurn(req.headers, principal.kind, conversationId);
+  // Lease for the entry THIS turn stages, so the `finally` below only clears
+  // what it staged. Two turns can be live on one conversation (a caller that
+  // re-sends after its MCP client times out is the common way), and clearing by
+  // session key alone lets the first to finish wipe the second's credentials.
+  let credentialLease: CredentialLease = 0;
   if (delegated.delegated) {
     const creds = await fetchDelegatedCredentialsForTurn(env, delegated.conversationId);
-    deps.delegatedCreds.set(sessionKey, creds);
+    credentialLease = deps.delegatedCreds.set(sessionKey, creds);
     if (Object.keys(creds).length > 0) {
       // Key names + count only — never the values.
       log.info("delegated credentials staged for turn", {
@@ -393,10 +399,11 @@ export async function handleSendMessage(
     }
   } finally {
     clearInterval(keepalive);
-    // Drop any delegated credentials staged for this turn. The turn is over, so
-    // they must not outlive it (nor race a concurrent turn). Idempotent + safe
-    // on a non-delegated turn (nothing was stored under this key).
-    deps.delegatedCreds.clear(sessionKey);
+    // Drop the delegated credentials THIS turn staged. The turn is over, so they
+    // must not outlive it — but passing the lease means we do not wipe an entry a
+    // later, still-running turn staged under the same session key. Idempotent +
+    // safe on a non-delegated turn (lease 0 matches nothing).
+    deps.delegatedCreds.clear(sessionKey, credentialLease);
     await db.updateMessage(assistantMessageId, {
       content: questionPayload ? JSON.stringify(questionPayload) : buffer,
       status: finalStatus,

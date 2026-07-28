@@ -118,7 +118,15 @@ export const DELEGATED_TURN_SYSTEM_NOTE = [
 interface StoreEntry {
   creds: DelegatedCredentials;
   expiresAt: number;
+  /** Identifies the turn that staged this entry — see `clear`. */
+  lease: number;
 }
+
+/**
+ * Opaque handle returned by `set`, to be handed back to `clear` when the turn
+ * that staged the credentials ends.
+ */
+export type CredentialLease = number;
 
 /**
  * In-memory, per-turn store of delegated credentials keyed by the openclaw
@@ -139,17 +147,30 @@ export class DelegatedCredentialStore {
   private readonly entries = new Map<string, StoreEntry>();
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private nextLease = 1;
 
   constructor(opts: { ttlMs?: number; now?: () => number } = {}) {
     this.ttlMs = opts.ttlMs ?? 10 * 60 * 1000; // 10 min backstop
     this.now = opts.now ?? ((): number => Date.now());
   }
 
-  /** Store the creds for a session's current turn. Empty maps and empty session
-   *  keys are ignored (nothing to expose). */
-  set(sessionKey: string, creds: DelegatedCredentials): void {
-    if (!sessionKey || Object.keys(creds).length === 0) return;
-    this.entries.set(sessionKey, { creds, expiresAt: this.now() + this.ttlMs });
+  /**
+   * Store the creds for a session's current turn and return the LEASE that
+   * identifies this staging. Empty maps and empty session keys are ignored
+   * (nothing to expose) and yield lease 0, which `clear` treats as "not mine".
+   *
+   * The lease exists because the key is the SESSION, not the turn, and two turns
+   * on one session can overlap — see `clear`.
+   */
+  set(sessionKey: string, creds: DelegatedCredentials): CredentialLease {
+    if (!sessionKey || Object.keys(creds).length === 0) return 0;
+    const lease = this.nextLease++;
+    this.entries.set(sessionKey, {
+      creds,
+      expiresAt: this.now() + this.ttlMs,
+      lease,
+    });
+    return lease;
   }
 
   /** Read the creds for a session, or `{}` when absent or expired. */
@@ -204,8 +225,36 @@ export class DelegatedCredentialStore {
     return live.length === 1 ? live[0]! : {};
   }
 
-  /** Drop a session's creds — called when the turn ends. Idempotent. */
-  clear(sessionKey: string): void {
+  /**
+   * Drop a session's creds — called when the turn that staged them ends.
+   * Idempotent.
+   *
+   * `lease` MUST be the value `set` returned for that turn. Passing it makes the
+   * clear a no-op when some LATER turn has since re-staged under the same key,
+   * which is not hypothetical:
+   *
+   *   11:32:52  turn 2 stages creds for a2a:41fe1a7c… (queued behind turn 1)
+   *   11:32:57  turn 1 ends → clear(a2a:41fe1a7c…) → wipes TURN 2's entry
+   *   11:32:58  turn 2 starts running
+   *   11:33:07  exec hook: creds=0 keys=[]
+   *
+   * The agent then told its caller the vendor's API credentials "aren't
+   * configured" — a wrong answer produced by a lifecycle bug, not by anything
+   * about the vendor. The trigger was the caller re-sending a message after the
+   * MCP client's 60s timeout while the first turn was still streaming, so any
+   * two overlapping turns on one conversation reproduce it.
+   *
+   * Omitting `lease` keeps the old unconditional behaviour, which is right for
+   * callers that never overlap (the task runner clears by task session key, and
+   * a task session is never re-staged while it runs).
+   */
+  clear(sessionKey: string, lease?: CredentialLease): void {
+    if (lease === undefined) {
+      this.entries.delete(sessionKey);
+      return;
+    }
+    const hit = this.entries.get(sessionKey);
+    if (!hit || hit.lease !== lease) return;
     this.entries.delete(sessionKey);
   }
 
