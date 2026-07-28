@@ -460,6 +460,50 @@ task id from it to stamp `report_task_progress` calls, and `knox-report-outcome`
 deliberately **ignores** `task:` keys (a task id is not a conversation id, and a
 task reports its terminal state through the callback API instead).
 
+## Escalations (console migration 0048)
+
+An agent that hits a decision it cannot make — or an action that needs human
+sign-off — and cannot count on an answer coming back right away calls the platform
+`escalate_to_human` MCP tool. Unlike the synchronous `knox:ask` widget, an
+escalation survives an indefinite wait.
+
+```
+agent ──escalate_to_human──▶ platform    inserts an `escalations` row,
+                               │          parks the session + any task in it,
+                               │          routes to the nearest human, emails them
+  (the agent ends its turn — nothing waits, no inference is spent)
+                               │
+  ◀── [escalation-answer] ─────┘  when the human answers in the console, the
+                                  parked session is re-invoked with their decision
+```
+
+**Parking.** The tool marks the parked conversation `awaiting_escalation_id` (the
+console idle-sweeper skips it) and moves any task running in that conversation to a
+new `waiting_on_human` status. The task reaper only ever touches `status='running'`,
+so a parked task is exempt from BOTH the heartbeat-silence and the deadline reap by
+construction — waiting on a human is never a failure signal and never bills. The
+agent ends its turn exactly as it does after `start_task`.
+
+**Wake.** When the human answers (the console reuses the same MCQ widget), the
+platform wakes the parked session with an `[escalation-answer]` turn carrying the
+decision — the identical re-invoke path 0047 uses for `[task-callback]`, made
+exactly-once and retryable by the same `callback_state` claim. A parked task is
+returned to `running` with a fresh heartbeat + extended deadline before the wake.
+
+**Conversation id.** `escalate_to_human` takes a `conversation_id` (the session
+being parked, where the answer is delivered back). The model does not supply it —
+the `knox-report-outcome` plugin stamps it from the `webchat:` / `a2a:` session
+key, exactly as it does for `report_outcome` and `start_task`.
+
+**Vessel scope.** No vessel code change is required for the working path: the tool,
+the parking, the routing/notification, and the wake are all console-side, and the
+wake arrives as an ordinary inbound turn the shim already handles. The behavioral
+half lives in `prompts/constitution.md` ("Escalating to a human"). The one deferred
+piece is a task *executor* resuming a `waiting_on_human` task in place — today the
+answer lands in the parked conversation as a normal turn (correct for a webchat/A2A
+session); a `TaskRunner` that parks and resumes its own `task:<id>` session on an
+escalation is a follow-up.
+
 ## Image attachments on disk
 
 The console uploads chat images to the `chat-attachments` bucket and sends

@@ -37,7 +37,7 @@ export default definePluginEntry({
   id: "knox-report-outcome",
   name: "Knox Conversation Id Injector",
   description:
-    "Stamp the platform conversation id onto the agent's report_outcome and start_task MCP calls so the model never has to know or type it.",
+    "Stamp the platform conversation id onto the agent's report_outcome, start_task, and escalate_to_human MCP calls so the model never has to know or type it.",
   register(api) {
     api.on(
       "before_tool_call",
