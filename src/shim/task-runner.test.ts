@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { DelegatedCredentialStore } from "./delegated-credentials.js";
-import { buildTaskPrompt, TaskRunner, type TaskSpec } from "./task-runner.js";
+import {
+  buildTaskPrompt,
+  extractFinalAnswer,
+  FINAL_ANSWER_MARKER,
+  firstCompleteLine,
+  TaskRunner,
+  type TaskSpec,
+} from "./task-runner.js";
 import type { AgentEnv } from "../env.js";
 import type { MessagingDB } from "./supabase-db.js";
 import type { MemoryCheckpoint } from "../provision/agent-memory.js";
@@ -263,5 +270,70 @@ describe("buildTaskPrompt", () => {
   it("includes the deadline when there is one", () => {
     const spec = { ...makeSpec("a", false), deadlineAt: "2026-01-01T00:00:00Z" };
     expect(buildTaskPrompt(spec)).toContain("2026-01-01T00:00:00Z");
+  });
+
+  it("asks for the final-answer marker and forbids report_outcome", () => {
+    const prompt = buildTaskPrompt(makeSpec("a", false));
+    expect(prompt).toContain(FINAL_ANSWER_MARKER);
+    expect(prompt).toContain("Do NOT call `report_outcome`");
+  });
+});
+
+describe("extractFinalAnswer", () => {
+  it("returns only what follows the marker", () => {
+    // openclaw's chat-completions stream concatenates every assistant turn, so
+    // the raw buffer is the model thinking out loud. Only the tail is the answer.
+    const raw = [
+      "Let me check the skill first.",
+      "I see the issue — PC54 doesn't have a \"Black\" color, but \"Jet Black\".",
+      FINAL_ANSWER_MARKER,
+      "PC54 Jet Black L: 412 units across 3 warehouses.",
+    ].join("\n");
+    expect(extractFinalAnswer(raw)).toBe(
+      "PC54 Jet Black L: 412 units across 3 warehouses.",
+    );
+  });
+
+  it("uses the LAST marker when the model emits more than one", () => {
+    const raw = `first\n${FINAL_ANSWER_MARKER}\nnot this\n${FINAL_ANSWER_MARKER}\nthis one`;
+    expect(extractFinalAnswer(raw)).toBe("this one");
+  });
+
+  it("falls back to the full text when the model ignores the marker", () => {
+    // Degrades to exactly the previous behavior, so this can only improve things.
+    expect(extractFinalAnswer("  just an answer  ")).toBe("just an answer");
+  });
+
+  it("falls back to the preceding text when the marker is last with nothing after", () => {
+    expect(extractFinalAnswer(`the answer\n${FINAL_ANSWER_MARKER}`)).toBe("the answer");
+  });
+});
+
+describe("firstCompleteLine", () => {
+  it("does not publish a mid-sentence fragment", () => {
+    // The production symptom: a task card whose status read
+    // `I see the issue — PC54 doesn't have a "Black" color,`
+    expect(firstCompleteLine('I see the issue — PC54 doesn')).toBeNull();
+  });
+
+  it("returns the opening line once it is complete", () => {
+    expect(firstCompleteLine("Starting inventory lookup for 3 items.\nNext…")).toBe(
+      "Starting inventory lookup for 3 items.",
+    );
+  });
+
+  it("accepts a completed sentence without a newline", () => {
+    expect(firstCompleteLine("Reading the skill manifest now. Then I will ")).toBe(
+      "Reading the skill manifest now.",
+    );
+  });
+
+  it("ignores a trivially short opening", () => {
+    expect(firstCompleteLine("Ok.\n")).toBeNull();
+  });
+
+  it("truncates a very long opening line", () => {
+    const line = `${"x".repeat(400)}\n`;
+    expect(firstCompleteLine(line)!.length).toBe(200);
   });
 });

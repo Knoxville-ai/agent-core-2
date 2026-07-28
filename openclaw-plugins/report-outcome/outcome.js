@@ -31,6 +31,31 @@ const REPORT_OUTCOME_SUFFIX = /(^|[.:/]|__)report_outcome$/;
 /** The platform's long-running-task starter. Same namespacing rules. */
 const START_TASK_SUFFIX = /(^|[.:/]|__)start_task$/;
 
+/**
+ * Every platform tool that needs the id of the session the agent is serving,
+ * and the PARAM each one wants it under.
+ *
+ * The names differ on purpose. `report_outcome` and `start_task` take
+ * `conversation_id` — the session being closed, or the session the task's
+ * result comes back to. The two conversation-openers already RETURN a
+ * `conversation_id` (the new one), so taking one as input would be ambiguous;
+ * they use `caller_conversation_id`, meaning "the session I am calling from",
+ * which the platform uses to thread the delegation into one session tree and to
+ * compute the real call depth.
+ */
+const CONVERSATION_ID_TOOLS = [
+  { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
+  { suffix: START_TASK_SUFFIX, param: "conversation_id" },
+  {
+    suffix: /(^|[.:/]|__)start_conversation$/,
+    param: "caller_conversation_id",
+  },
+  {
+    suffix: /(^|[.:/]|__)start_agent_conversation$/,
+    param: "caller_conversation_id",
+  },
+];
+
 /** True when `toolName` is the platform `report_outcome` tool (bare or prefixed). */
 export function isReportOutcomeTool(toolName) {
   return typeof toolName === "string" && REPORT_OUTCOME_SUFFIX.test(toolName);
@@ -41,9 +66,21 @@ export function isStartTaskTool(toolName) {
   return typeof toolName === "string" && START_TASK_SUFFIX.test(toolName);
 }
 
+/**
+ * The param name this tool wants the caller's conversation id under, or null
+ * when the tool does not take one.
+ */
+export function conversationIdParamFor(toolName) {
+  if (typeof toolName !== "string") return null;
+  for (const entry of CONVERSATION_ID_TOOLS) {
+    if (entry.suffix.test(toolName)) return entry.param;
+  }
+  return null;
+}
+
 /** True for any tool this plugin stamps a conversation id onto. */
 export function needsConversationId(toolName) {
-  return isReportOutcomeTool(toolName) || isStartTaskTool(toolName);
+  return conversationIdParamFor(toolName) !== null;
 }
 
 /**
@@ -84,12 +121,12 @@ export function conversationIdFromSessionKey(sessionKey) {
  *   - Already exactly correct → null (no-op).
  *   - The input params object is not mutated.
  */
-export function buildOutcomeParams(params, conversationId) {
+export function buildOutcomeParams(params, conversationId, paramName = "conversation_id") {
   if (typeof conversationId !== "string" || conversationId.length === 0) return null;
   const base =
     params && typeof params === "object" && !Array.isArray(params) ? params : {};
-  if (base.conversation_id === conversationId) return null;
-  return { ...base, conversation_id: conversationId };
+  if (base[paramName] === conversationId) return null;
+  return { ...base, [paramName]: conversationId };
 }
 
 /**

@@ -3,9 +3,8 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
   buildOutcomeParams,
   conversationIdFromSessionKey,
-  isReportOutcomeTool,
+  conversationIdParamFor,
   isStartTaskTool,
-  needsConversationId,
 } from "./outcome.js";
 
 /**
@@ -44,10 +43,11 @@ export default definePluginEntry({
       "before_tool_call",
       async (event, ctx) => {
         const toolName = event?.toolName;
-        if (!needsConversationId(toolName)) return;
+        const param = conversationIdParamFor(toolName);
+        if (!param) return;
         const sessionKey = ctx?.sessionKey;
         const conversationId = conversationIdFromSessionKey(sessionKey);
-        const label = isStartTaskTool(toolName) ? "start_task" : "report_outcome";
+        const label = String(toolName).split(/[.:/]|__/).pop();
         if (!conversationId) {
           // No usable session key → let the call through unchanged. Fail-open,
           // but the two tools degrade differently, so say which:
@@ -66,11 +66,11 @@ export default definePluginEntry({
           );
           return;
         }
-        const params = buildOutcomeParams(event?.params ?? {}, conversationId);
+        const params = buildOutcomeParams(event?.params ?? {}, conversationId, param);
         if (!params) return; // already correct → no change to the tool call
         // conversation_id is the session's own id (not a secret) — safe to log.
         console.error(
-          `[knox-report-outcome] stamped conversation_id=${conversationId} onto ` +
+          `[knox-report-outcome] stamped ${param}=${conversationId} onto ` +
             `${label} (session=${sessionKey})`,
         );
         return { params };
