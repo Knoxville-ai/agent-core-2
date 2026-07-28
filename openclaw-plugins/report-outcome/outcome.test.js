@@ -5,9 +5,54 @@ import {
   buildStartTaskParams,
   conversationIdFromSessionKey,
   isReportOutcomeTool,
+  conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
 } from "./outcome.js";
+
+describe("conversationIdParamFor", () => {
+  it("uses conversation_id for the tools that act ON a session", () => {
+    expect(conversationIdParamFor("report_outcome")).toBe("conversation_id");
+    expect(conversationIdParamFor("knoxville_platform__start_task")).toBe(
+      "conversation_id",
+    );
+  });
+
+  it("uses caller_conversation_id for the tools that OPEN a session", () => {
+    // Those two already RETURN a conversation_id (the new one), so taking one
+    // as input under the same name would be ambiguous.
+    expect(conversationIdParamFor("start_conversation")).toBe(
+      "caller_conversation_id",
+    );
+    expect(
+      conversationIdParamFor("knoxville_platform__start_agent_conversation"),
+    ).toBe("caller_conversation_id");
+  });
+
+  it("returns null for everything else", () => {
+    for (const name of ["exec", "send_message", "recall", "wait_for_task", null]) {
+      expect(conversationIdParamFor(name), String(name)).toBeNull();
+    }
+  });
+});
+
+describe("buildOutcomeParams with an explicit param name", () => {
+  it("stamps under the requested key", () => {
+    expect(
+      buildOutcomeParams({ slug: "sanmar" }, "conv-1", "caller_conversation_id"),
+    ).toEqual({ slug: "sanmar", caller_conversation_id: "conv-1" });
+  });
+
+  it("no-ops when that key is already correct", () => {
+    expect(
+      buildOutcomeParams(
+        { caller_conversation_id: "conv-1" },
+        "conv-1",
+        "caller_conversation_id",
+      ),
+    ).toBeNull();
+  });
+});
 
 describe("isStartTaskTool", () => {
   it("matches the bare and server-prefixed tool name", () => {
