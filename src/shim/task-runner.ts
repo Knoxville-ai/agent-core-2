@@ -80,6 +80,14 @@ export interface TaskSpec {
    * delegated task may carry credentials.
    */
   sharesCredentials: boolean;
+  /**
+   * When set, this run RESUMES a task that paused on a human escalation (console
+   * migration 0048): the string is the human's decision. The executor rebuilds
+   * context from the work-conversation transcript (which already holds every
+   * prior turn) and continues from where it left off, so nothing is lost across
+   * the wait. Absent on a normal (first) task run.
+   */
+  resumePrompt?: string | null;
 }
 
 export type TaskState = "queued" | "running" | "finished";
@@ -508,6 +516,7 @@ export class TaskRunner {
  * progress it reports is the only thing the person waiting can see.
  */
 export function buildTaskPrompt(spec: TaskSpec): string {
+  if (spec.resumePrompt) return buildResumePrompt(spec);
   const lines = [
     "You are executing a LONG-RUNNING TASK. Nobody is waiting on an open " +
       "connection, so take the time the work actually needs — minutes or hours " +
@@ -542,6 +551,36 @@ export function buildTaskPrompt(spec: TaskSpec): string {
     lines.push(`- Hard deadline: ${spec.deadlineAt}. Wind down before it.`);
   }
   return lines.join("\n");
+}
+
+/**
+ * The prompt for a task RESUMING after a human answered its escalation (0048).
+ *
+ * We deliberately do NOT re-state the original instructions: the executor loads
+ * the full work-conversation transcript on every run, so all the prior turns —
+ * the instructions, the work done so far, and the point where it paused — are
+ * already in context above this message. This just delivers the decision and
+ * says continue.
+ */
+function buildResumePrompt(spec: TaskSpec): string {
+  return [
+    "You are RESUMING a long-running task you paused earlier to escalate a " +
+      "decision to a human. Your progress so far is in this conversation above — " +
+      "pick up exactly where you left off; nothing has been lost.",
+    "",
+    "The human has answered your escalation:",
+    "",
+    spec.resumePrompt ?? "",
+    "",
+    "Apply that decision and carry the task through to completion. The same task " +
+      "rules still hold:",
+    "- Call `report_task_progress` every few minutes; a silent task is treated as dead.",
+    "- Your FINAL message is the result delivered back to the caller.",
+    `- Put ${FINAL_ANSWER_MARKER} on its own line immediately before that final answer.`,
+    "- Do NOT call `report_outcome`; finishing this turn reports the result.",
+    "- You may `escalate_to_human` again only if you hit a genuinely NEW blocking " +
+      "decision — never to re-ask what was just answered.",
+  ].join("\n");
 }
 
 /**

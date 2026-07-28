@@ -495,14 +495,20 @@ being parked, where the answer is delivered back). The model does not supply it 
 the `knox-report-outcome` plugin stamps it from the `webchat:` / `a2a:` session
 key, exactly as it does for `report_outcome` and `start_task`.
 
-**Vessel scope.** No vessel code change is required for the working path: the tool,
-the parking, the routing/notification, and the wake are all console-side, and the
-wake arrives as an ordinary inbound turn the shim already handles. The behavioral
-half lives in `prompts/constitution.md` ("Escalating to a human"). The one deferred
-piece is a task *executor* resuming a `waiting_on_human` task in place — today the
-answer lands in the parked conversation as a normal turn (correct for a webchat/A2A
-session); a `TaskRunner` that parks and resumes its own `task:<id>` session on an
-escalation is a follow-up.
+**A task executor can escalate too.** A long-running task that hits a genuinely
+blocking decision calls `escalate_to_human` with its **`task_id`** (the
+`knox-report-outcome` plugin stamps it from the `task:<id>` session key, since the
+plugin can't derive a work conversation from a task key — the platform resolves it).
+The task moves to `waiting_on_human` (exempt from the reaper), the executor's turn
+ends and unwinds, and **no compute is spent while it waits**. When the human answers,
+the platform does NOT post a message into the work conversation (that would run under
+a webchat session key and lose the task's credential scope) — it **re-dispatches the
+task** via `POST /api/v1/tasks` carrying `resume_prompt` (the decision). The vessel
+rebuilds context from the persisted work-conversation transcript and continues from
+where it paused. If the escalation expires unanswered, the resume carries a fail-safe
+"proceed safely / don't proceed on an approval" instruction instead. The start
+payload's `resume_prompt` and the `TaskSpec.resumePrompt` it becomes are the only
+task-surface additions.
 
 ## Image attachments on disk
 

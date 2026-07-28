@@ -4,7 +4,9 @@ import {
   buildOutcomeParams,
   conversationIdFromSessionKey,
   conversationIdParamFor,
+  isEscalateToHumanTool,
   isStartTaskTool,
+  taskIdFromSessionKey,
 } from "./outcome.js";
 
 /**
@@ -43,6 +45,25 @@ export default definePluginEntry({
       "before_tool_call",
       async (event, ctx) => {
         const toolName = event?.toolName;
+
+        // escalate_to_human from a TASK session parks the task itself, so it
+        // takes `task_id` (the plugin cannot derive a work conversation from a
+        // `task:` key — the platform resolves it from the task). From a webchat/
+        // a2a session it parks the conversation and falls through to the normal
+        // conversation_id stamping below.
+        if (isEscalateToHumanTool(toolName)) {
+          const taskId = taskIdFromSessionKey(ctx?.sessionKey);
+          if (taskId) {
+            const params = buildOutcomeParams(event?.params ?? {}, taskId, "task_id");
+            if (!params) return;
+            console.error(
+              `[knox-report-outcome] stamped task_id=${taskId} onto ` +
+                `escalate_to_human (session=${ctx?.sessionKey})`,
+            );
+            return { params };
+          }
+        }
+
         const param = conversationIdParamFor(toolName);
         if (!param) return;
         const sessionKey = ctx?.sessionKey;

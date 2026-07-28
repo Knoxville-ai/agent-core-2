@@ -118,6 +118,19 @@ export function conversationIdFromSessionKey(sessionKey) {
 }
 
 /**
+ * The task id for a `task:<taskId>` session key, else null. escalate_to_human
+ * (0048) is the one tool a task executor may call that parks the SESSION — and a
+ * task's session is the task itself, not a conversation. The platform resolves
+ * the work conversation from the task id, so here we hand it the task id rather
+ * than a conversation id the plugin has no way to know.
+ */
+export function taskIdFromSessionKey(sessionKey) {
+  if (typeof sessionKey !== "string" || !sessionKey.startsWith("task:")) return null;
+  const id = sessionKey.slice("task:".length).trim();
+  return id.length > 0 ? id : null;
+}
+
+/**
  * Stamp the runtime-derived `conversation_id` onto a COPY of the report_outcome
  * tool params and return the new params object, or `null` when there is nothing
  * to change (so the caller returns void = "no change" to OpenClaw).

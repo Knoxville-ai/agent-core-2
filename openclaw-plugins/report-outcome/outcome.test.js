@@ -9,6 +9,7 @@ import {
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
+  taskIdFromSessionKey,
 } from "./outcome.js";
 
 describe("conversationIdParamFor", () => {
@@ -57,6 +58,18 @@ describe("buildOutcomeParams with an explicit param name", () => {
         "caller_conversation_id",
       ),
     ).toBeNull();
+  });
+});
+
+describe("taskIdFromSessionKey", () => {
+  it("returns the task id for a task: session key", () => {
+    expect(taskIdFromSessionKey("task:abc-123")).toBe("abc-123");
+  });
+
+  it("returns null for a conversation session or a blank/absent key", () => {
+    for (const key of ["webchat:c1", "a2a:c1", "task:", "", null, undefined]) {
+      expect(taskIdFromSessionKey(key), String(key)).toBeNull();
+    }
   });
 });
 
