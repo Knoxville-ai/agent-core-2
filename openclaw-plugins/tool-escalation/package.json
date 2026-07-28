@@ -1,0 +1,8 @@
+{
+  "name": "knox-tool-escalation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "OpenClaw plugin: gate operator-flagged tools behind human approval before they run."
+}

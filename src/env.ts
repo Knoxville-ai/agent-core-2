@@ -107,6 +107,12 @@ const Schema = z.object({
   //                            "group:sessions" or "sessions_spawn,subagents".
   OPENCLAW_TOOLS_PROFILE: z.enum(["minimal", "coding", "messaging", "full"]).optional(),
   OPENCLAW_TOOLS_DENY: z.string().optional(),
+  //   OPENCLAW_TOOLS_ESCALATE — comma/space-separated tool ids the console flagged
+  //                            as requiring human approval before they run. The
+  //                            knox-tool-escalation plugin reads this at call time
+  //                            and gates each listed tool via openclaw's native
+  //                            before_tool_call requireApproval (fail-closed).
+  OPENCLAW_TOOLS_ESCALATE: z.string().optional(),
 
   // Autonomous heartbeat cadence → openclaw.json agents.defaults.heartbeat.every.
   //

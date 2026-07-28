@@ -1,0 +1,12 @@
+{
+  "id": "knox-tool-escalation",
+  "name": "Knox Tool Escalation",
+  "description": "Gate operator-flagged tools behind human approval (requireApproval) before they run.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
