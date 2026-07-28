@@ -348,7 +348,7 @@ export class TaskRunner {
         return;
       }
 
-      const summary = outcome.text.trim();
+      const summary = extractFinalAnswer(outcome.text);
       await reporter.finish({
         status: "complete",
         summary: summary || "(the agent produced no output)",
@@ -468,11 +468,12 @@ export class TaskRunner {
         for await (const token of iterOpenaiDeltas(upstream.body, usageRef)) {
           if (task.abort.signal.aborted) break;
           buffer += token;
-          if (!announcedFirstOutput && buffer.trim().length > 40) {
-            announcedFirstOutput = true;
-            void reporter
-              .progress(firstLine(buffer))
-              .catch(() => undefined);
+          if (!announcedFirstOutput) {
+            const opening = firstCompleteLine(buffer);
+            if (opening) {
+              announcedFirstOutput = true;
+              void reporter.progress(opening).catch(() => undefined);
+            }
           }
         }
       }
@@ -524,6 +525,9 @@ export function buildTaskPrompt(spec: TaskSpec): string {
     "- Your FINAL message is the result delivered back to the caller's session. " +
       "Write it as the answer to their request, not as a status update: what you " +
       "did, what you found, and anything they need to decide on.",
+    `- Put the line ${FINAL_ANSWER_MARKER} on its own immediately before that ` +
+      "final answer. Everything after it is what the caller receives; everything " +
+      "before it is working notes they never see. Emit it exactly once, at the end.",
     "- If you cannot finish, say so plainly in that final message and explain " +
       "how far you got. A partial answer with its limits stated is worth much " +
       "more than an optimistic one.",
@@ -540,7 +544,45 @@ export function buildTaskPrompt(spec: TaskSpec): string {
   return lines.join("\n");
 }
 
-function firstLine(text: string): string {
-  const line = text.trim().split("\n")[0] ?? "";
+/**
+ * The first COMPLETE line of output, or null if none has arrived yet.
+ *
+ * The previous version fired at 40 characters and published whatever the model
+ * happened to be mid-way through saying. In production that produced a task
+ * card reading `I see the issue — PC54 doesn\'t have a "Black" color,` — a
+ * truncated thought, shown to a user as the status of their work. Waiting for a
+ * line break or sentence end costs nothing and never publishes a fragment.
+ */
+export function firstCompleteLine(text: string): string | null {
+  const match = /^\s*(.+?)(?:\n|(?<=[.!?])\s)/s.exec(text);
+  if (!match) return null;
+  const line = match[1]!.trim();
+  if (line.length < 10) return null;
   return line.length > 200 ? `${line.slice(0, 199)}…` : line;
+}
+
+/** Marker the task prompt asks the model to put before its final answer. */
+export const FINAL_ANSWER_MARKER = "===TASK RESULT===";
+
+/**
+ * Pull the deliverable out of a task run\'s raw output.
+ *
+ * openclaw\'s chat-completions stream concatenates EVERY assistant turn in an
+ * agentic run, so the raw buffer is the model thinking out loud: "Let me retry
+ * with the correct color name.Now let me get the named warehouse breakdown..."
+ * Handing that back as the task\'s summary — which is what the caller\'s agent
+ * reads and relays to the user — buries the answer in narration.
+ *
+ * The prompt asks for a marker before the final answer; we take everything
+ * after the LAST one. A model that ignores it degrades to the full text, which
+ * is exactly the old behavior, so this can only improve the result.
+ */
+export function extractFinalAnswer(text: string): string {
+  const trimmed = text.trim();
+  const idx = trimmed.lastIndexOf(FINAL_ANSWER_MARKER);
+  if (idx === -1) return trimmed;
+  const tail = trimmed.slice(idx + FINAL_ANSWER_MARKER.length).trim();
+  // A marker with nothing after it means the model emitted it and then stopped;
+  // the text before it is still the best answer we have.
+  return tail || trimmed.slice(0, idx).trim();
 }
