@@ -81,6 +81,16 @@ export interface TaskSpec {
    */
   sharesCredentials: boolean;
   /**
+   * Per-request model override for this task, as "<provider>/<model>" (e.g.
+   * "openrouter/qwen/qwen3.7-plus"). Sent to the openclaw gateway as the
+   * `x-openclaw-model` header, which overrides the vessel's configured
+   * `model.primary` for THIS request only — so concurrent tasks on the same
+   * vessel each run their own model with no shared process state. Null/absent →
+   * the container default (LLM_PROVIDER/LLM_MODEL). The platform sets it from the
+   * routine's (or task's) configured model; the vessel never persists it.
+   */
+  model?: string | null;
+  /**
    * When set, this run RESUMES a task that paused on a human escalation (console
    * migration 0048): the string is the human's decision. The executor rebuilds
    * context from the work-conversation transcript (which already holds every
@@ -400,10 +410,24 @@ export class TaskRunner {
     let openaiMessages: Array<Record<string, unknown>>;
     let assistantMessageId: string | null = null;
 
-    const caps = resolveCapabilities(env.LLM_PROVIDER, env.LLM_MODEL, {
-      multimodal: env.LLM_MULTIMODAL,
-      fileInput: env.LLM_FILE_INPUT,
-    });
+    // Image/file-input capabilities must track the model that will ACTUALLY run
+    // this turn. When the task carries a per-request model override, resolve caps
+    // from that model — the env LLM_MULTIMODAL/LLM_FILE_INPUT flags describe the
+    // container default, not the override, so they do not apply to it.
+    const overrideRef = spec.model ? splitModelRef(spec.model) : null;
+    const caps = overrideRef
+      ? resolveCapabilities(overrideRef.provider, overrideRef.model)
+      : resolveCapabilities(env.LLM_PROVIDER, env.LLM_MODEL, {
+          multimodal: env.LLM_MULTIMODAL,
+          fileInput: env.LLM_FILE_INPUT,
+        });
+
+    if (spec.model) {
+      log.info("task model override applied", {
+        task_id: spec.taskId,
+        model: spec.model,
+      });
+    }
 
     if (conversationId) {
       await db.insertMessage({
@@ -462,6 +486,14 @@ export class TaskRunner {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
             "x-openclaw-session-key": sessionKey,
+            // Per-request model override. openclaw applies `x-openclaw-model` over
+            // its configured model.primary for THIS request only (verified against
+            // openclaw 2026.5.20: openai-http resolveOpenAiCompatModelOverride →
+            // buildAgentCommandInput.modelOverride, keyed by session). The body
+            // `model` below stays the AGENT selector ("openclaw/default"), which is
+            // a different axis. Omitted when the task has no override, so the
+            // vessel default is unchanged.
+            ...(spec.model ? { "x-openclaw-model": spec.model } : {}),
           },
           body: JSON.stringify({
             model: process.env.OPENCLAW_MODEL_ROUTE ?? "openclaw/default",
@@ -628,4 +660,27 @@ export function extractFinalAnswer(text: string): string {
   // A marker with nothing after it means the model emitted it and then stopped;
   // the text before it is still the best answer we have.
   return tail || trimmed.slice(0, idx).trim();
+}
+
+/**
+ * Split a "<provider>/<model>" model ref into its parts.
+ *
+ * Matches openclaw's own `x-openclaw-model` parsing (parseModelRef): the FIRST
+ * slash separates provider from model, so a multi-segment OpenRouter id survives
+ * intact — "openrouter/qwen/qwen3.7-plus" → provider "openrouter", model
+ * "qwen/qwen3.7-plus". Returns null for a bare model with no provider segment
+ * (openclaw would resolve that against the vessel's default provider, and we
+ * cannot know the capabilities of a provider-less ref), so the caller falls back
+ * to the container-default capabilities.
+ */
+export function splitModelRef(
+  ref: string,
+): { provider: string; model: string } | null {
+  const trimmed = ref.trim();
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return null;
+  return {
+    provider: trimmed.slice(0, slash),
+    model: trimmed.slice(slash + 1),
+  };
 }

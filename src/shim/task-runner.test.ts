@@ -6,6 +6,7 @@ import {
   extractFinalAnswer,
   FINAL_ANSWER_MARKER,
   firstCompleteLine,
+  splitModelRef,
   TaskRunner,
   type TaskSpec,
 } from "./task-runner.js";
@@ -63,6 +64,7 @@ function makeSpec(
     deadlineAt: null,
     delegated,
     sharesCredentials,
+    model: null,
   };
 }
 
@@ -335,5 +337,32 @@ describe("firstCompleteLine", () => {
   it("truncates a very long opening line", () => {
     const line = `${"x".repeat(400)}\n`;
     expect(firstCompleteLine(line)!.length).toBe(200);
+  });
+});
+
+describe("splitModelRef", () => {
+  it("splits on the FIRST slash so a multi-segment OpenRouter id survives", () => {
+    // This is the exact contract openclaw's parseModelRef uses for
+    // x-openclaw-model: provider is everything before the first slash.
+    expect(splitModelRef("openrouter/qwen/qwen3.7-plus")).toEqual({
+      provider: "openrouter",
+      model: "qwen/qwen3.7-plus",
+    });
+  });
+
+  it("splits a simple provider/model ref", () => {
+    expect(splitModelRef("anthropic/claude-opus-4-8")).toEqual({
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+    });
+  });
+
+  it("returns null for a provider-less ref (caller falls back to container caps)", () => {
+    expect(splitModelRef("qwen3.7-plus")).toBeNull();
+  });
+
+  it("returns null for a malformed ref with nothing on one side of the slash", () => {
+    expect(splitModelRef("/model")).toBeNull();
+    expect(splitModelRef("provider/")).toBeNull();
   });
 });
