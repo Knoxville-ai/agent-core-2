@@ -35,6 +35,7 @@ interface TaskStartBody {
   deadline_at?: unknown;
   delegated?: unknown;
   shares_credentials?: unknown;
+  model?: unknown;
   resume_prompt?: unknown;
 }
 
@@ -128,6 +129,10 @@ export async function handleTaskStart(
     // "assume it might" when the platform doesn't say, so an older console
     // never accidentally un-serializes a task that does carry secrets.
     sharesCredentials: delegated && body.shares_credentials !== false,
+    // Per-request model override ("<provider>/<model>"), when the platform
+    // pinned this task (e.g. a routine) to a specific model. Absent → the
+    // vessel's container-default model.
+    model: str(body.model),
     // Set only when the platform is re-dispatching a task that paused on a human
     // escalation (0048): the human's decision, delivered as the resume turn.
     resumePrompt: str(body.resume_prompt),
@@ -144,6 +149,8 @@ export async function handleTaskStart(
     task_id: taskId,
     delegated,
     conversation_id: conversationId,
+    // Null unless the platform pinned this task to a specific model.
+    model: spec.model ?? null,
     // The origin we will report progress and results to. Logged because a
     // wrong one is invisible otherwise: the task runs perfectly, every callback
     // is refused, and the platform sees a task that never finishes. If this
