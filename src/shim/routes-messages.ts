@@ -23,6 +23,7 @@ import {
   type CredentialLease,
   type DelegatedCredentialStore,
 } from "./delegated-credentials.js";
+import { fetchOpenclawStream } from "./openclaw-gateway-fetch.js";
 import { readJsonBody } from "./util.js";
 import {
   type Mcq,
@@ -316,7 +317,7 @@ export async function handleSendMessage(
       stream_options: { include_usage: true },
       messages: openaiMessages,
     };
-    const upstream = await fetch(gatewayUrl, {
+    const upstream = await fetchOpenclawStream(gatewayUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`,
