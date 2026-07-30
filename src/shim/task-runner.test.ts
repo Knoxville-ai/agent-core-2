@@ -279,6 +279,15 @@ describe("buildTaskPrompt", () => {
     expect(prompt).toContain(FINAL_ANSWER_MARKER);
     expect(prompt).toContain("Do NOT call `report_outcome`");
   });
+
+  it("requires narration before each tool call (stream keepalive + visibility)", () => {
+    // A long silent stretch of tool calls is what let the gateway stream go idle
+    // past undici's body timeout; the model narrating between calls is the soft
+    // backstop to the dispatcher fix, and doubles as live visibility.
+    const prompt = buildTaskPrompt(makeSpec("a", false));
+    expect(prompt).toContain("BEFORE each tool call");
+    expect(prompt).toContain("never the final answer");
+  });
 });
 
 describe("extractFinalAnswer", () => {

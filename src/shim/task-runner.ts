@@ -6,6 +6,7 @@ import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import type { DelegatedCredentialStore } from "./delegated-credentials.js";
 import { credentialKeyNames } from "./delegated-credentials.js";
 import { resolveCapabilities } from "./model-capabilities.js";
+import { fetchOpenclawStream } from "./openclaw-gateway-fetch.js";
 import {
   buildTokenUsage,
   fetchDelegatedCredentialsForTurn,
@@ -477,7 +478,7 @@ export class TaskRunner {
     let announcedFirstOutput = false;
 
     try {
-      const upstream = await fetch(
+      const upstream = await fetchOpenclawStream(
         `http://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}/v1/chat/completions`,
         {
           method: "POST",
@@ -567,6 +568,11 @@ export function buildTaskPrompt(spec: TaskSpec): string {
       "where you are. That note is the ONLY thing the person who asked can see " +
       "while they wait, and it is also proof of life — a task that goes silent " +
       "is eventually treated as dead and failed.",
+    "- Narrate as you work: BEFORE each tool call, emit one short plain-text line " +
+      "saying what you are about to do (e.g. \"Fetching PO P13582 from Odoo\"). Do " +
+      "not run a long stretch of tool calls in silence — those lines are how the " +
+      "run stays visibly alive between progress reports, and how anyone watching " +
+      "follows what you are doing. They are working notes, never the final answer.",
     "- Your FINAL message is the result delivered back to the caller's session. " +
       "Write it as the answer to their request, not as a status update: what you " +
       "did, what you found, and anything they need to decide on.",
@@ -611,6 +617,7 @@ function buildResumePrompt(spec: TaskSpec): string {
     "Apply that decision and carry the task through to completion. The same task " +
       "rules still hold:",
     "- Call `report_task_progress` every few minutes; a silent task is treated as dead.",
+    "- Narrate before each tool call with one short line — no long silent tool runs.",
     "- Your FINAL message is the result delivered back to the caller.",
     `- Put ${FINAL_ANSWER_MARKER} on its own line immediately before that final answer.`,
     "- Do NOT call `report_outcome`; finishing this turn reports the result.",
