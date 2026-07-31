@@ -843,9 +843,20 @@ export function buildTokenUsage(
  * Captures the trailing `usage` frame (requested via stream_options) into
  * `usageRef` as a side channel so the caller can persist token counts.
  */
+export interface StreamTermination {
+  /** The last `choice.finish_reason` the stream reported, or null if none. */
+  finishReason: string | null;
+  /** True once the `[DONE]` sentinel arrived — a clean OpenAI-style stream end. */
+  sawDone: boolean;
+}
+
 export async function* iterOpenaiDeltas(
   body: ReadableStream<Uint8Array>,
   usageRef?: { value: OpenaiUsage | null },
+  // Side channel (like usageRef) for the stream's terminal state. Lets the task
+  // executor tell a clean completion from a run openclaw aborted mid-tool-use
+  // (finish_reason "tool_calls") or a cut stream (no [DONE]) — see task-runner.
+  terminalRef?: { value: StreamTermination },
 ): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -861,7 +872,10 @@ export async function* iterOpenaiDeltas(
         pending = pending.slice(nl + 1);
         if (!line || !line.startsWith("data:")) continue;
         const body = line.slice("data:".length).trim();
-        if (body === "[DONE]") return;
+        if (body === "[DONE]") {
+          if (terminalRef) terminalRef.value.sawDone = true;
+          return;
+        }
         let frame: Record<string, unknown>;
         try {
           frame = JSON.parse(body);
@@ -881,6 +895,10 @@ export async function* iterOpenaiDeltas(
         }
         const choices = (frame.choices as Array<Record<string, unknown>>) ?? [];
         const choice = choices[0] ?? {};
+        const finishReason = choice.finish_reason;
+        if (terminalRef && typeof finishReason === "string" && finishReason) {
+          terminalRef.value.finishReason = finishReason;
+        }
         const delta = (choice.delta as Record<string, unknown>) ?? {};
         const text = delta.content;
         if (typeof text === "string" && text) {

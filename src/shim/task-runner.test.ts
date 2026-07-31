@@ -6,6 +6,7 @@ import {
   extractFinalAnswer,
   FINAL_ANSWER_MARKER,
   firstCompleteLine,
+  isCleanFinish,
   splitModelRef,
   TaskRunner,
   type TaskSpec,
@@ -373,5 +374,34 @@ describe("splitModelRef", () => {
   it("returns null for a malformed ref with nothing on one side of the slash", () => {
     expect(splitModelRef("/model")).toBeNull();
     expect(splitModelRef("provider/")).toBeNull();
+  });
+});
+
+describe("isCleanFinish", () => {
+  it("a normal stop + [DONE] is a clean completion", () => {
+    expect(isCleanFinish({ finishReason: "stop", sawDone: true })).toBe(true);
+  });
+
+  it("[DONE] with no finish_reason (e.g. usage-only trailer) is clean", () => {
+    expect(isCleanFinish({ finishReason: null, sawDone: true })).toBe(true);
+  });
+
+  it("a definite stop is clean even if [DONE] never arrived", () => {
+    expect(isCleanFinish({ finishReason: "stop", sawDone: false })).toBe(true);
+  });
+
+  it("finish_reason tool_calls is an aborted mid-tool-use run, NOT a success", () => {
+    // The exact watchdog-abort signature (openclaw stopReason=toolUse): the run
+    // died before the tool ran, so it must report failed, not complete.
+    expect(isCleanFinish({ finishReason: "tool_calls", sawDone: true })).toBe(false);
+    expect(isCleanFinish({ finishReason: "tool_calls", sawDone: false })).toBe(false);
+  });
+
+  it("a cut stream (no [DONE], no finish_reason) is incomplete", () => {
+    expect(isCleanFinish({ finishReason: null, sawDone: false })).toBe(false);
+  });
+
+  it("finish_reason length (truncated at the output cap) is incomplete", () => {
+    expect(isCleanFinish({ finishReason: "length", sawDone: true })).toBe(false);
   });
 });

@@ -13,6 +13,7 @@ import {
   historyToOpenaiMessages,
   iterOpenaiDeltas,
   type OpenaiUsage,
+  type StreamTermination,
 } from "./routes-messages.js";
 import type { AttachmentRow, MessagingDB } from "./supabase-db.js";
 import { TaskReporter } from "./task-reporter.js";
@@ -367,6 +368,30 @@ export class TaskRunner {
         return;
       }
 
+      // Distinguish a clean completion from a run openclaw aborted INTERNALLY.
+      // When openclaw's stuck-session watchdog kills a stalled run, the gateway
+      // stream just ends: our own abort signal is not set and no gateway error
+      // is raised, so without this check the run would be reported `complete` —
+      // a false success (the task closes green having produced nothing, and the
+      // platform materializes a success outcome). See isCleanFinish.
+      const term = outcome.terminal;
+      if (!isCleanFinish(term)) {
+        log.warn("task run ended without a clean completion; reporting failed", {
+          task_id: spec.taskId,
+          finish_reason: term.finishReason,
+          saw_done: term.sawDone,
+        });
+        await reporter.finish({
+          status: "failed",
+          summary: extractFinalAnswer(outcome.text) || null,
+          error:
+            term.finishReason === "length"
+              ? "The run hit the model's output limit before completing; no final result was produced."
+              : "The run was interrupted before completing (stalled or aborted mid-tool-call); no final result was produced.",
+        });
+        return;
+      }
+
       const summary = extractFinalAnswer(outcome.text);
       await reporter.finish({
         status: "complete",
@@ -401,7 +426,7 @@ export class TaskRunner {
     task: TrackedTask,
     sessionKey: string,
     reporter: TaskReporter,
-  ): Promise<{ text: string; error: string | null }> {
+  ): Promise<{ text: string; error: string | null; terminal: StreamTermination }> {
     const { env, db } = this.deps;
     const { spec } = task;
     const conversationId = spec.conversationId;
@@ -470,6 +495,9 @@ export class TaskRunner {
     }
 
     const usageRef: { value: OpenaiUsage | null } = { value: null };
+    const terminalRef: { value: StreamTermination } = {
+      value: { finishReason: null, sawDone: false },
+    };
     let buffer = "";
     let error: string | null = null;
     // Narrate the first slice of output as a progress note, so a task that
@@ -510,7 +538,7 @@ export class TaskRunner {
         const body = await upstream.text().catch(() => "");
         error = `gateway ${upstream.status}: ${body.slice(0, 500)}`;
       } else {
-        for await (const token of iterOpenaiDeltas(upstream.body, usageRef)) {
+        for await (const token of iterOpenaiDeltas(upstream.body, usageRef, terminalRef)) {
           if (task.abort.signal.aborted) break;
           buffer += token;
           if (!announcedFirstOutput) {
@@ -541,7 +569,7 @@ export class TaskRunner {
       });
     }
 
-    return { text: buffer, error };
+    return { text: buffer, error, terminal: terminalRef.value };
   }
 }
 
@@ -667,6 +695,31 @@ export function extractFinalAnswer(text: string): string {
   // A marker with nothing after it means the model emitted it and then stopped;
   // the text before it is still the best answer we have.
   return tail || trimmed.slice(0, idx).trim();
+}
+
+/**
+ * Whether a task's model stream ended in a genuine completion — the gate for
+ * reporting the task `complete` rather than `failed`.
+ *
+ * A clean agentic run ends with a `stop` finish and/or the `[DONE]` sentinel.
+ * The failure this guards against is openclaw's stuck-session watchdog aborting
+ * a stalled run: from the shim's side the gateway stream simply ends, with no
+ * error and without our own abort signal set, so the run would otherwise look
+ * complete and close GREEN having produced nothing. Its signatures:
+ *   - finish_reason "tool_calls" — aborted mid-tool-use (openclaw's
+ *     `stopReason=toolUse`); the tool never ran and no answer followed.
+ *   - no `[DONE]` — the gateway stream was cut outright.
+ *   - finish_reason "length" — the model was truncated at its output cap.
+ * A bare `[DONE]` with no finish_reason (e.g. a usage-only trailer) is clean; a
+ * definite `stop` is clean even if `[DONE]` never arrived.
+ */
+export function isCleanFinish(term: StreamTermination): boolean {
+  if (term.finishReason === "stop") return true;
+  return (
+    term.sawDone &&
+    term.finishReason !== "tool_calls" &&
+    term.finishReason !== "length"
+  );
 }
 
 /**
