@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { historyToOpenaiMessages } from "./routes-messages.js";
+import { buildTokenUsage, historyToOpenaiMessages } from "./routes-messages.js";
+import type { AgentEnv } from "../env.js";
 import type { ModelCapabilities } from "./model-capabilities.js";
 import type { AttachmentRow, MessageRow, MessagingDB } from "./supabase-db.js";
 
@@ -142,5 +143,82 @@ describe("historyToOpenaiMessages image materialization", () => {
     // with the right size, so no re-download.
     await historyToOpenaiMessages(rows, attByMsg, TEXT_ONLY, db, ws, "c1");
     expect(downloads.length).toBe(1);
+  });
+});
+
+describe("buildTokenUsage prompt-cache decomposition", () => {
+  const env = { LLM_PROVIDER: "openrouter", LLM_MODEL: "qwen3.7-plus" } as AgentEnv;
+  const usage = { prompt_tokens: 1000, completion_tokens: 50, total_tokens: 1050 };
+
+  it("keeps the legacy shape when no cache rollup is available", () => {
+    // The telemetry plugin may not be loaded (older image, plugin disabled).
+    // token_usage must then look exactly as it always has.
+    const built = buildTokenUsage(usage, env);
+    expect(built).toEqual({
+      input_tokens: 1000,
+      output_tokens: 50,
+      total_tokens: 1050,
+      provider: "openrouter",
+      model: "qwen3.7-plus",
+    });
+  });
+
+  it("decomposes input_tokens into uncached + cache_read", () => {
+    const built = buildTokenUsage(usage, env, {
+      modelCalls: 4,
+      uncachedInput: 100,
+      cacheRead: 900,
+      cacheWrite: 120,
+    });
+    // input_tokens stays INCLUSIVE of cache reads (that is what the compat
+    // endpoint reports); the new fields split it without redefining it.
+    expect(built?.input_tokens).toBe(1000);
+    expect(built?.uncached_input_tokens).toBe(100);
+    expect(built?.cache_read_input_tokens).toBe(900);
+    expect(built?.cache_creation_input_tokens).toBe(120);
+    expect(built?.model_calls).toBe(4);
+  });
+
+  it("preserves the identity uncached + cache_read === input_tokens", () => {
+    for (const cacheRead of [0, 1, 499, 1000]) {
+      const built = buildTokenUsage(usage, env, {
+        modelCalls: 1,
+        uncachedInput: 12345, // deliberately inconsistent with the frame
+        cacheRead,
+        cacheWrite: 0,
+      });
+      expect(
+        (built?.uncached_input_tokens as number) + (built?.cache_read_input_tokens as number),
+      ).toBe(built?.input_tokens);
+    }
+  });
+
+  it("clamps a cache read that overshoots the reported prompt total", () => {
+    // Retries inside the agentic loop can make the plugin's summed cacheRead
+    // drift above the final frame's prompt_tokens. Clamp rather than emit a
+    // negative uncached count.
+    const built = buildTokenUsage(usage, env, {
+      modelCalls: 9,
+      uncachedInput: 0,
+      cacheRead: 5000,
+      cacheWrite: 0,
+    });
+    expect(built?.cache_read_input_tokens).toBe(1000);
+    expect(built?.uncached_input_tokens).toBe(0);
+  });
+
+  it("records the resolved provider/model ref when the plugin reported one", () => {
+    const built = buildTokenUsage(usage, env, {
+      modelCalls: 1,
+      uncachedInput: 1000,
+      cacheRead: 0,
+      cacheWrite: 0,
+      resolvedRef: "openrouter/qwen/qwen3.7-plus",
+    });
+    expect(built?.resolved_ref).toBe("openrouter/qwen/qwen3.7-plus");
+  });
+
+  it("still returns undefined when the gateway reported no usage at all", () => {
+    expect(buildTokenUsage(null, env, { modelCalls: 3, uncachedInput: 1, cacheRead: 1, cacheWrite: 0 })).toBeUndefined();
   });
 });

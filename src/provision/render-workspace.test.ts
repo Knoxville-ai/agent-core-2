@@ -13,6 +13,7 @@ import {
   parseToolsDeny,
   REPORT_OUTCOME_PLUGIN_ID,
   TASK_PROGRESS_PLUGIN_ID,
+  USAGE_TELEMETRY_PLUGIN_ID,
   resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
@@ -328,9 +329,36 @@ describe("buildOpenclawConfig platform plugins", () => {
     ).toBe(true);
   });
 
-  it("does NOT wire the plugins when there is no PLATFORM_MCP_URL (no platform MCP reachable)", () => {
+  it("does NOT wire the platform plugins when there is no PLATFORM_MCP_URL (no platform MCP reachable)", () => {
     const config = buildOpenclawConfig(makeEnv({}), "/ws");
-    expect(config.plugins).toBeUndefined();
+    const p = plugins(config);
+    // All three platform plugins are consumers of the platform MCP and are
+    // pointless without it.
+    expect(p.entries?.[DELEGATED_CREDS_PLUGIN_ID]).toBeUndefined();
+    expect(p.entries?.[REPORT_OUTCOME_PLUGIN_ID]).toBeUndefined();
+    expect(p.entries?.[TASK_PROGRESS_PLUGIN_ID]).toBeUndefined();
+    for (const dir of ["delegated-credentials", "report-outcome", "task-progress"]) {
+      expect(
+        (p.load?.paths ?? []).some((path) => path.endsWith(`openclaw-plugins/${dir}`)),
+        `${dir} must not be wired without a platform MCP`,
+      ).toBe(false);
+    }
+  });
+
+  it("ALWAYS wires usage telemetry, platform MCP or not (every vessel burns tokens)", () => {
+    for (const env of [
+      makeEnv({}),
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+    ]) {
+      const p = plugins(buildOpenclawConfig(env, "/ws"));
+      expect(p.entries?.[USAGE_TELEMETRY_PLUGIN_ID]).toEqual({ enabled: true });
+      expect(
+        (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/usage-telemetry")),
+      ).toBe(true);
+    }
   });
 
   it("merges with an existing plugins block (Codex OAuth entries survive)", () => {

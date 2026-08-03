@@ -24,7 +24,11 @@ import {
 } from "./routes-tasks.js";
 import { TaskRunner } from "./task-runner.js";
 import { DelegatedCredentialStore } from "./delegated-credentials.js";
-import { handleDelegatedCredentialsLookup } from "./routes-internal.js";
+import {
+  handleDelegatedCredentialsLookup,
+  handleLlmUsageIngest,
+} from "./routes-internal.js";
+import { UsageAccumulator } from "./usage-telemetry.js";
 import {
   handleSkillsInstall,
   handleSkillsList,
@@ -53,10 +57,14 @@ export function startShim(
   // Per-turn delegated-credential store, shared between the message route
   // (writer) and the loopback lookup route (reader for the gateway plugin).
   const delegatedCreds = new DelegatedCredentialStore();
+  // Per-turn prompt-cache/model-call rollup, written by the loopback usage
+  // ingest route (fed by the knox-usage-telemetry openclaw plugin) and read by
+  // the message + task paths when they finalize an assistant row.
+  const usage = new UsageAccumulator();
   // Long-running task executor. Detached from every HTTP request: the task
   // routes hand work to it and return 202, and it reports back to the platform
   // on its own schedule (see task-runner.ts).
-  const taskRunner = new TaskRunner({ env, db, memory, delegatedCreds });
+  const taskRunner = new TaskRunner({ env, db, memory, delegatedCreds, usage });
   const oauth: OAuthDeps = {
     env,
     db,
@@ -75,6 +83,7 @@ export function startShim(
       memory,
       delegatedCreds,
       taskRunner,
+      usage,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -128,6 +137,7 @@ async function route(
   memory: MemoryCheckpoint,
   delegatedCreds: DelegatedCredentialStore,
   taskRunner: TaskRunner,
+  usage: UsageAccumulator,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -156,6 +166,13 @@ async function route(
   if (path === "/internal/delegated-credentials") {
     if (method !== "GET") throw new HttpError(405, "method not allowed");
     return handleDelegatedCredentialsLookup(url, req, res, env, delegatedCreds);
+  }
+
+  // Per-model-call token usage from the knox-usage-telemetry openclaw plugin.
+  // Same loopback + gateway-token trust anchor as the credential lookup above.
+  if (path === "/internal/llm-usage") {
+    if (method !== "POST") throw new HttpError(405, "method not allowed");
+    return handleLlmUsageIngest(req, res, env, usage);
   }
 
   // Live skill management (console operator surface). Gateway-token authed like
@@ -222,6 +239,7 @@ async function route(
         cancels,
         memory,
         delegatedCreds,
+        usage,
       });
     }
     if (sub === "interrupt") {

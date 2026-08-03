@@ -34,6 +34,19 @@ const TASK_PROGRESS_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/task-progress", import.meta.url),
 );
 
+/** Usage telemetry: forwards each model call's token usage — including the
+ *  prompt-cache read/write split — to the shim over loopback.
+ *
+ *  openclaw's OpenAI-compat endpoint reports `prompt_tokens = input + cacheRead`
+ *  and drops the split, so the SSE `usage` frame the shim already reads cannot
+ *  tell a cache hit from a miss. The `llm_output` hook still has the breakdown,
+ *  so this plugin captures it there. Resolved the same way as the plugins
+ *  above. */
+export const USAGE_TELEMETRY_PLUGIN_ID = "knox-usage-telemetry";
+const USAGE_TELEMETRY_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/usage-telemetry", import.meta.url),
+);
+
 /** The platform constitution shipped in the image (see `prompts/constitution.md`).
  *  Resolved relative to this module so it works from both `src/` (tests) and
  *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
@@ -367,6 +380,22 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
         model: {
           primary: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
         },
+        // Per-agent stream params (agents.defaults.params). Only emitted when
+        // LLM_CACHE_RETENTION is set, so the config bytes are unchanged for
+        // every agent that has not opted in.
+        //
+        // openclaw reads `cacheRetention` when it builds the provider payload
+        // and turns it into an `{ type: "ephemeral", ttl }` cache breakpoint —
+        // but ONLY on its `anthropic-messages` transport. On the
+        // `openai-completions` path this vessel uses for OpenRouter and OpenAI,
+        // no breakpoint is emitted regardless of this value; those providers
+        // either cache implicitly (OpenAI) or need provider-side support that
+        // the pinned openclaw does not send (OpenRouter). Setting it there is
+        // harmless but does nothing — the lever on that path is the stable
+        // prompt prefix, not this flag.
+        ...(env.LLM_CACHE_RETENTION
+          ? { params: { cacheRetention: env.LLM_CACHE_RETENTION } }
+          : {}),
         // Autonomous heartbeat. openclaw enables a periodic heartbeat turn on
         // the default (`main`) agent by default at 30m — a full model inference
         // (system prompt + every tool schema, for a ~300-char "nothing to do"
@@ -498,6 +527,22 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     entries[DELEGATED_CREDS_PLUGIN_ID] = { enabled: true };
     entries[REPORT_OUTCOME_PLUGIN_ID] = { enabled: true };
     entries[TASK_PROGRESS_PLUGIN_ID] = { enabled: true };
+    plugins.entries = entries;
+    config.plugins = plugins;
+  }
+
+  // Usage telemetry rides EVERY vessel, unlike the three plugins above. Those
+  // are all consumers of the platform MCP and are pointless without it; this one
+  // only needs the loopback shim and the gateway token, both of which always
+  // exist. An agent with no platform MCP still burns tokens, and its cache hit
+  // rate is exactly as worth knowing.
+  {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, USAGE_TELEMETRY_PLUGIN_DIR] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    entries[USAGE_TELEMETRY_PLUGIN_ID] = { enabled: true };
     plugins.entries = entries;
     config.plugins = plugins;
   }

@@ -115,6 +115,34 @@ const Schema = z.object({
   //                            the same gate as an approval-gated capability.
   OPENCLAW_TOOLS_ESCALATE: z.string().optional(),
 
+  // Where the per-turn `# DYNAMIC CONTEXT` system block goes in the outgoing
+  // message array. Default "tail" (appended after the history).
+  //
+  // Prompt caches match token-by-token from the FRONT of the prompt, so a block
+  // whose bytes change every turn — this one is rebuilt from recent memories,
+  // caller context, and a 30s-TTL knowledge index — destroys the whole cached
+  // prefix when it sits at index 0. Appending it keeps the stable history
+  // cacheable and leaves only the tail to recompute.
+  //
+  // Set to "lead" to restore the historical prepend behavior without a code
+  // release (see routes-messages.ts for the full rationale).
+  AGENT_DYNAMIC_CONTEXT_POSITION: z.enum(["lead", "tail"]).default("tail"),
+
+  // Prompt-cache retention hint forwarded to openclaw as a per-agent stream
+  // param (`agents.defaults.params.cacheRetention`).
+  //
+  //   short — provider default TTL (Anthropic: 5m)
+  //   long  — extended TTL where the endpoint supports it (Anthropic: 1h)
+  //   none  — do not request cache breakpoints at all
+  //
+  // SCOPE, so this is not mistaken for a global switch: openclaw emits
+  // `cache_control` breakpoints ONLY on its `anthropic-messages` transport. On
+  // the `openai-completions` path (which is how this vessel reaches OpenRouter
+  // and OpenAI today) the value is inert — those providers either cache
+  // implicitly or not at all, and no breakpoint is sent regardless. Left unset
+  // so nothing changes for existing agents until an operator opts in.
+  LLM_CACHE_RETENTION: z.enum(["short", "long", "none"]).optional(),
+
   // Autonomous heartbeat cadence → openclaw.json agents.defaults.heartbeat.every.
   //
   // openclaw runs a periodic "heartbeat" turn on the default (`main`) agent: a

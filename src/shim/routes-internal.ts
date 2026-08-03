@@ -4,7 +4,8 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { credentialKeyNames, type DelegatedCredentialStore } from "./delegated-credentials.js";
 import { requireGatewayToken } from "./routes-files.js";
-import { sendJson } from "./util.js";
+import { parseUsageSample, type UsageAccumulator } from "./usage-telemetry.js";
+import { readJsonBody, sendJson } from "./util.js";
 
 /**
  * Loopback credential lookup for the openclaw `before_tool_call` plugin.
@@ -51,4 +52,50 @@ export function handleDelegatedCredentialsLookup(
     store_size: store.size(),
   });
   sendJson(res, 200, { credentials });
+}
+
+/**
+ * Loopback token-usage ingest for the openclaw `knox-usage-telemetry` plugin.
+ *
+ *   POST /internal/llm-usage
+ *     { session_key: "<key>", sample: { input, output, cache_read, cache_write, ... } }
+ *     -> { ok: true }
+ *
+ * One POST per MODEL CALL, not per turn — openclaw's `llm_output` hook fires on
+ * every iteration of the agentic loop. The shim folds them into a per-turn
+ * rollup and writes the totals onto the assistant row's `token_usage` when the
+ * turn finalizes.
+ *
+ * This exists because openclaw's OpenAI-compat endpoint flattens
+ * `prompt_tokens = input + cacheRead` and drops the split, so the SSE `usage`
+ * frame the shim already reads cannot distinguish a cache hit from a miss.
+ *
+ * Authed with the gateway token, the same trust anchor as `/files`, `/skills`,
+ * and `/internal/delegated-credentials`. Carries token COUNTS only — never
+ * prompt text, assistant text, or tool arguments.
+ *
+ * Always 200s. Telemetry must never be able to fail a turn, so an unparseable
+ * body is counted and dropped rather than surfaced as an error the plugin would
+ * retry.
+ */
+export async function handleLlmUsageIngest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  env: AgentEnv,
+  usage: UsageAccumulator,
+): Promise<void> {
+  requireGatewayToken(req.headers.authorization, env);
+  const body = await readJsonBody<Record<string, unknown>>(req).catch(() => null);
+  const sessionKey = typeof body?.session_key === "string" ? body.session_key : "";
+  const sample = parseUsageSample(body);
+  if (!sessionKey || !sample) {
+    log.debug("llm usage ingest ignored", {
+      session_key: sessionKey || null,
+      parsed: Boolean(sample),
+    });
+    sendJson(res, 200, { ok: true, recorded: false });
+    return;
+  }
+  usage.add(sessionKey, sample);
+  sendJson(res, 200, { ok: true, recorded: true });
 }
