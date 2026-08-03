@@ -1,0 +1,8 @@
+{
+  "name": "knox-usage-telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "OpenClaw plugin: forward per-model-call token usage (including the prompt-cache read/write split) to the agent-core shim over loopback."
+}

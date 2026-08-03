@@ -17,6 +17,7 @@ import {
 } from "./routes-messages.js";
 import type { AttachmentRow, MessagingDB } from "./supabase-db.js";
 import { TaskReporter } from "./task-reporter.js";
+import { logUsageTotals, type UsageAccumulator } from "./usage-telemetry.js";
 
 /**
  * The long-running task executor (console migration 0047).
@@ -119,6 +120,9 @@ export interface TaskRunnerDeps {
   db: MessagingDB;
   memory: MemoryCheckpoint;
   delegatedCreds: DelegatedCredentialStore;
+  /** Per-task model-call / prompt-cache rollup, filled by the loopback usage
+   *  ingest route and drained when the task's assistant row finalizes. */
+  usage: UsageAccumulator;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
 }
@@ -494,6 +498,11 @@ export class TaskRunner {
       openaiMessages = [{ role: "user", content: buildTaskPrompt(spec) }];
     }
 
+    // Open this task's usage bucket. Every model call openclaw makes inside the
+    // agentic loop reports back through the loopback ingest route under this
+    // session key; drained after the stream ends.
+    this.deps.usage.begin(sessionKey);
+
     const usageRef: { value: OpenaiUsage | null } = { value: null };
     const terminalRef: { value: StreamTermination } = {
       value: { finishReason: null, sawDone: false },
@@ -556,6 +565,13 @@ export class TaskRunner {
       }
     }
 
+    // Drain this task's per-model-call rollup (prompt-cache split + loop
+    // iteration count). `task:<taskId>` session keys are unique per task, so
+    // unlike the webchat path this attribution is exact. Always drained, even
+    // when there is no assistant row to write it onto, so the bucket cannot leak.
+    const cacheTotals = this.deps.usage.drain(sessionKey);
+    if (cacheTotals) logUsageTotals(sessionKey, cacheTotals);
+
     if (assistantMessageId && conversationId) {
       await db.updateMessage(assistantMessageId, {
         content: buffer,
@@ -565,7 +581,7 @@ export class TaskRunner {
             ? "error"
             : "complete",
         completedAt: new Date().toISOString(),
-        tokenUsage: buildTokenUsage(usageRef.value, env),
+        tokenUsage: buildTokenUsage(usageRef.value, env, cacheTotals),
       });
     }
 

@@ -24,6 +24,11 @@ import {
   type DelegatedCredentialStore,
 } from "./delegated-credentials.js";
 import { fetchOpenclawStream } from "./openclaw-gateway-fetch.js";
+import {
+  logUsageTotals,
+  type CacheUsageTotals,
+  type UsageAccumulator,
+} from "./usage-telemetry.js";
 import { readJsonBody } from "./util.js";
 import {
   type Mcq,
@@ -81,6 +86,9 @@ export interface MessagesDeps {
    *  here on a delegated turn, read by the loopback route the gateway plugin
    *  calls, cleared when the turn ends. */
   delegatedCreds: DelegatedCredentialStore;
+  /** Per-turn model-call / prompt-cache rollup, filled by the loopback usage
+   *  ingest route and drained here when the assistant row finalizes. */
+  usage: UsageAccumulator;
 }
 
 export async function handleSendMessage(
@@ -182,12 +190,29 @@ export async function handleSendMessage(
   );
 
   // DYNAMIC layer: recompute per-turn caller context (who is calling + what we
-  // have learned about them) and conversation-scoped recent memory, and prepend
-  // it as a leading `system` message. SOUL.md carries the STATIC identity;
-  // anything per-caller/per-turn must be injected here because SOUL is assembled
-  // once at boot. Fail-open — a missing table or a DB hiccup must never break a
-  // turn. (If the openclaw gateway is found to drop inbound system messages, fold
-  // this into a leading user-role preamble instead; see the rollout checklist.)
+  // have learned about them) and conversation-scoped recent memory. SOUL.md
+  // carries the STATIC identity; anything per-caller/per-turn must be injected
+  // here because SOUL is assembled once at boot. Fail-open — a missing table or a
+  // DB hiccup must never break a turn.
+  //
+  // PLACEMENT (prompt-cache critical): this block is APPENDED, not prepended.
+  //
+  // Its content is recomputed every turn from mutating sources — recent memories,
+  // caller context ordered by `last_interaction_at`, and a 30s-TTL knowledge
+  // index. At index 0 a single `remember` call during turn N changes byte 0 of
+  // turn N+1, which invalidates the ENTIRE prompt prefix: providers match the
+  // cache token-by-token from the front, so one changed leading token forces a
+  // full recompute of everything after it. Worse, `buildDynamicContext` returns
+  // null when it has no sections, so a conversation could flip between "no
+  // leading system message" and "one" mid-stream, shifting every message index.
+  //
+  // Appending moves the volatile bytes behind the entire stable history, so the
+  // shared prefix across consecutive turns goes from ~0% to ~everything-but-the-
+  // tail. The model still sees the same content in the same turn.
+  //
+  // Set AGENT_DYNAMIC_CONTEXT_POSITION=lead to restore the old prepend behavior
+  // without a code release, if a model is found to weight a trailing system
+  // block differently.
   try {
     const dynamic = await buildDynamicContext(
       db,
@@ -195,7 +220,14 @@ export async function handleSendMessage(
       principal,
       parseAdvisoryCaller(req.headers),
     );
-    if (dynamic) openaiMessages.unshift({ role: "system", content: dynamic });
+    if (dynamic) {
+      const msg = { role: "system" as const, content: dynamic };
+      if (env.AGENT_DYNAMIC_CONTEXT_POSITION === "lead") {
+        openaiMessages.unshift(msg);
+      } else {
+        openaiMessages.push(msg);
+      }
+    }
   } catch (err) {
     log.warn("dynamic context injection failed (non-fatal)", {
       err: String(err),
@@ -228,6 +260,11 @@ export async function handleSendMessage(
     ? `a2a:${conversationId}`
     : `webchat:${conversationId}`;
 
+  // Open this turn's usage bucket. Every model call openclaw makes inside the
+  // agentic loop reports back through the loopback ingest route under this same
+  // session key; we drain the rollup in the `finally` below.
+  deps.usage.begin(sessionKey);
+
   // Platform-brokered delegated credentials (agent-to-agent turns only).
   // On a delegated turn, pull the credentials the calling agent shared for THIS
   // conversation and stash them keyed by the session key. The openclaw
@@ -256,11 +293,18 @@ export async function handleSendMessage(
     }
     // Steer weaker models toward actually running the skill on this turn (the
     // brokered creds live in the skill's exec env, invisible to the model, so a
-    // model that hunts for them concludes "no access" and bails). Prepended as a
-    // system message so it leads the turn. It carries NO credential values —
-    // behavioral guidance only — and is added ONLY to the outgoing message array
-    // here, never written back to the conversation history.
-    openaiMessages.unshift({ role: "system", content: DELEGATED_TURN_SYSTEM_NOTE });
+    // model that hunts for them concludes "no access" and bails). It carries NO
+    // credential values — behavioral guidance only — and is added ONLY to the
+    // outgoing message array here, never written back to the conversation
+    // history.
+    //
+    // Appended for the same prompt-cache reason as the dynamic block above: this
+    // note is present on delegated turns and absent on ordinary ones, so at
+    // index 0 it made the identity of the first message alternate on any
+    // conversation that mixes the two — zeroing the shared prefix every time it
+    // flipped. At the tail it is also simply more recent, which is where a
+    // behavioral nudge wants to be.
+    openaiMessages.push({ role: "system", content: DELEGATED_TURN_SYSTEM_NOTE });
   }
 
   res.writeHead(200, {
@@ -405,11 +449,16 @@ export async function handleSendMessage(
     // later, still-running turn staged under the same session key. Idempotent +
     // safe on a non-delegated turn (lease 0 matches nothing).
     deps.delegatedCreds.clear(sessionKey, credentialLease);
+    // Drain this turn's per-model-call rollup (prompt-cache split + loop
+    // iteration count). Null when the telemetry plugin is not loaded, in which
+    // case token_usage keeps exactly its previous shape.
+    const cacheTotals = deps.usage.drain(sessionKey);
+    if (cacheTotals) logUsageTotals(sessionKey, cacheTotals);
     await db.updateMessage(assistantMessageId, {
       content: questionPayload ? JSON.stringify(questionPayload) : buffer,
       status: finalStatus,
       completedAt: new Date().toISOString(),
-      tokenUsage: buildTokenUsage(usageRef.value, env),
+      tokenUsage: buildTokenUsage(usageRef.value, env, cacheTotals),
     });
     cancels.release(assistantMessageId);
     try {
@@ -811,10 +860,31 @@ export interface OpenaiUsage {
  * shape the console's metrics dashboard reads
  * (`input_tokens` / `output_tokens` / `total_tokens`). Returns undefined when
  * the gateway reported no usage so we don't overwrite the column with zeros.
+ *
+ * `cache` carries the per-turn rollup from the knox-usage-telemetry plugin
+ * (see usage-telemetry.ts). When present we add the prompt-cache breakdown and
+ * the model-call count.
+ *
+ * IMPORTANT for cost math: `input_tokens` stays INCLUSIVE of cache reads,
+ * because that is what openclaw's OpenAI-compat endpoint reports
+ * (`prompt_tokens = input + cacheRead`) and changing its meaning would silently
+ * rewrite every historical comparison. The added fields decompose it:
+ *
+ *     input_tokens = uncached_input_tokens + cache_read_input_tokens
+ *
+ * so a consumer prices a turn as
+ *
+ *     uncached_input_tokens * input_usd_per_mtok
+ *   + cache_read_input_tokens * cached_input_usd_per_mtok
+ *   + output_tokens * output_usd_per_mtok
+ *
+ * Cache-write tokens are reported separately and are NOT part of `input_tokens`
+ * (the compat endpoint excludes them), so they must be priced on their own.
  */
 export function buildTokenUsage(
   usage: OpenaiUsage | null,
   env: AgentEnv,
+  cache?: CacheUsageTotals | null,
 ): Record<string, unknown> | undefined {
   if (!usage) return undefined;
   const input = usage.prompt_tokens;
@@ -822,7 +892,7 @@ export function buildTokenUsage(
   if (typeof input !== "number" && typeof output !== "number") return undefined;
   const inputTokens = typeof input === "number" ? input : 0;
   const outputTokens = typeof output === "number" ? output : 0;
-  return {
+  const base: Record<string, unknown> = {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     total_tokens:
@@ -831,6 +901,21 @@ export function buildTokenUsage(
         : inputTokens + outputTokens,
     provider: env.LLM_PROVIDER,
     model: usage.model ?? env.LLM_MODEL,
+  };
+  if (!cache) return base;
+
+  // Prefer the compat endpoint's `prompt_tokens` as the authoritative total and
+  // derive the uncached remainder from the measured cache reads, so the identity
+  // above holds even if the two sources disagree by a few tokens (retries inside
+  // the loop can make the plugin's sum drift from the final frame).
+  const cacheRead = Math.min(cache.cacheRead, inputTokens);
+  return {
+    ...base,
+    uncached_input_tokens: Math.max(0, inputTokens - cacheRead),
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: cache.cacheWrite,
+    model_calls: cache.modelCalls,
+    ...(cache.resolvedRef ? { resolved_ref: cache.resolvedRef } : {}),
   };
 }
 

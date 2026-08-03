@@ -1,0 +1,12 @@
+{
+  "id": "knox-usage-telemetry",
+  "name": "Knox Usage Telemetry",
+  "description": "Forward per-model-call token usage (including the prompt-cache read/write split that the OpenAI-compat endpoint discards) to the agent-core shim over loopback.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

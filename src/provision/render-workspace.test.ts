@@ -13,6 +13,8 @@ import {
   parseToolsDeny,
   REPORT_OUTCOME_PLUGIN_ID,
   TASK_PROGRESS_PLUGIN_ID,
+  USAGE_TELEMETRY_PLUGIN_ID,
+  parseToolList,
   resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
@@ -328,9 +330,36 @@ describe("buildOpenclawConfig platform plugins", () => {
     ).toBe(true);
   });
 
-  it("does NOT wire the plugins when there is no PLATFORM_MCP_URL (no platform MCP reachable)", () => {
+  it("does NOT wire the platform plugins when there is no PLATFORM_MCP_URL (no platform MCP reachable)", () => {
     const config = buildOpenclawConfig(makeEnv({}), "/ws");
-    expect(config.plugins).toBeUndefined();
+    const p = plugins(config);
+    // All three platform plugins are consumers of the platform MCP and are
+    // pointless without it.
+    expect(p.entries?.[DELEGATED_CREDS_PLUGIN_ID]).toBeUndefined();
+    expect(p.entries?.[REPORT_OUTCOME_PLUGIN_ID]).toBeUndefined();
+    expect(p.entries?.[TASK_PROGRESS_PLUGIN_ID]).toBeUndefined();
+    for (const dir of ["delegated-credentials", "report-outcome", "task-progress"]) {
+      expect(
+        (p.load?.paths ?? []).some((path) => path.endsWith(`openclaw-plugins/${dir}`)),
+        `${dir} must not be wired without a platform MCP`,
+      ).toBe(false);
+    }
+  });
+
+  it("ALWAYS wires usage telemetry, platform MCP or not (every vessel burns tokens)", () => {
+    for (const env of [
+      makeEnv({}),
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+    ]) {
+      const p = plugins(buildOpenclawConfig(env, "/ws"));
+      expect(p.entries?.[USAGE_TELEMETRY_PLUGIN_ID]).toEqual({ enabled: true });
+      expect(
+        (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/usage-telemetry")),
+      ).toBe(true);
+    }
   });
 
   it("merges with an existing plugins block (Codex OAuth entries survive)", () => {
@@ -420,9 +449,101 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
     ]);
     expect(t.deny).toEqual(["group:sessions"]);
   });
+
+  it("emits no allow/alsoAllow/toolSearch keys by default", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({}), "/ws"));
+    expect(t.allow).toBeUndefined();
+    expect(t.alsoAllow).toBeUndefined();
+    expect(t.toolSearch).toBeUndefined();
+  });
+
+  it("wires tools.allow (parsed) as a complete allowlist", () => {
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOLS_ALLOW: "group:openclaw knoxville_platform__* odoo_production__sales_confirm_order",
+        }),
+        "/ws",
+      ),
+    );
+    expect(t.allow).toEqual([
+      "group:openclaw",
+      "knoxville_platform__*",
+      "odoo_production__sales_confirm_order",
+    ]);
+    expect(t.alsoAllow).toBeUndefined();
+  });
+
+  it("wires tools.alsoAllow (parsed) as profile additions", () => {
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOLS_PROFILE: "coding",
+          OPENCLAW_TOOLS_ALSO_ALLOW: "odoo_production__ap_create_vendor_bill",
+        }),
+        "/ws",
+      ),
+    );
+    expect(t.profile).toBe("coding");
+    expect(t.alsoAllow).toEqual(["odoo_production__ap_create_vendor_bill"]);
+    expect(t.allow).toBeUndefined();
+  });
+
+  it("never emits allow + alsoAllow together (openclaw rejects the pair; allow wins)", () => {
+    // Defense in depth: loadEnv fails fast on this combo, but a config built
+    // from a hand-made env must still never emit the invalid pair.
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOLS_ALLOW: "group:openclaw",
+          OPENCLAW_TOOLS_ALSO_ALLOW: "odoo_production__x",
+        }),
+        "/ws",
+      ),
+    );
+    expect(t.allow).toEqual(["group:openclaw"]);
+    expect(t.alsoAllow).toBeUndefined();
+  });
+
+  it("wires root tools.toolSearch when OPENCLAW_TOOL_SEARCH=tools", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({ OPENCLAW_TOOL_SEARCH: "tools" }), "/ws"));
+    expect(t.toolSearch).toEqual({ enabled: true, mode: "tools" });
+  });
+
+  it("passes through code mode verbatim (openclaw resolves the --permission fallback)", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({ OPENCLAW_TOOL_SEARCH: "code" }), "/ws"));
+    expect(t.toolSearch).toEqual({ enabled: true, mode: "code" });
+  });
+
+  // Regression: toolSearch must MERGE into the root tools block, not replace it.
+  // An earlier draft emitted a second `tools` key that clobbered exec/allow/deny
+  // whenever toolSearch was on.
+  it("keeps exec + allow + deny intact when toolSearch is also on", () => {
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOL_SEARCH: "tools",
+          OPENCLAW_TOOLS_ALLOW: "group:openclaw",
+          OPENCLAW_TOOLS_DENY: "group:sessions",
+        }),
+        "/ws",
+      ),
+    );
+    expect((t.exec as { pathPrepend?: string[] }).pathPrepend).toEqual([
+      "/opt/knox-exec-shim",
+      "/opt/skills-venv/bin",
+    ]);
+    expect(t.allow).toEqual(["group:openclaw"]);
+    expect(t.deny).toEqual(["group:sessions"]);
+    expect(t.toolSearch).toEqual({ enabled: true, mode: "tools" });
+  });
 });
 
 describe("parseToolsDeny", () => {
+  it("is the back-compat alias for parseToolList", () => {
+    expect(parseToolsDeny).toBe(parseToolList);
+  });
+
   it("empty / missing → []", () => {
     expect(parseToolsDeny(undefined)).toEqual([]);
     expect(parseToolsDeny("")).toEqual([]);
@@ -442,11 +563,36 @@ describe("parseToolsDeny", () => {
   });
 });
 
-describe("buildOpenclawConfig bootstrapMaxChars", () => {
-  it("raises the SOUL truncation limit above openclaw's 12000 default", () => {
-    const config = buildOpenclawConfig(makeEnv({}), "/ws");
-    const defaults = (config.agents as { defaults: { bootstrapMaxChars?: number } }).defaults;
-    expect(defaults.bootstrapMaxChars).toBeGreaterThan(12000);
+describe("buildOpenclawConfig bootstrap char caps", () => {
+  const CONSTITUTION_CHARS = 20792; // prompts/constitution.md, the first SOUL section
+
+  function caps(config: Record<string, unknown>) {
+    return (
+      config.agents as {
+        defaults: { bootstrapMaxChars?: number; bootstrapTotalMaxChars?: number };
+      }
+    ).defaults;
+  }
+
+  it("sets a per-file cap above a real SOUL.md (constitution + sections)", () => {
+    // The whole bug: the cap must exceed the constitution (20,792) plus the
+    // identity/charter/capabilities/memory/playbook/footer that follow it, or
+    // openclaw truncates the tail. Anything at or below the constitution size is
+    // the regression.
+    const d = caps(buildOpenclawConfig(makeEnv({}), "/ws"));
+    expect(d.bootstrapMaxChars).toBeGreaterThan(CONSTITUTION_CHARS);
+    // Guard the specific regression value too — 24000 left only ~3.2k of
+    // headroom over the constitution, far short of a real SOUL.
+    expect(d.bootstrapMaxChars).toBeGreaterThanOrEqual(48000);
+  });
+
+  it("raises the COMBINED cap above openclaw's 60000 default", () => {
+    // SOUL (up to the per-file cap) + AGENTS + TOOLS can exceed 60000, which
+    // would truncate at the aggregate level even with each file under its own cap.
+    const d = caps(buildOpenclawConfig(makeEnv({}), "/ws"));
+    expect(d.bootstrapTotalMaxChars).toBeGreaterThan(60000);
+    // The total must leave room for AGENTS.md + TOOLS.md on top of a full SOUL.
+    expect(d.bootstrapTotalMaxChars).toBeGreaterThan(d.bootstrapMaxChars ?? 0);
   });
 });
 
