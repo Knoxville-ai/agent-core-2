@@ -102,14 +102,36 @@ const SKILLS_VENV_BIN = "/opt/skills-venv/bin";
 const EXEC_SHIM_BIN = "/opt/knox-exec-shim";
 
 /**
- * Max characters per workspace bootstrap file (SOUL.md) before openclaw
- * truncates it in the injected context (`agents.defaults.bootstrapMaxChars`,
- * openclaw default 12000). The console-authored SOUL.md already runs ~12.5k on
- * real agents, so at the default openclaw silently drops the tail — which is
- * exactly where turn-behavior/delegation guidance tends to live. Bump it to give
- * comfortable headroom; still far under openclaw's 60000 bootstrapTotalMaxChars.
+ * Per-file cap for a workspace bootstrap file before openclaw truncates it in
+ * the injected context (`agents.defaults.bootstrapMaxChars`, openclaw default
+ * 12000; openclaw truncates each file to this and warns at 85%).
+ *
+ * The old value here was 24000, with a comment claiming "SOUL.md runs ~12.5k".
+ * That estimate is stale: `prompts/constitution.md` — the FIRST section of every
+ * SOUL.md — is 20,792 chars on its own. Add identity/charter (measured 5–17k
+ * across live roles), the capability fragments, memory digest, playbook, and the
+ * `# MEMORY & SELF-EDITING` footer and a real SOUL.md lands at ~37–50k. So at
+ * 24000 EVERY real agent was truncated — and because openclaw drops the tail,
+ * the sections lost first are memory, playbook and the self-editing footer:
+ * precisely the "how your own memory works" instructions the cap was meant to
+ * protect.
+ *
+ * 60000 clears the measured worst case (constitution 20.8k + a 17k role prompt +
+ * ~12k of capabilities/memory/playbook/footer ≈ 50k) with headroom. It is a
+ * safety ceiling, not a target — the injected size is the real content, so a
+ * loose ceiling only means "never silently truncate real instructions".
  */
-const BOOTSTRAP_MAX_CHARS = 24000;
+const BOOTSTRAP_MAX_CHARS = 60000;
+
+/**
+ * Combined cap across ALL bootstrap files (SOUL.md + AGENTS.md + TOOLS.md)
+ * (`agents.defaults.bootstrapTotalMaxChars`, openclaw default 60000). With
+ * SOUL.md now allowed up to 60k and AGENTS.md/TOOLS.md measured at ~6k/7k, the
+ * three together can exceed the 60000 default — which would re-introduce tail
+ * truncation at the aggregate level even though each file is individually under
+ * its own cap. Raise the total to fit all three with headroom.
+ */
+const BOOTSTRAP_TOTAL_MAX_CHARS = 120000;
 
 /**
  * Renders an openclaw workspace from env vars + Supabase Storage, then
@@ -407,9 +429,12 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     agents: {
       defaults: {
         workspace,
-        // Stop openclaw truncating the (already ~12.5k) SOUL.md at its 12000
-        // default, which silently drops the tail of the system prompt.
+        // Stop openclaw truncating the system prompt. The constitution alone is
+        // ~20.8k and a real SOUL.md ~37–50k, so both the per-file default (12000)
+        // and the combined default (60000) would drop the tail — see the
+        // BOOTSTRAP_*_MAX_CHARS constants for the measurements.
         bootstrapMaxChars: BOOTSTRAP_MAX_CHARS,
+        bootstrapTotalMaxChars: BOOTSTRAP_TOTAL_MAX_CHARS,
         model: {
           primary: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
         },

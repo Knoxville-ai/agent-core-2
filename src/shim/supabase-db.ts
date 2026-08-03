@@ -118,10 +118,14 @@ export interface CallerContextQuery {
 export class MessagingDB {
   private readonly client: SupabaseClient;
 
-  constructor(env: AgentEnv) {
-    this.client = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+  // `client` is injectable purely for tests (the query builder is otherwise a
+  // live network call); production always constructs from env.
+  constructor(env: AgentEnv, client?: SupabaseClient) {
+    this.client =
+      client ??
+      createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
   }
 
   async userInOrg(userId: string, orgId: string): Promise<boolean> {
@@ -155,19 +159,33 @@ export class MessagingDB {
   }
 
   async listMessages(conversationId: string, limit = 500): Promise<MessageRow[]> {
+    // Take the NEWEST `limit` messages, then restore chronological order for the
+    // model. This used to be `created_at ASC LIMIT 500`, which returns the
+    // OLDEST 500 — so once a conversation passed 500 rows it silently dropped
+    // its recent tail, INCLUDING the just-inserted current turn (the caller
+    // reloads history expecting that row to be present). Fetch descending +
+    // reverse so the window is anchored to "now", not to the conversation's
+    // ancient past.
+    //
+    // Secondary order on `id` makes the window deterministic when several rows
+    // share a `created_at` (millisecond ties are common on a fast turn): without
+    // it, ASC and DESC could disagree on which rows fall inside the limit and in
+    // what order, which would also perturb the prompt prefix cache breakpoint.
     const { data, error } = await this.client
       .from("messages")
       .select(
         "id,role,content,status,system_generated,sender_kind,sender_id,created_at",
       )
       .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true })
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .limit(limit);
     if (error) {
       log.warn("listMessages query failed", { err: error.message });
       return [];
     }
-    return (data ?? []) as MessageRow[];
+    // DESC → [newest … oldest]; reverse back to chronological [oldest … newest].
+    return ((data ?? []) as MessageRow[]).reverse();
   }
 
   /**

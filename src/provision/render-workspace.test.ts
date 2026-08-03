@@ -563,11 +563,36 @@ describe("parseToolsDeny", () => {
   });
 });
 
-describe("buildOpenclawConfig bootstrapMaxChars", () => {
-  it("raises the SOUL truncation limit above openclaw's 12000 default", () => {
-    const config = buildOpenclawConfig(makeEnv({}), "/ws");
-    const defaults = (config.agents as { defaults: { bootstrapMaxChars?: number } }).defaults;
-    expect(defaults.bootstrapMaxChars).toBeGreaterThan(12000);
+describe("buildOpenclawConfig bootstrap char caps", () => {
+  const CONSTITUTION_CHARS = 20792; // prompts/constitution.md, the first SOUL section
+
+  function caps(config: Record<string, unknown>) {
+    return (
+      config.agents as {
+        defaults: { bootstrapMaxChars?: number; bootstrapTotalMaxChars?: number };
+      }
+    ).defaults;
+  }
+
+  it("sets a per-file cap above a real SOUL.md (constitution + sections)", () => {
+    // The whole bug: the cap must exceed the constitution (20,792) plus the
+    // identity/charter/capabilities/memory/playbook/footer that follow it, or
+    // openclaw truncates the tail. Anything at or below the constitution size is
+    // the regression.
+    const d = caps(buildOpenclawConfig(makeEnv({}), "/ws"));
+    expect(d.bootstrapMaxChars).toBeGreaterThan(CONSTITUTION_CHARS);
+    // Guard the specific regression value too — 24000 left only ~3.2k of
+    // headroom over the constitution, far short of a real SOUL.
+    expect(d.bootstrapMaxChars).toBeGreaterThanOrEqual(48000);
+  });
+
+  it("raises the COMBINED cap above openclaw's 60000 default", () => {
+    // SOUL (up to the per-file cap) + AGENTS + TOOLS can exceed 60000, which
+    // would truncate at the aggregate level even with each file under its own cap.
+    const d = caps(buildOpenclawConfig(makeEnv({}), "/ws"));
+    expect(d.bootstrapTotalMaxChars).toBeGreaterThan(60000);
+    // The total must leave room for AGENTS.md + TOOLS.md on top of a full SOUL.
+    expect(d.bootstrapTotalMaxChars).toBeGreaterThan(d.bootstrapMaxChars ?? 0);
   });
 });
 
