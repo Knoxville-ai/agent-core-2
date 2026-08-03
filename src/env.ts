@@ -107,6 +107,64 @@ const Schema = z.object({
   //                            "group:sessions" or "sessions_spawn,subagents".
   OPENCLAW_TOOLS_PROFILE: z.enum(["minimal", "coding", "messaging", "full"]).optional(),
   OPENCLAW_TOOLS_DENY: z.string().optional(),
+  //   OPENCLAW_TOOLS_ALLOW — comma/space/newline-separated allowlist → tools.allow.
+  //   OPENCLAW_TOOLS_ALSO_ALLOW — additive entries → tools.alsoAllow.
+  //
+  // MUTUALLY EXCLUSIVE: openclaw rejects a scope that sets both allow and
+  // alsoAllow (loadEnv fails fast if you set both). Two valid shapes:
+  //   • OPENCLAW_TOOLS_ALLOW alone            — a COMPLETE allowlist.
+  //   • OPENCLAW_TOOLS_PROFILE + _ALSO_ALLOW  — a base profile plus additions.
+  //
+  // This is the surgical lever for the big cost problem: an agent bound to the
+  // Odoo MCP ships ~127 tool schemas (~40k tokens) on EVERY model call. A
+  // single-purpose agent that uses a handful of them can hard-restrict its
+  // surface here, cutting the per-call tool block dramatically.
+  //
+  // openclaw's policy semantics (verified against the pinned runtime — read
+  // these before setting an allowlist, they are full of footguns):
+  //   1. DENY WINS. A tool matching `deny` is denied even if it also matches
+  //      `allow`. You cannot "deny odoo_production__* then re-allow one".
+  //   2. An EMPTY allow list is fail-open (all tools allowed, minus deny). Only
+  //      a NON-empty allow list restricts.
+  //   3. A non-empty allow list is COMPLETE: every tool NOT matched is denied.
+  //      So an allowlist MUST also include the tools the agent needs to
+  //      function — core (`group:openclaw`, `group:plugins`) and the platform
+  //      MCP (`knoxville_platform__*`) — or delegation, memory, outcome
+  //      reporting and exec all silently vanish and the agent bricks.
+  //   4. Globs work: `odoo_production__*` matches the whole MCP namespace;
+  //      `group:...` expands to a tool group.
+  //
+  // Safe recipe for a single-purpose Odoo agent (keep core+platform, expose
+  // only the Odoo tools it really calls):
+  //   OPENCLAW_TOOLS_ALLOW="group:openclaw group:plugins knoxville_platform__* \
+  //     odoo_production__sales_confirm_order odoo_production__ap_create_vendor_bill"
+  //
+  // Prefer OPENCLAW_TOOLS_DENY for coarse cuts ("this agent needs zero Odoo":
+  // `deny=odoo_production__*`) — it cannot brick the agent by omission the way a
+  // too-narrow allowlist can. Reserve ALLOW for deliberate lockdown. The
+  // console-managed per-agent policy table (agent_mcp_tool_policies) will drive
+  // this automatically with a complete, fail-open allowlist; until then this is
+  // an expert, per-Railway-service lever.
+  OPENCLAW_TOOLS_ALLOW: z.string().optional(),
+  OPENCLAW_TOOLS_ALSO_ALLOW: z.string().optional(),
+  //   OPENCLAW_TOOL_SEARCH — deferred tool discovery (openclaw tools.toolSearch).
+  //     off (default) | tools | code
+  //
+  // When on, openclaw pulls the bulk of the tool schemas OUT of the prompt and
+  // exposes a search interface instead; the model calls it to load a tool's
+  // spec on demand. This is the article's "deferred discovery" and it DOES work
+  // on the openai-completions transport (unlike prompt caching).
+  //
+  // OFF by default on purpose. openclaw's generic deferral is ALL-OR-NOTHING:
+  // it catalogs every functional tool (including exec and the platform MCP),
+  // leaving only the search control tools resident — there is no "keep core
+  // resident" split on this path. On weaker models (the qwen fleet already
+  // reaches for the wrong tool) forcing a search->describe->call dance for
+  // every action is a real behavioral risk and adds round trips. Turn it on for
+  // ONE agent, eval it, then widen. `code` mode needs the node `--permission`
+  // flag (absent in our image) and silently falls back to `tools`, so prefer
+  // `tools` explicitly.
+  OPENCLAW_TOOL_SEARCH: z.enum(["off", "tools", "code"]).default("off"),
   //   OPENCLAW_TOOLS_ESCALATE — comma/space-separated tool ids the console flagged
   //                            as requiring human approval before use. Rendered
   //                            into SOUL.md as a `# TOOL APPROVALS` instruction
@@ -240,6 +298,22 @@ const Schema = z.object({
       path: ["OPENCLAW_AUTH_PROFILE_SECRET_KEY"],
       message:
         "required when LLM_AUTH_MODE=oauth (stable seed that keeps the encrypted OAuth store portable across redeploys)",
+    });
+  }
+  // openclaw rejects a tools policy that sets BOTH allow and alsoAllow in the
+  // same scope (verified against the pinned runtime's `config validate`). Catch
+  // it here with an actionable message instead of letting the vessel emit a
+  // config openclaw refuses at boot — which would be a crash loop, not a hint.
+  // Valid shapes: `allow` alone (complete allowlist), or `profile` + `alsoAllow`
+  // (base profile plus additions).
+  const hasAllow = (env.OPENCLAW_TOOLS_ALLOW ?? "").trim().length > 0;
+  const hasAlsoAllow = (env.OPENCLAW_TOOLS_ALSO_ALLOW ?? "").trim().length > 0;
+  if (hasAllow && hasAlsoAllow) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["OPENCLAW_TOOLS_ALSO_ALLOW"],
+      message:
+        "cannot be set together with OPENCLAW_TOOLS_ALLOW (openclaw forbids allow+alsoAllow in one scope). Use OPENCLAW_TOOLS_ALLOW alone as a complete allowlist, or OPENCLAW_TOOLS_PROFILE + OPENCLAW_TOOLS_ALSO_ALLOW to extend a base profile.",
     });
   }
 });

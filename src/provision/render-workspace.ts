@@ -293,12 +293,13 @@ export async function writeOpenclawConfig(env: AgentEnv): Promise<void> {
 }
 
 /**
- * Parse `OPENCLAW_TOOLS_DENY` (comma/space/newline-separated tool ids or groups)
- * into a de-duplicated, order-preserving list for openclaw's `tools.deny`. An
- * empty / missing value yields `[]` (no deny entry is emitted at all). Exported
- * for unit tests.
+ * Parse a comma/space/newline-separated list of tool ids, groups, or globs into
+ * a de-duplicated, ORDER-PRESERVING array for openclaw's `tools.{deny,allow,
+ * alsoAllow}`. An empty / missing value yields `[]` (the caller emits no key at
+ * all in that case). Order-preserving matters for prompt-prefix stability — the
+ * same env in must produce byte-identical config out. Exported for unit tests.
  */
-export function parseToolsDeny(raw: string | undefined): string[] {
+export function parseToolList(raw: string | undefined): string[] {
   if (!raw) return [];
   const seen = new Set<string>();
   const out: string[] = [];
@@ -310,6 +311,29 @@ export function parseToolsDeny(raw: string | undefined): string[] {
     }
   }
   return out;
+}
+
+/** @deprecated Back-compat alias for {@link parseToolList}. */
+export const parseToolsDeny = parseToolList;
+
+/**
+ * Resolve `OPENCLAW_TOOL_SEARCH` into an openclaw `tools.toolSearch` value, or
+ * `undefined` when off (so no key is emitted and the config bytes are unchanged
+ * for agents that have not opted in).
+ *
+ * "code" mode requires the node `--permission` flag, which the vessel image
+ * does not set; openclaw would silently fall back to "tools" at runtime. We
+ * emit exactly what was asked and let openclaw resolve, rather than second-
+ * guessing the flag here.
+ */
+export function resolveToolSearchConfig(
+  value: "off" | "tools" | "code" | undefined,
+): { enabled: true; mode: "tools" | "code" } | undefined {
+  // Only ever turn ON for an explicit mode. Anything else — "off", undefined
+  // (env constructed without the zod default), or a stray value — stays off, so
+  // the failure mode is "no deferral" rather than "silently on with a bad mode".
+  if (value === "tools" || value === "code") return { enabled: true, mode: value };
+  return undefined;
 }
 
 /** Recognized case-insensitive off-switches for OPENCLAW_HEARTBEAT_EVERY, all
@@ -363,8 +387,17 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     mcpServers[name] = cfg;
   }
 
-  // Optional per-agent tool deny-list (see env.ts / the tools block below).
-  const toolsDeny = parseToolsDeny(env.OPENCLAW_TOOLS_DENY);
+  // Optional per-agent tool policy lists (see env.ts / the tools block below).
+  const toolsDeny = parseToolList(env.OPENCLAW_TOOLS_DENY);
+  const toolsAllow = parseToolList(env.OPENCLAW_TOOLS_ALLOW);
+  // openclaw rejects a scope that sets BOTH allow and alsoAllow. loadEnv already
+  // fails fast on that combination; this is defense in depth so a config built
+  // from a hand-made env (tests, callers that bypass loadEnv) can never emit the
+  // invalid pair — `allow` wins, `alsoAllow` is dropped.
+  const toolsAlsoAllow =
+    toolsAllow.length > 0 ? [] : parseToolList(env.OPENCLAW_TOOLS_ALSO_ALLOW);
+  // Root-level tools.toolSearch (deferred discovery); undefined => not emitted.
+  const toolSearch = resolveToolSearchConfig(env.OPENCLAW_TOOL_SEARCH);
 
   // openclaw.json shape derived from `openclaw config schema` for the
   // pinned CLI version. openclaw 2026.5.x rejects unknown top-level keys
@@ -462,7 +495,15 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
         pathPrepend: [EXEC_SHIM_BIN, SKILLS_VENV_BIN],
       },
       ...(env.OPENCLAW_TOOLS_PROFILE ? { profile: env.OPENCLAW_TOOLS_PROFILE } : {}),
+      ...(toolsAllow.length > 0 ? { allow: toolsAllow } : {}),
+      ...(toolsAlsoAllow.length > 0 ? { alsoAllow: toolsAlsoAllow } : {}),
       ...(toolsDeny.length > 0 ? { deny: toolsDeny } : {}),
+      // Deferred tool discovery. Belongs on the SAME root `tools` block as the
+      // allow/deny above (openclaw reads toolSearch off the top-level ToolsConfig).
+      // Omitted when off so the config bytes are unchanged for agents that have
+      // not opted in. See env.ts for the all-or-nothing caveat that keeps it off
+      // by default.
+      ...(toolSearch ? { toolSearch } : {}),
     },
     // We don't bind any native channels — all conversation flows through
     // the shim's HTTP surface, which is what the knoxville console talks to.

@@ -67,3 +67,48 @@ describe("prompt-cache env defaults", () => {
     );
   });
 });
+
+describe("tool-block env levers (step 4)", () => {
+  it("defaults tool search OFF (all-or-nothing deferral must be opt-in)", () => {
+    // If this default ever flips to "tools"/"code", every agent silently starts
+    // hiding its tools behind a search dance — a behavioral change, not a config
+    // tweak. Pin it off.
+    const env = withEnv({}, loadEnv);
+    expect(env.OPENCLAW_TOOL_SEARCH).toBe("off");
+  });
+
+  it.each(["off", "tools", "code"])("accepts tool search mode %s", (mode) => {
+    expect(withEnv({ OPENCLAW_TOOL_SEARCH: mode }, loadEnv).OPENCLAW_TOOL_SEARCH).toBe(mode);
+  });
+
+  it("rejects an unknown tool search mode", () => {
+    expect(() => withEnv({ OPENCLAW_TOOL_SEARCH: "semantic" }, loadEnv)).toThrow(
+      /OPENCLAW_TOOL_SEARCH/,
+    );
+  });
+
+  it("leaves allow / alsoAllow unset by default (empty allowlist = fail-open)", () => {
+    const env = withEnv({}, loadEnv);
+    expect(env.OPENCLAW_TOOLS_ALLOW).toBeUndefined();
+    expect(env.OPENCLAW_TOOLS_ALSO_ALLOW).toBeUndefined();
+  });
+
+  it("rejects allow + alsoAllow together (openclaw forbids the pair)", () => {
+    // Verified against openclaw's own `config validate`: a scope with both keys
+    // is invalid and the agent would crash-loop at boot. Fail fast instead.
+    expect(() =>
+      withEnv(
+        { OPENCLAW_TOOLS_ALLOW: "group:openclaw", OPENCLAW_TOOLS_ALSO_ALLOW: "odoo_production__x" },
+        loadEnv,
+      ),
+    ).toThrow(/OPENCLAW_TOOLS_ALSO_ALLOW/);
+  });
+
+  it("allows profile + alsoAllow (the valid additive shape)", () => {
+    const env = withEnv(
+      { OPENCLAW_TOOLS_PROFILE: "coding", OPENCLAW_TOOLS_ALSO_ALLOW: "odoo_production__x" },
+      loadEnv,
+    );
+    expect(env.OPENCLAW_TOOLS_ALSO_ALLOW).toBe("odoo_production__x");
+  });
+});

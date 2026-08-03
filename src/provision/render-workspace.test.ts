@@ -14,6 +14,7 @@ import {
   REPORT_OUTCOME_PLUGIN_ID,
   TASK_PROGRESS_PLUGIN_ID,
   USAGE_TELEMETRY_PLUGIN_ID,
+  parseToolList,
   resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
@@ -448,9 +449,101 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
     ]);
     expect(t.deny).toEqual(["group:sessions"]);
   });
+
+  it("emits no allow/alsoAllow/toolSearch keys by default", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({}), "/ws"));
+    expect(t.allow).toBeUndefined();
+    expect(t.alsoAllow).toBeUndefined();
+    expect(t.toolSearch).toBeUndefined();
+  });
+
+  it("wires tools.allow (parsed) as a complete allowlist", () => {
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOLS_ALLOW: "group:openclaw knoxville_platform__* odoo_production__sales_confirm_order",
+        }),
+        "/ws",
+      ),
+    );
+    expect(t.allow).toEqual([
+      "group:openclaw",
+      "knoxville_platform__*",
+      "odoo_production__sales_confirm_order",
+    ]);
+    expect(t.alsoAllow).toBeUndefined();
+  });
+
+  it("wires tools.alsoAllow (parsed) as profile additions", () => {
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOLS_PROFILE: "coding",
+          OPENCLAW_TOOLS_ALSO_ALLOW: "odoo_production__ap_create_vendor_bill",
+        }),
+        "/ws",
+      ),
+    );
+    expect(t.profile).toBe("coding");
+    expect(t.alsoAllow).toEqual(["odoo_production__ap_create_vendor_bill"]);
+    expect(t.allow).toBeUndefined();
+  });
+
+  it("never emits allow + alsoAllow together (openclaw rejects the pair; allow wins)", () => {
+    // Defense in depth: loadEnv fails fast on this combo, but a config built
+    // from a hand-made env must still never emit the invalid pair.
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOLS_ALLOW: "group:openclaw",
+          OPENCLAW_TOOLS_ALSO_ALLOW: "odoo_production__x",
+        }),
+        "/ws",
+      ),
+    );
+    expect(t.allow).toEqual(["group:openclaw"]);
+    expect(t.alsoAllow).toBeUndefined();
+  });
+
+  it("wires root tools.toolSearch when OPENCLAW_TOOL_SEARCH=tools", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({ OPENCLAW_TOOL_SEARCH: "tools" }), "/ws"));
+    expect(t.toolSearch).toEqual({ enabled: true, mode: "tools" });
+  });
+
+  it("passes through code mode verbatim (openclaw resolves the --permission fallback)", () => {
+    const t = tools(buildOpenclawConfig(makeEnv({ OPENCLAW_TOOL_SEARCH: "code" }), "/ws"));
+    expect(t.toolSearch).toEqual({ enabled: true, mode: "code" });
+  });
+
+  // Regression: toolSearch must MERGE into the root tools block, not replace it.
+  // An earlier draft emitted a second `tools` key that clobbered exec/allow/deny
+  // whenever toolSearch was on.
+  it("keeps exec + allow + deny intact when toolSearch is also on", () => {
+    const t = tools(
+      buildOpenclawConfig(
+        makeEnv({
+          OPENCLAW_TOOL_SEARCH: "tools",
+          OPENCLAW_TOOLS_ALLOW: "group:openclaw",
+          OPENCLAW_TOOLS_DENY: "group:sessions",
+        }),
+        "/ws",
+      ),
+    );
+    expect((t.exec as { pathPrepend?: string[] }).pathPrepend).toEqual([
+      "/opt/knox-exec-shim",
+      "/opt/skills-venv/bin",
+    ]);
+    expect(t.allow).toEqual(["group:openclaw"]);
+    expect(t.deny).toEqual(["group:sessions"]);
+    expect(t.toolSearch).toEqual({ enabled: true, mode: "tools" });
+  });
 });
 
 describe("parseToolsDeny", () => {
+  it("is the back-compat alias for parseToolList", () => {
+    expect(parseToolsDeny).toBe(parseToolList);
+  });
+
   it("empty / missing → []", () => {
     expect(parseToolsDeny(undefined)).toEqual([]);
     expect(parseToolsDeny("")).toEqual([]);
