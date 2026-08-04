@@ -355,7 +355,13 @@ describe("buildOpenclawConfig platform plugins", () => {
       }),
     ]) {
       const p = plugins(buildOpenclawConfig(env, "/ws"));
-      expect(p.entries?.[USAGE_TELEMETRY_PLUGIN_ID]).toEqual({ enabled: true });
+      // Must opt into conversation-hook access or openclaw blocks its `llm_output`
+      // hook and the plugin reports nothing (no cache split, no model_calls, no
+      // cost). See buildOpenclawConfig.
+      expect(p.entries?.[USAGE_TELEMETRY_PLUGIN_ID]).toEqual({
+        enabled: true,
+        hooks: { allowConversationAccess: true },
+      });
       expect(
         (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/usage-telemetry")),
       ).toBe(true);

@@ -609,7 +609,18 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
     plugins.load = { ...load, paths: [...paths, USAGE_TELEMETRY_PLUGIN_DIR] };
     const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
-    entries[USAGE_TELEMETRY_PLUGIN_ID] = { enabled: true };
+    // `llm_output` is a CONVERSATION hook in openclaw 2026.5.20, and a non-bundled
+    // plugin that subscribes to one is blocked unless it opts in with
+    // `hooks.allowConversationAccess=true` — openclaw logs the block at gateway
+    // start and then silently never fires the hook. Without this the plugin loads
+    // but reports nothing, so the shim's per-turn rollup stays empty: no cache
+    // split, no model_calls, and (since cost correlation rides this same channel)
+    // no actual cost. This plugin reads ONLY the usage counts off the event, never
+    // conversation text, so granting the access is safe.
+    entries[USAGE_TELEMETRY_PLUGIN_ID] = {
+      enabled: true,
+      hooks: { allowConversationAccess: true },
+    };
     plugins.entries = entries;
     config.plugins = plugins;
   }
