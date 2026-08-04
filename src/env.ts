@@ -285,6 +285,34 @@ const Schema = z.object({
     .default("18789")
     .transform((v) => Number.parseInt(v, 10)),
 
+  // ── OpenRouter cost tracking ───────────────────────────────────────────────
+  // The live fleet runs on OpenRouter, which returns the real, discount-inclusive
+  // charge in every response's `usage.cost`. openclaw discards it before the shim
+  // can see it, so we intercept it with a transparent loopback proxy in front of
+  // OpenRouter (see shim/cost-proxy.ts) and store the actual cost per turn.
+  //
+  // Kill switch: set to false to point openclaw straight at OpenRouter with no
+  // interception (cost falls back to the console's token×rate estimate). Inert
+  // for non-OpenRouter providers — there is nothing to intercept.
+  OPENROUTER_COST_TRACKING: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => {
+      const s = v.trim().toLowerCase();
+      return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }),
+  // Loopback port the cost proxy binds. openclaw's OpenRouter baseUrl points here.
+  OPENROUTER_COST_PROXY_PORT: z
+    .string()
+    .optional()
+    .default("18790")
+    .transform((v) => Number.parseInt(v, 10)),
+  // Where the proxy forwards to. Defaults to the public OpenRouter API; honors an
+  // explicit override, then LLM_BASE_URL (a pinned regional/gateway host), so the
+  // proxy targets the same endpoint openclaw would have called directly.
+  OPENROUTER_UPSTREAM_URL: z.string().url().optional(),
+
   // openclaw state directory (where openclaw.json + workspace live).
   // Distinct from openclaw's own OPENCLAW_HOME env var, which it treats
   // as the user-home equivalent and appends `.openclaw` to.

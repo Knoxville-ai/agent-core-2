@@ -51,16 +51,20 @@ export function startShim(
   env: AgentEnv,
   gateway: GatewayProcess,
   memory: MemoryCheckpoint,
+  // Per-turn prompt-cache/model-call rollup, written by the loopback usage
+  // ingest route (fed by the knox-usage-telemetry openclaw plugin) and — when
+  // cost tracking is on — by the OpenRouter cost proxy. Read by the message +
+  // task paths when they finalize an assistant row. Passed in from boot so the
+  // proxy (started before the shim) shares the same instance; a fresh one is
+  // created when omitted, which keeps standalone callers and tests simple.
+  usageAccumulator?: UsageAccumulator,
 ): Promise<ServerHandle> {
   const db = new MessagingDB(env);
   const cancels = new CancelRegistry();
   // Per-turn delegated-credential store, shared between the message route
   // (writer) and the loopback lookup route (reader for the gateway plugin).
   const delegatedCreds = new DelegatedCredentialStore();
-  // Per-turn prompt-cache/model-call rollup, written by the loopback usage
-  // ingest route (fed by the knox-usage-telemetry openclaw plugin) and read by
-  // the message + task paths when they finalize an assistant row.
-  const usage = new UsageAccumulator();
+  const usage = usageAccumulator ?? new UsageAccumulator();
   // Long-running task executor. Detached from every HTTP request: the task
   // routes hand work to it and return 202, and it reports back to the platform
   // on its own schedule (see task-runner.ts).
