@@ -1,4 +1,10 @@
-import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type ClientRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { Writable } from "node:stream";
 
@@ -191,68 +197,158 @@ function forwardRequest(
   // Host must match the upstream for TLS SNI + OpenRouter routing.
   headers["host"] = targetUrl.host;
 
-  const upstreamReq = forward(
-    {
-      protocol: targetUrl.protocol,
-      hostname: targetUrl.hostname,
-      port: targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80),
-      method: clientReq.method,
-      path: targetUrl.pathname + targetUrl.search,
-      headers,
-    },
-    (upstreamRes) => {
-      // Relay status + headers verbatim so openclaw sees exactly what OpenRouter
-      // sent (minus content-encoding, which we suppressed on the way out).
-      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+  const baseOptions = {
+    protocol: targetUrl.protocol,
+    hostname: targetUrl.hostname,
+    port: targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80),
+    method: clientReq.method,
+    path: targetUrl.pathname + targetUrl.search,
+    headers,
+  };
 
-      // Tee: the forwarded copy governs backpressure; the sniffer is an
-      // in-memory sink that never stalls the pipe. Any sniffer fault is caught
-      // in makeSniffer and cannot reach the forwarded stream.
-      const sniffer = makeSniffer(upstreamRes.headers["content-type"], (sample) => {
-        try {
-          usage.recordCost(sample);
-        } catch (err) {
-          log.debug("cost proxy: recordCost threw (ignored)", { err: String(err) });
-        }
-      });
+  // Response side: relay status + headers verbatim (openclaw sees exactly what
+  // OpenRouter sent, minus the content-encoding we suppressed), while teeing a
+  // copy to the usage.cost sniffer. The forwarded copy governs backpressure; the
+  // sniffer is an in-memory sink that never stalls the pipe, and any sniffer
+  // fault is swallowed so it can never reach the forwarded stream.
+  const onResponse = (upstreamRes: IncomingMessage): void => {
+    clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+    const sniffer = makeSniffer(upstreamRes.headers["content-type"], (sample) => {
+      try {
+        usage.recordCost(sample);
+      } catch (err) {
+        log.debug("cost proxy: recordCost threw (ignored)", { err: String(err) });
+      }
+    });
+    upstreamRes.on("data", (chunk: Buffer) => {
+      try {
+        sniffer.write(chunk);
+      } catch {
+        /* sniffing must never affect forwarding */
+      }
+    });
+    upstreamRes.on("end", () => {
+      try {
+        sniffer.end();
+      } catch {
+        /* ignore */
+      }
+    });
+    upstreamRes.pipe(clientRes);
+  };
 
-      upstreamRes.on("data", (chunk: Buffer) => {
-        try {
-          sniffer.write(chunk);
-        } catch {
-          /* sniffing must never affect forwarding */
-        }
-      });
-      upstreamRes.on("end", () => {
-        try {
-          sniffer.end();
-        } catch {
-          /* ignore */
-        }
-      });
-      upstreamRes.pipe(clientRes);
-    },
-  );
+  const wire = (req: ClientRequest): void => {
+    req.on("error", (err) => {
+      log.warn("cost proxy: upstream request error", { err: String(err) });
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { "content-type": "application/json" });
+        clientRes.end(
+          JSON.stringify({ error: { message: `cost proxy upstream error: ${String(err)}` } }),
+        );
+      } else {
+        clientRes.end();
+      }
+    });
+    // If openclaw hangs up, tear down the upstream call too.
+    clientRes.on("close", () => {
+      if (!req.destroyed) req.destroy();
+    });
+  };
 
-  upstreamReq.on("error", (err) => {
-    log.warn("cost proxy: upstream request error", { err: String(err) });
-    if (!clientRes.headersSent) {
-      clientRes.writeHead(502, { "content-type": "application/json" });
-      clientRes.end(
-        JSON.stringify({ error: { message: `cost proxy upstream error: ${String(err)}` } }),
-      );
-    } else {
-      clientRes.end();
+  // Only a chat-completions POST carries a body worth rewriting. Everything else
+  // (model-catalog GETs, generation lookups, …) streams straight through.
+  const contentType = typeof headers["content-type"] === "string" ? headers["content-type"] : "";
+  const isChatPost =
+    (clientReq.method ?? "").toUpperCase() === "POST" &&
+    contentType.toLowerCase().includes("application/json") &&
+    targetUrl.pathname.endsWith("/chat/completions");
+
+  if (!isChatPost) {
+    const upstreamReq = forward(baseOptions, onResponse);
+    wire(upstreamReq);
+    clientReq.on("aborted", () => {
+      if (!upstreamReq.destroyed) upstreamReq.destroy();
+    });
+    clientReq.pipe(upstreamReq);
+    return;
+  }
+
+  // Chat POST: buffer the body and inject `usage: { include: true }` so OpenRouter
+  // returns the per-request cost. openclaw does not set this, and OpenRouter emits
+  // cost ONLY when asked — without it the response carries token counts but no
+  // cost, which is why the proxy had nothing to record. The injection merges into
+  // any existing `usage` object and touches nothing else. If the body isn't
+  // parseable JSON it is forwarded UNCHANGED, and if it somehow exceeds the cap
+  // (never for a real chat request) it streams through unchanged — a request must
+  // never break for the sake of cost capture.
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let streaming = false;
+  let aborted = false;
+  let upstreamReq: ClientRequest | null = null;
+
+  clientReq.on("aborted", () => {
+    aborted = true;
+    if (upstreamReq && !upstreamReq.destroyed) upstreamReq.destroy();
+  });
+
+  clientReq.on("data", (chunk: Buffer) => {
+    if (streaming) return;
+    chunks.push(chunk);
+    size += chunk.length;
+    if (size > MAX_INJECT_BODY_BYTES) {
+      // Over the cap: forward the original body (unchanged content-length) —
+      // buffered chunks first, then the streamed remainder.
+      streaming = true;
+      upstreamReq = forward(baseOptions, onResponse);
+      wire(upstreamReq);
+      for (const c of chunks) upstreamReq.write(c);
+      chunks.length = 0;
+      clientReq.pipe(upstreamReq);
     }
   });
 
-  // If openclaw hangs up, tear down the upstream call too.
-  clientReq.on("aborted", () => upstreamReq.destroy());
-  clientRes.on("close", () => {
-    if (!upstreamReq.destroyed) upstreamReq.destroy();
+  clientReq.on("end", () => {
+    if (streaming || aborted) return;
+    const raw = Buffer.concat(chunks);
+    const body = injectUsageAccounting(raw) ?? raw;
+    headers["content-length"] = String(body.length);
+    upstreamReq = forward(baseOptions, onResponse);
+    wire(upstreamReq);
+    upstreamReq.end(body);
   });
+}
 
-  clientReq.pipe(upstreamReq);
+/** Bodies up to this size get parsed + rewritten to add usage accounting; larger
+ *  ones stream through unchanged. A real chat request is a few MB at most. */
+const MAX_INJECT_BODY_BYTES = 8_000_000;
+
+/**
+ * Add `usage: { include: true }` to an OpenRouter chat-completions request body
+ * so the response carries the per-request cost. Merges into any existing `usage`
+ * object rather than clobbering it, and leaves every other field untouched.
+ * Returns the re-serialized body, or null when the body is not a JSON object —
+ * in which case the caller forwards the original bytes unchanged.
+ */
+export function injectUsageAccounting(raw: Buffer): Buffer | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const body = parsed as Record<string, unknown>;
+  const existing =
+    body.usage && typeof body.usage === "object" && !Array.isArray(body.usage)
+      ? (body.usage as Record<string, unknown>)
+      : {};
+  body.usage = { ...existing, include: true };
+  try {
+    return Buffer.from(JSON.stringify(body), "utf8");
+  } catch {
+    return null;
+  }
 }
 
 /**
