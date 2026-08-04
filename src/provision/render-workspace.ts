@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { costProxyBaseUrl, costTrackingEnabled } from "../shim/cost-proxy.js";
 import { AgentStorage } from "./supabase-storage.js";
 
 /** Id + on-disk directory of the delegated-credentials OpenClaw plugin shipped in
@@ -639,11 +640,16 @@ export const LOCAL_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
 function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
   const provider = env.LLM_PROVIDER.trim().toLowerCase();
 
-  // Endpoint: explicit override wins; else the ollama provider falls back to
-  // the in-container server. Every other provider uses openclaw's built-in
-  // hosted default (no baseUrl emitted).
-  const baseUrl =
-    env.LLM_BASE_URL ?? (provider === "ollama" ? LOCAL_OLLAMA_BASE_URL : undefined);
+  // Endpoint: when cost tracking is on, OpenRouter traffic is routed through the
+  // in-shim cost proxy (which forwards to the real OpenRouter — LLM_BASE_URL or
+  // the public API — and reads usage.cost off each response). Otherwise an
+  // explicit override wins; else the ollama provider falls back to the
+  // in-container server, and every other provider uses openclaw's built-in
+  // hosted default (no baseUrl emitted). costTrackingEnabled already gates on
+  // provider === "openrouter", so this branch never fires for another provider.
+  const baseUrl = costTrackingEnabled(env)
+    ? costProxyBaseUrl(env)
+    : env.LLM_BASE_URL ?? (provider === "ollama" ? LOCAL_OLLAMA_BASE_URL : undefined);
 
   // Key: use LLM_API_KEY when present. Ollama's OpenAI-compatible endpoint
   // ignores the key, but OpenAI-compatible clients often reject an empty one,

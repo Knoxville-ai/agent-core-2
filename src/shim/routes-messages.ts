@@ -916,7 +916,28 @@ export function buildTokenUsage(
     cache_creation_input_tokens: cache.cacheWrite,
     model_calls: cache.modelCalls,
     ...(cache.resolvedRef ? { resolved_ref: cache.resolvedRef } : {}),
+    // Actual OpenRouter charge for the turn, when the cost proxy correlated it
+    // (see cost-proxy.ts). `cost_source: "openrouter"` marks it authoritative;
+    // the console prefers it over its token×rate estimate. `costed_calls` is the
+    // honest coverage — a turn where it trails `model_calls` had only some calls
+    // priced actually, the rest fall back to the estimate at read time.
+    ...(typeof cache.costUsd === "number" && (cache.costedCalls ?? 0) > 0
+      ? {
+          cost_usd: roundUsd(cache.costUsd),
+          cost_source: "openrouter",
+          costed_calls: cache.costedCalls,
+          ...(typeof cache.upstreamCostUsd === "number"
+            ? { upstream_cost_usd: roundUsd(cache.upstreamCostUsd) }
+            : {}),
+        }
+      : {}),
   };
+}
+
+/** Round a USD amount to 10 decimals — enough for sub-micro-cent per-token
+ *  charges, without carrying IEEE-754 noise into the stored JSON. */
+function roundUsd(value: number): number {
+  return Math.round(value * 1e10) / 1e10;
 }
 
 /**

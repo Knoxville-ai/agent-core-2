@@ -6,7 +6,9 @@ import { maybeStartOllama } from "./openclaw/ollama-process.js";
 import { refreshManifest } from "./provision/manifest.js";
 import { restoreOAuthStore } from "./provision/oauth-store.js";
 import { assertStateDirWritable } from "./provision/state-dir.js";
+import { startCostProxy, costTrackingEnabled } from "./shim/cost-proxy.js";
 import { startShim } from "./shim/server.js";
+import { UsageAccumulator } from "./shim/usage-telemetry.js";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -24,6 +26,21 @@ async function main(): Promise<void> {
   //    the agent uid before dropping privileges; a non-writable mount would
   //    silently lose all session/memory continuity, so we crash instead.
   assertStateDirWritable(env.OPENCLAW_STATE_DIR);
+
+  // 0b. Start the OpenRouter cost proxy BEFORE bootstrap renders openclaw.json,
+  //     so provisioning can point openclaw's OpenRouter baseUrl at a proxy that
+  //     is already listening. The UsageAccumulator is shared with the shim: the
+  //     proxy feeds it actual per-call costs and the message/task paths drain
+  //     them onto each assistant row. Fail-OPEN — if the proxy can't bind we
+  //     disable the flag so openclaw.json renders straight at OpenRouter and the
+  //     vessel runs normally, just without actual-cost capture (the console
+  //     falls back to its token estimate). Availability wins over cost data.
+  const usage = new UsageAccumulator();
+  const costProxy = await startCostProxy(env, usage);
+  if (!costProxy && costTrackingEnabled(env)) {
+    log.warn("cost proxy unavailable; disabling cost tracking for this boot");
+    env.OPENROUTER_COST_TRACKING = false;
+  }
 
   // 1. Bundle-driven bootstrap: fetch capabilities, install skills, validate
   //    env, restore agent-owned memory (playbook.md + notes/, volume-wins),
@@ -68,8 +85,8 @@ async function main(): Promise<void> {
 
   // 4. Start the HTTP shim. /readyz won't return 200 until the gateway
   //    finishes its startup sidecars; Railway's healthcheck handles the
-  //    wait.
-  const shim = await startShim(env, proc, memory);
+  //    wait. The shim shares the UsageAccumulator the cost proxy feeds.
+  const shim = await startShim(env, proc, memory, usage);
 
   // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
@@ -78,6 +95,11 @@ async function main(): Promise<void> {
       await shim.close();
     } catch (err) {
       log.warn("shim close failed", { err: String(err) });
+    }
+    if (costProxy) {
+      await costProxy.close().catch((err) => {
+        log.warn("cost proxy close failed", { err: String(err) });
+      });
     }
     // Backstop: flush any agent-owned memory edited in the last turn before the
     // container stops (the per-turn checkpoint is the primary path).

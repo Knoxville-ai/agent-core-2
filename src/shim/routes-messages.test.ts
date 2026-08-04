@@ -221,4 +221,33 @@ describe("buildTokenUsage prompt-cache decomposition", () => {
   it("still returns undefined when the gateway reported no usage at all", () => {
     expect(buildTokenUsage(null, env, { modelCalls: 3, uncachedInput: 1, cacheRead: 1, cacheWrite: 0 })).toBeUndefined();
   });
+
+  it("stamps the actual OpenRouter cost when the proxy correlated one", () => {
+    const built = buildTokenUsage(usage, env, {
+      modelCalls: 3,
+      uncachedInput: 100,
+      cacheRead: 900,
+      cacheWrite: 0,
+      costUsd: 0.00213,
+      upstreamCostUsd: 0.00195,
+      costedCalls: 3,
+    });
+    expect(built?.cost_usd).toBeCloseTo(0.00213, 10);
+    expect(built?.cost_source).toBe("openrouter");
+    expect(built?.upstream_cost_usd).toBeCloseTo(0.00195, 10);
+    expect(built?.costed_calls).toBe(3);
+  });
+
+  it("omits cost fields when the proxy priced none of the turn's calls", () => {
+    // Cost tracking off, a non-OpenRouter provider, or a correlation miss: the
+    // turn keeps its token breakdown and the console prices it by estimate.
+    const built = buildTokenUsage(usage, env, {
+      modelCalls: 2,
+      uncachedInput: 1000,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    expect(built).not.toHaveProperty("cost_usd");
+    expect(built).not.toHaveProperty("cost_source");
+  });
 });
