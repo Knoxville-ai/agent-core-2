@@ -87,6 +87,11 @@ export async function handleLlmUsageIngest(
   requireGatewayToken(req.headers.authorization, env);
   const body = await readJsonBody<Record<string, unknown>>(req).catch(() => null);
   const sessionKey = typeof body?.session_key === "string" ? body.session_key : "";
+  // openclaw's session id off the llm_output event — the key the cost proxy
+  // summed this turn's per-call cost under (it reads the same id as the request's
+  // `prompt_cache_key`). Optional: absent from an older plugin, in which case the
+  // turn keeps its token breakdown and just gets no actual cost.
+  const sessionId = typeof body?.session_id === "string" ? body.session_id : undefined;
   const sample = parseUsageSample(body);
   if (!sessionKey || !sample) {
     log.debug("llm usage ingest ignored", {
@@ -96,6 +101,6 @@ export async function handleLlmUsageIngest(
     sendJson(res, 200, { ok: true, recorded: false });
     return;
   }
-  usage.add(sessionKey, sample);
+  usage.add(sessionKey, sample, sessionId);
   sendJson(res, 200, { ok: true, recorded: true });
 }

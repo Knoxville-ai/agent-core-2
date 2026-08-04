@@ -38,11 +38,11 @@ export interface CostSample {
   costUsd: number;
   /** Upstream provider's own charge (`usage.cost_details.upstream_inference_cost`). */
   upstreamCostUsd?: number;
-  /** OpenRouter `usage.prompt_tokens` — cache-INCLUSIVE, the join key's input side. */
+  /** OpenRouter `usage.prompt_tokens` — kept for logging/diagnostics only. */
   promptTokens: number;
-  /** OpenRouter `usage.completion_tokens` — the join key's output side. */
+  /** OpenRouter `usage.completion_tokens` — kept for logging/diagnostics only. */
   completionTokens: number;
-  /** Response model id — a soft disambiguator on the correlation. */
+  /** Response model id, for logging. */
   model?: string;
   /** OpenRouter generation id (`gen-…`), kept for audit/debug only. */
   generationId?: string;
@@ -128,72 +128,49 @@ export function parseUsageSample(body: unknown): UsageSample | null {
  * only; it never affects a turn's behavior.
  */
 /**
- * Cap on each correlation buffer. A matched pair is popped within milliseconds
- * (the proxy and the plugin observe the same call almost simultaneously), so
- * these stay near-empty in practice. The cap only matters as a leak backstop:
- * a cost the plugin never reports (or a call the proxy never sees) would
- * otherwise sit here forever. When over the cap we drop the OLDEST unmatched
- * entry — losing at most one call's cost, never unbounded memory.
+ * Cap on the per-session cost map. It holds one entry per session with unclaimed
+ * cost — normally the milliseconds between the proxy recording a call's cost and
+ * the turn's telemetry claiming it. The cap is a leak backstop for sessions whose
+ * telemetry never arrives (a heartbeat/subagent the shim never bracketed): over
+ * the cap we evict the oldest, losing at most one session's cost, never unbounded
+ * memory.
  */
-const MAX_PENDING_CORRELATION = 512;
+const MAX_COST_SESSIONS = 1024;
 
-/** Correlation key: the token counts are identical on both sides of the join —
- *  OpenRouter's `prompt_tokens` == the plugin's `input + cache_read`, and its
- *  `completion_tokens` == the plugin's `output`. Two truly-simultaneous calls
- *  with identical counts can swap, but their costs are then identical too, so
- *  the attributed dollar figure is unaffected. */
-function tupleKey(promptTokens: number, completionTokens: number): string {
-  return `${promptTokens}:${completionTokens}`;
+/** Actual cost accumulated for one openclaw session's in-flight turn. */
+interface SessionCost {
+  costUsd: number;
+  upstreamCostUsd: number;
+  hasUpstream: boolean;
+  /** OpenRouter calls costed this turn — the REAL per-turn call count, which the
+   *  plugin's per-turn `llm_output` event cannot see (it reports model_calls=1). */
+  calls: number;
 }
 
-/** Pop the oldest value queued under `key`, cleaning up the key when it drains. */
-function shiftFrom<T>(map: Map<string, T[]>, key: string): T | undefined {
-  const queue = map.get(key);
-  if (!queue || queue.length === 0) return undefined;
-  const value = queue.shift();
-  if (queue.length === 0) map.delete(key);
-  return value;
-}
-
-/** Append `value` under `key`, evicting the oldest entry across the whole map
- *  once it exceeds `cap`. FIFO so identical repeated calls stay in order. */
-function pushInto<T>(map: Map<string, T[]>, key: string, value: T, cap: number): void {
-  const queue = map.get(key);
-  if (queue) queue.push(value);
-  else map.set(key, [value]);
-  let total = 0;
-  for (const q of map.values()) total += q.length;
-  if (total <= cap) return;
-  // Over the cap: drop the oldest entry in insertion order. Map iteration is
-  // insertion-ordered, so the first non-empty queue holds the oldest value.
-  for (const [k, q] of map) {
-    if (q.length > 0) {
-      q.shift();
-      if (q.length === 0) map.delete(k);
-      break;
-    }
-  }
-}
-
-/** Fold one correlated cost into a turn's running totals. */
-function foldCost(totals: CacheUsageTotals, cost: CostSample): void {
+/** Fold a session's accumulated cost into a turn's running totals. */
+function foldSessionCost(totals: CacheUsageTotals, cost: SessionCost): void {
   totals.costUsd = (totals.costUsd ?? 0) + cost.costUsd;
-  if (typeof cost.upstreamCostUsd === "number") {
+  if (cost.hasUpstream) {
     totals.upstreamCostUsd = (totals.upstreamCostUsd ?? 0) + cost.upstreamCostUsd;
   }
-  totals.costedCalls = (totals.costedCalls ?? 0) + 1;
+  totals.costedCalls = (totals.costedCalls ?? 0) + cost.calls;
 }
 
 export class UsageAccumulator {
   #bySession = new Map<string, CacheUsageTotals>();
-  /** Costs the proxy has reported but no plugin sample has claimed yet. */
-  #pendingCosts = new Map<string, CostSample[]>();
-  /** Sessions whose call arrived before its cost — the reverse race. Each entry
-   *  is a sessionKey awaiting a cost for the given token tuple. */
-  #pendingUsage = new Map<string, string[]>();
-  /** Off until the cost proxy starts. While off, `add` never buffers pending
-   *  usage, so a deployment with no proxy (or a non-OpenRouter provider) does
-   *  no correlation work and cannot accumulate unmatched waiters. */
+  /**
+   * Actual cost accumulated per openclaw SESSION, keyed by the id openclaw
+   * stamps on the request (`prompt_cache_key`). openclaw's `llm_output` hook
+   * fires ONCE per turn with usage summed across the turn's many model calls, so
+   * per-call token-tuple matching cannot work — the plugin's single aggregate
+   * never equals any one call's counts. Instead the proxy sums a session's
+   * per-call costs here as the calls complete, and the turn's telemetry claims
+   * the running total when it lands (all the turn's calls are done by then).
+   */
+  #costBySession = new Map<string, SessionCost>();
+  /** Off until the cost proxy starts. While off, `add`/`recordCost` do no
+   *  correlation work, so a deployment with no proxy (or a non-OpenRouter
+   *  provider) never accumulates anything here. */
   #costCorrelation = false;
 
   /** Turn on cost correlation. Called once, when the cost proxy binds. */
@@ -211,8 +188,15 @@ export class UsageAccumulator {
     });
   }
 
-  /** Fold one model call's usage into the live turn. No-op if none is open. */
-  add(sessionKey: string, sample: UsageSample): void {
+  /**
+   * Fold a turn's usage into the live bucket. No-op if none is open.
+   *
+   * openclaw's `llm_output` fires ONCE per turn with usage summed across the
+   * turn's model calls, so this runs once per turn (which is why `modelCalls`
+   * counts telemetry events, not calls). `sessionId` is openclaw's session id
+   * off that event — the key the proxy summed this turn's actual cost under.
+   */
+  add(sessionKey: string, sample: UsageSample, sessionId?: string): void {
     const totals = this.#bySession.get(sessionKey);
     // No open turn: the sample belongs to something the shim did not start
     // (a heartbeat, a subagent, a cron wake). Drop it rather than inventing a
@@ -224,38 +208,52 @@ export class UsageAccumulator {
     totals.cacheWrite += sample.cache_write;
     if (sample.resolved_ref) totals.resolvedRef = sample.resolved_ref;
 
-    // Correlate this call with the actual cost the proxy read for it. The
-    // plugin's `input` is cache-EXCLUSIVE, so add cache_read back to recover
-    // OpenRouter's cache-inclusive `prompt_tokens` — the value the proxy keyed
-    // its cost by.
+    // Claim the actual cost the proxy summed for this session's turn. openclaw
+    // stamps the same session id on the request (which the proxy keyed by) and
+    // on this llm_output event, so look it up by the openclaw session id; fall
+    // back to the shim's own session key in case the proxy keyed by that. All the
+    // turn's calls are done by the time this fires, so the total is complete.
     if (!this.#costCorrelation) return;
-    const key = tupleKey(sample.input + sample.cache_read, sample.output);
-    const cost = shiftFrom(this.#pendingCosts, key);
-    if (cost) {
-      foldCost(totals, cost);
-    } else {
-      // Cost hasn't arrived yet (rare — the proxy usually wins the race).
-      // Park this session so a late cost can still find it.
-      pushInto(this.#pendingUsage, key, sessionKey, MAX_PENDING_CORRELATION);
-    }
+    const cost = this.#takeSessionCost(sessionId) ?? this.#takeSessionCost(sessionKey);
+    if (cost) foldSessionCost(totals, cost);
   }
 
   /**
-   * Record one call's actual cost, read by the cost proxy off OpenRouter's
-   * response. Matched to a live turn by token tuple — either now (the plugin
-   * sample already landed) or later, when it does.
+   * Add one OpenRouter call's actual cost (read by the cost proxy off the
+   * response) to the running total for `sessionId` — the session openclaw
+   * stamped on the request. Summed across the turn's calls; claimed by `add`
+   * when the turn's telemetry lands.
    */
-  recordCost(sample: CostSample): void {
-    const key = tupleKey(sample.promptTokens, sample.completionTokens);
-    const waitingSessionKey = shiftFrom(this.#pendingUsage, key);
-    if (waitingSessionKey) {
-      const totals = this.#bySession.get(waitingSessionKey);
-      // The turn may have drained already (a straggler cost). Dropping it is
-      // correct — the turn is closed and its row written.
-      if (totals) foldCost(totals, sample);
-      return;
+  recordCost(sessionId: string, sample: CostSample): void {
+    if (!this.#costCorrelation || !sessionId) return;
+    const cur = this.#costBySession.get(sessionId) ?? {
+      costUsd: 0,
+      upstreamCostUsd: 0,
+      hasUpstream: false,
+      calls: 0,
+    };
+    cur.costUsd += sample.costUsd;
+    if (typeof sample.upstreamCostUsd === "number") {
+      cur.upstreamCostUsd += sample.upstreamCostUsd;
+      cur.hasUpstream = true;
     }
-    pushInto(this.#pendingCosts, key, sample, MAX_PENDING_CORRELATION);
+    cur.calls += 1;
+    // Re-insert to move it to the tail, so eviction below drops the least-recent.
+    this.#costBySession.delete(sessionId);
+    this.#costBySession.set(sessionId, cur);
+    if (this.#costBySession.size > MAX_COST_SESSIONS) {
+      const oldest = this.#costBySession.keys().next().value;
+      if (oldest !== undefined) this.#costBySession.delete(oldest);
+    }
+  }
+
+  /** Take and clear a session's accumulated cost, if any. */
+  #takeSessionCost(key: string | undefined): SessionCost | null {
+    if (!key) return null;
+    const cost = this.#costBySession.get(key);
+    if (!cost) return null;
+    this.#costBySession.delete(key);
+    return cost;
   }
 
   /** Take and clear the turn's totals. Returns null when nothing accumulated. */

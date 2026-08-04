@@ -37,7 +37,7 @@ import { loopbackConfig, normalizeUsageEvent } from "./usage.js";
 const POST_TIMEOUT_MS = 2000;
 
 /** POST one sample to the shim. Never throws, never blocks a turn. */
-async function reportUsage(sessionKey, sample) {
+async function reportUsage(sessionKey, sessionId, sample) {
   const { token, url } = loopbackConfig();
   if (!token) return;
   try {
@@ -50,7 +50,15 @@ async function reportUsage(sessionKey, sample) {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ session_key: sessionKey ?? null, sample }),
+        // `session_id` is openclaw's session id — the SAME id it stamps on the
+        // request as `prompt_cache_key`, which the shim's cost proxy sums each
+        // turn's actual OpenRouter cost under. The shim uses it to attach that
+        // cost to this turn. Carries token COUNTS + ids only, never text.
+        body: JSON.stringify({
+          session_key: sessionKey ?? null,
+          session_id: sessionId ?? null,
+          sample,
+        }),
         signal: controller.signal,
       });
     } finally {
@@ -72,7 +80,11 @@ export default definePluginEntry({
       async (event, ctx) => {
         const sample = normalizeUsageEvent(event);
         if (!sample) return;
-        await reportUsage(ctx?.sessionKey ?? event?.sessionKey, sample);
+        await reportUsage(
+          ctx?.sessionKey ?? event?.sessionKey,
+          event?.sessionId ?? ctx?.sessionId,
+          sample,
+        );
       },
       { priority: 40 },
     );
