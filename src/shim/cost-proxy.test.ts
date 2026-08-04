@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   costProxyBaseUrl,
   costTrackingEnabled,
+  injectUsageAccounting,
   resolveUpstreamBase,
   upstreamTarget,
 } from "./cost-proxy.js";
@@ -89,5 +90,43 @@ describe("upstreamTarget", () => {
     expect(upstreamTarget(base, "/chat/v1beta/completions")).toBe(
       "https://openrouter.ai/api/v1/chat/v1beta/completions",
     );
+  });
+});
+
+describe("injectUsageAccounting", () => {
+  const parse = (buf: Buffer | null) => (buf ? JSON.parse(buf.toString("utf8")) : null);
+
+  it("adds usage.include=true so OpenRouter returns per-request cost", () => {
+    const out = parse(
+      injectUsageAccounting(
+        Buffer.from(JSON.stringify({ model: "qwen/qwen3.7-plus", messages: [], stream: true })),
+      ),
+    );
+    expect(out.usage).toEqual({ include: true });
+  });
+
+  it("preserves every other field of the request untouched", () => {
+    const body = {
+      model: "qwen/qwen3.7-plus",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+      stream_options: { include_usage: true },
+      temperature: 0.2,
+    };
+    const out = parse(injectUsageAccounting(Buffer.from(JSON.stringify(body))));
+    expect(out).toEqual({ ...body, usage: { include: true } });
+  });
+
+  it("merges into an existing usage object rather than clobbering it", () => {
+    const out = parse(
+      injectUsageAccounting(Buffer.from(JSON.stringify({ messages: [], usage: { foo: 1 } }))),
+    );
+    expect(out.usage).toEqual({ foo: 1, include: true });
+  });
+
+  it("returns null for a body that is not a JSON object (forward unchanged)", () => {
+    expect(injectUsageAccounting(Buffer.from("not json"))).toBeNull();
+    expect(injectUsageAccounting(Buffer.from("[1,2,3]"))).toBeNull();
+    expect(injectUsageAccounting(Buffer.from("\"a string\""))).toBeNull();
   });
 });
