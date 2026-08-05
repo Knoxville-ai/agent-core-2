@@ -387,7 +387,7 @@ export class TaskRunner {
         });
         await reporter.finish({
           status: "failed",
-          summary: extractFinalAnswer(outcome.text) || null,
+          summary: extractFinalAnswer(outcome.text).answer || null,
           error:
             term.finishReason === "length"
               ? "The run hit the model's output limit before completing; no final result was produced."
@@ -396,10 +396,35 @@ export class TaskRunner {
         return;
       }
 
-      const summary = extractFinalAnswer(outcome.text);
+      const final = extractFinalAnswer(outcome.text);
+      if (!final.hasMarker) {
+        // The prompt tells the model to put `===TASK RESULT===` immediately
+        // before its deliverable. When the buffer has no marker at all, the
+        // model never reached its "I'm done, here's the answer" step — it
+        // stopped mid-work, most often right after a tool call errored, before
+        // deciding the task was done. Reporting `complete` here writes the raw
+        // narration into the outcome summary and the platform materializes a
+        // success outcome, so the ledger reads green while the actual work sat
+        // half-finished. Fail the task instead, keeping the tail of what the
+        // model DID emit so the operator can see where it stalled.
+        log.warn("task run ended without the final-answer marker; reporting failed", {
+          task_id: spec.taskId,
+          output_len: outcome.text.length,
+        });
+        const tail = final.answer.slice(-800);
+        await reporter.finish({
+          status: "failed",
+          summary: tail || null,
+          error:
+            "The run ended without emitting the ===TASK RESULT=== marker. The " +
+            "model likely stalled after a tool error or aborted mid-work " +
+            "before producing a final answer.",
+        });
+        return;
+      }
       await reporter.finish({
         status: "complete",
-        summary: summary || "(the agent produced no output)",
+        summary: final.answer || "(the agent produced no output)",
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -699,18 +724,25 @@ export const FINAL_ANSWER_MARKER = "===TASK RESULT===";
  * Handing that back as the task\'s summary — which is what the caller\'s agent
  * reads and relays to the user — buries the answer in narration.
  *
- * The prompt asks for a marker before the final answer; we take everything
- * after the LAST one. A model that ignores it degrades to the full text, which
- * is exactly the old behavior, so this can only improve the result.
+ * The prompt asks for a marker before the final answer; the answer is
+ * everything after the LAST one. `hasMarker` reports whether the model ever
+ * emitted the marker at all — the caller uses it to decide whether the turn
+ * actually reached a deliverable (see the marker-absence branch in run()).
+ * When no marker is present, `answer` is still the full trimmed text so a
+ * failure summary can carry the tail of what the model DID produce.
  */
-export function extractFinalAnswer(text: string): string {
+export interface FinalAnswer {
+  answer: string;
+  hasMarker: boolean;
+}
+export function extractFinalAnswer(text: string): FinalAnswer {
   const trimmed = text.trim();
   const idx = trimmed.lastIndexOf(FINAL_ANSWER_MARKER);
-  if (idx === -1) return trimmed;
+  if (idx === -1) return { answer: trimmed, hasMarker: false };
   const tail = trimmed.slice(idx + FINAL_ANSWER_MARKER.length).trim();
   // A marker with nothing after it means the model emitted it and then stopped;
   // the text before it is still the best answer we have.
-  return tail || trimmed.slice(0, idx).trim();
+  return { answer: tail || trimmed.slice(0, idx).trim(), hasMarker: true };
 }
 
 /**
