@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   costProxyBaseUrl,
   costTrackingEnabled,
-  injectUsageAccounting,
+  prepareChatBody,
   resolveUpstreamBase,
   upstreamTarget,
 } from "./cost-proxy.js";
@@ -93,16 +93,24 @@ describe("upstreamTarget", () => {
   });
 });
 
-describe("injectUsageAccounting", () => {
-  const parse = (buf: Buffer | null) => (buf ? JSON.parse(buf.toString("utf8")) : null);
+describe("prepareChatBody", () => {
+  const run = (obj: unknown) => {
+    const { body, sessionCacheKey } = prepareChatBody(Buffer.from(JSON.stringify(obj)));
+    return { parsed: JSON.parse(body.toString("utf8")), sessionCacheKey };
+  };
 
   it("adds usage.include=true so OpenRouter returns per-request cost", () => {
-    const out = parse(
-      injectUsageAccounting(
-        Buffer.from(JSON.stringify({ model: "qwen/qwen3.7-plus", messages: [], stream: true })),
-      ),
-    );
-    expect(out.usage).toEqual({ include: true });
+    const { parsed } = run({ model: "qwen/qwen3.7-plus", messages: [], stream: true });
+    expect(parsed.usage).toEqual({ include: true });
+  });
+
+  it("extracts prompt_cache_key as the session the cost is attributed to", () => {
+    const { sessionCacheKey } = run({ messages: [], prompt_cache_key: "task:abc-123" });
+    expect(sessionCacheKey).toBe("task:abc-123");
+  });
+
+  it("returns a null session key when prompt_cache_key is absent", () => {
+    expect(run({ messages: [] }).sessionCacheKey).toBeNull();
   });
 
   it("preserves every other field of the request untouched", () => {
@@ -112,21 +120,22 @@ describe("injectUsageAccounting", () => {
       stream: true,
       stream_options: { include_usage: true },
       temperature: 0.2,
+      prompt_cache_key: "webchat:conv-1",
     };
-    const out = parse(injectUsageAccounting(Buffer.from(JSON.stringify(body))));
-    expect(out).toEqual({ ...body, usage: { include: true } });
+    const { parsed } = run(body);
+    expect(parsed).toEqual({ ...body, usage: { include: true } });
   });
 
   it("merges into an existing usage object rather than clobbering it", () => {
-    const out = parse(
-      injectUsageAccounting(Buffer.from(JSON.stringify({ messages: [], usage: { foo: 1 } }))),
-    );
-    expect(out.usage).toEqual({ foo: 1, include: true });
+    const { parsed } = run({ messages: [], usage: { foo: 1 } });
+    expect(parsed.usage).toEqual({ foo: 1, include: true });
   });
 
-  it("returns null for a body that is not a JSON object (forward unchanged)", () => {
-    expect(injectUsageAccounting(Buffer.from("not json"))).toBeNull();
-    expect(injectUsageAccounting(Buffer.from("[1,2,3]"))).toBeNull();
-    expect(injectUsageAccounting(Buffer.from("\"a string\""))).toBeNull();
+  it("forwards a non-JSON-object body UNCHANGED with a null session key", () => {
+    for (const raw of ["not json", "[1,2,3]", '"a string"']) {
+      const { body, sessionCacheKey } = prepareChatBody(Buffer.from(raw));
+      expect(body.toString("utf8")).toBe(raw); // untouched
+      expect(sessionCacheKey).toBeNull();
+    }
   });
 });

@@ -211,31 +211,44 @@ function forwardRequest(
   // copy to the usage.cost sniffer. The forwarded copy governs backpressure; the
   // sniffer is an in-memory sink that never stalls the pipe, and any sniffer
   // fault is swallowed so it can never reach the forwarded stream.
-  const onResponse = (upstreamRes: IncomingMessage): void => {
-    clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-    const sniffer = makeSniffer(upstreamRes.headers["content-type"], (sample) => {
-      try {
-        usage.recordCost(sample);
-      } catch (err) {
-        log.debug("cost proxy: recordCost threw (ignored)", { err: String(err) });
-      }
-    });
-    upstreamRes.on("data", (chunk: Buffer) => {
-      try {
-        sniffer.write(chunk);
-      } catch {
-        /* sniffing must never affect forwarding */
-      }
-    });
-    upstreamRes.on("end", () => {
-      try {
-        sniffer.end();
-      } catch {
-        /* ignore */
-      }
-    });
-    upstreamRes.pipe(clientRes);
-  };
+  //
+  // `sessionCacheKey` is the session openclaw stamped on THIS request
+  // (`prompt_cache_key`); the captured cost is summed under it so the turn's
+  // telemetry can claim the total. Null for non-chat requests (no cost to
+  // attribute).
+  const makeOnResponse =
+    (sessionCacheKey: string | null) =>
+    (upstreamRes: IncomingMessage): void => {
+      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+      const sniffer = makeSniffer(upstreamRes.headers["content-type"], (sample) => {
+        if (!sessionCacheKey) return;
+        try {
+          usage.recordCost(sessionCacheKey, sample);
+          log.debug("cost proxy: captured cost", {
+            session: sessionCacheKey,
+            cost_usd: sample.costUsd,
+            gen_id: sample.generationId ?? null,
+          });
+        } catch (err) {
+          log.debug("cost proxy: recordCost threw (ignored)", { err: String(err) });
+        }
+      });
+      upstreamRes.on("data", (chunk: Buffer) => {
+        try {
+          sniffer.write(chunk);
+        } catch {
+          /* sniffing must never affect forwarding */
+        }
+      });
+      upstreamRes.on("end", () => {
+        try {
+          sniffer.end();
+        } catch {
+          /* ignore */
+        }
+      });
+      upstreamRes.pipe(clientRes);
+    };
 
   const wire = (req: ClientRequest): void => {
     req.on("error", (err) => {
@@ -264,7 +277,7 @@ function forwardRequest(
     targetUrl.pathname.endsWith("/chat/completions");
 
   if (!isChatPost) {
-    const upstreamReq = forward(baseOptions, onResponse);
+    const upstreamReq = forward(baseOptions, makeOnResponse(null));
     wire(upstreamReq);
     clientReq.on("aborted", () => {
       if (!upstreamReq.destroyed) upstreamReq.destroy();
@@ -273,14 +286,14 @@ function forwardRequest(
     return;
   }
 
-  // Chat POST: buffer the body and inject `usage: { include: true }` so OpenRouter
-  // returns the per-request cost. openclaw does not set this, and OpenRouter emits
-  // cost ONLY when asked — without it the response carries token counts but no
-  // cost, which is why the proxy had nothing to record. The injection merges into
-  // any existing `usage` object and touches nothing else. If the body isn't
-  // parseable JSON it is forwarded UNCHANGED, and if it somehow exceeds the cap
-  // (never for a real chat request) it streams through unchanged — a request must
-  // never break for the sake of cost capture.
+  // Chat POST: buffer the body to (1) read `prompt_cache_key` — the session id
+  // that ties every one of this turn's calls together, so the proxy can sum their
+  // costs and the turn's telemetry can claim the total — and (2) inject
+  // `usage: { include: true }` so OpenRouter returns the per-request cost at all
+  // (openclaw doesn't ask, and OpenRouter emits it only when asked). If the body
+  // isn't parseable JSON it forwards UNCHANGED with no session key, and if it
+  // exceeds the cap (never for a real chat request) it streams through unchanged —
+  // a request must never break for the sake of cost capture.
   const chunks: Buffer[] = [];
   let size = 0;
   let streaming = false;
@@ -297,10 +310,10 @@ function forwardRequest(
     chunks.push(chunk);
     size += chunk.length;
     if (size > MAX_INJECT_BODY_BYTES) {
-      // Over the cap: forward the original body (unchanged content-length) —
-      // buffered chunks first, then the streamed remainder.
+      // Over the cap: forward the original body (unchanged content-length),
+      // without cost capture — buffered chunks first, then the streamed remainder.
       streaming = true;
-      upstreamReq = forward(baseOptions, onResponse);
+      upstreamReq = forward(baseOptions, makeOnResponse(null));
       wire(upstreamReq);
       for (const c of chunks) upstreamReq.write(c);
       chunks.length = 0;
@@ -311,9 +324,13 @@ function forwardRequest(
   clientReq.on("end", () => {
     if (streaming || aborted) return;
     const raw = Buffer.concat(chunks);
-    const body = injectUsageAccounting(raw) ?? raw;
+    const { body, sessionCacheKey } = prepareChatBody(raw);
     headers["content-length"] = String(body.length);
-    upstreamReq = forward(baseOptions, onResponse);
+    log.debug("cost proxy: forwarding chat request", {
+      has_cache_key: Boolean(sessionCacheKey),
+      injected: body !== raw,
+    });
+    upstreamReq = forward(baseOptions, makeOnResponse(sessionCacheKey));
     wire(upstreamReq);
     upstreamReq.end(body);
   });
@@ -324,30 +341,43 @@ function forwardRequest(
 const MAX_INJECT_BODY_BYTES = 8_000_000;
 
 /**
- * Add `usage: { include: true }` to an OpenRouter chat-completions request body
- * so the response carries the per-request cost. Merges into any existing `usage`
- * object rather than clobbering it, and leaves every other field untouched.
- * Returns the re-serialized body, or null when the body is not a JSON object —
- * in which case the caller forwards the original bytes unchanged.
+ * Prepare an OpenRouter chat-completions request body: pull out
+ * `prompt_cache_key` (the session id that ties a turn's calls together, so their
+ * costs can be summed and attributed) and add `usage: { include: true }` (so the
+ * response carries the per-request cost at all). The injection merges into any
+ * existing `usage` object and leaves every other field untouched.
+ *
+ * On a body that is not a JSON object — or that fails to re-serialize — returns
+ * the ORIGINAL bytes and a null session key, so the request forwards unchanged
+ * and simply isn't costed. A request must never break for the sake of cost.
  */
-export function injectUsageAccounting(raw: Buffer): Buffer | null {
+export function prepareChatBody(raw: Buffer): {
+  body: Buffer;
+  sessionCacheKey: string | null;
+} {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString("utf8"));
   } catch {
-    return null;
+    return { body: raw, sessionCacheKey: null };
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const body = parsed as Record<string, unknown>;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { body: raw, sessionCacheKey: null };
+  }
+  const obj = parsed as Record<string, unknown>;
+  const sessionCacheKey =
+    typeof obj.prompt_cache_key === "string" && obj.prompt_cache_key
+      ? obj.prompt_cache_key
+      : null;
   const existing =
-    body.usage && typeof body.usage === "object" && !Array.isArray(body.usage)
-      ? (body.usage as Record<string, unknown>)
+    obj.usage && typeof obj.usage === "object" && !Array.isArray(obj.usage)
+      ? (obj.usage as Record<string, unknown>)
       : {};
-  body.usage = { ...existing, include: true };
+  obj.usage = { ...existing, include: true };
   try {
-    return Buffer.from(JSON.stringify(body), "utf8");
+    return { body: Buffer.from(JSON.stringify(obj), "utf8"), sessionCacheKey };
   } catch {
-    return null;
+    return { body: raw, sessionCacheKey };
   }
 }
 

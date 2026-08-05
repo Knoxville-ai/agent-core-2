@@ -139,95 +139,86 @@ const cost = (over: Partial<CostSample> = {}): CostSample => ({
   ...over,
 });
 
-// The plugin's `input` is cache-EXCLUSIVE, so a call with input=I, cache_read=C,
-// output=O correlates to OpenRouter's prompt_tokens = I+C, completion_tokens = O.
-const callSample = (over: Partial<UsageSample> = {}): UsageSample =>
-  sample({ input: 100, cache_read: 900, output: 50, ...over }); // tuple (1000, 50)
-
+// openclaw's llm_output fires ONCE per turn with usage summed across the turn's
+// calls, so the plugin's `add` runs once per turn carrying openclaw's session id.
+// The proxy records each call's cost under the SAME session id (from the request's
+// prompt_cache_key); the turn claims the running total.
 describe("UsageAccumulator cost correlation", () => {
-  it("folds an actual cost when the proxy wins the race (cost before usage)", () => {
+  it("sums a session's per-call costs and attaches the total to the turn", () => {
     const acc = new UsageAccumulator();
     acc.enableCostCorrelation();
     acc.begin("task:1");
-    acc.recordCost(cost({ costUsd: 0.002, upstreamCostUsd: 0.0018 }));
-    acc.add("task:1", callSample());
+    // openclaw made THREE OpenRouter calls this turn; the proxy costed each.
+    acc.recordCost("sess-1", cost({ costUsd: 0.002, upstreamCostUsd: 0.0018 }));
+    acc.recordCost("sess-1", cost({ costUsd: 0.001, upstreamCostUsd: 0.0009 }));
+    acc.recordCost("sess-1", cost({ costUsd: 0.0005 }));
+    // Telemetry fires ONCE for the turn, carrying the openclaw session id.
+    acc.add("task:1", sample(), "sess-1");
 
     const totals = acc.drain("task:1");
-    expect(totals?.costUsd).toBeCloseTo(0.002, 10);
-    expect(totals?.upstreamCostUsd).toBeCloseTo(0.0018, 10);
-    expect(totals?.costedCalls).toBe(1);
+    expect(totals?.costUsd).toBeCloseTo(0.0035, 10);
+    expect(totals?.upstreamCostUsd).toBeCloseTo(0.0027, 10);
+    expect(totals?.costedCalls).toBe(3); // the REAL call count, though modelCalls=1
+    expect(totals?.modelCalls).toBe(1);
   });
 
-  it("folds an actual cost on the reverse race (usage before cost)", () => {
+  it("falls back to the shim session key when the proxy keyed by that", () => {
     const acc = new UsageAccumulator();
     acc.enableCostCorrelation();
     acc.begin("task:2");
-    acc.add("task:2", callSample());
-    acc.recordCost(cost({ costUsd: 0.003 }));
+    // prompt_cache_key turned out to equal the shim's own session key.
+    acc.recordCost("task:2", cost({ costUsd: 0.004 }));
+    acc.add("task:2", sample(), undefined); // no session id reported
 
-    expect(acc.drain("task:2")?.costUsd).toBeCloseTo(0.003, 10);
+    expect(acc.drain("task:2")?.costUsd).toBeCloseTo(0.004, 10);
   });
 
   it("does NO correlation until enabled (non-OpenRouter / proxy-off deployments)", () => {
     const acc = new UsageAccumulator();
     // enableCostCorrelation NOT called.
     acc.begin("task:3");
-    acc.recordCost(cost());
-    acc.add("task:3", callSample());
+    acc.recordCost("sess-3", cost());
+    acc.add("task:3", sample(), "sess-3");
     expect(acc.drain("task:3")?.costUsd).toBeUndefined();
   });
 
-  it("sums cost across a turn's model calls and counts coverage", () => {
-    const acc = new UsageAccumulator();
-    acc.enableCostCorrelation();
-    acc.begin("task:4");
-    // Two costed calls with distinct token tuples.
-    acc.recordCost(cost({ promptTokens: 1000, completionTokens: 50, costUsd: 0.002 }));
-    acc.add("task:4", callSample({ input: 100, cache_read: 900, output: 50 }));
-    acc.recordCost(cost({ promptTokens: 500, completionTokens: 20, costUsd: 0.001 }));
-    acc.add("task:4", callSample({ input: 500, cache_read: 0, output: 20 }));
-    // A third call the proxy never priced (e.g. a non-OpenRouter fallback call).
-    acc.add("task:4", callSample({ input: 10, cache_read: 0, output: 1 }));
-
-    const totals = acc.drain("task:4");
-    expect(totals?.modelCalls).toBe(3);
-    expect(totals?.costUsd).toBeCloseTo(0.003, 10);
-    expect(totals?.costedCalls).toBe(2); // honest coverage: 2 of 3 calls priced
-  });
-
-  it("attributes concurrent turns' costs to the right session by token tuple", () => {
+  it("attributes concurrent turns' costs to the right session", () => {
     const acc = new UsageAccumulator();
     acc.enableCostCorrelation();
     acc.begin("task:a");
     acc.begin("task:b");
-    // Distinct tuples per turn.
-    acc.recordCost(cost({ promptTokens: 1000, completionTokens: 50, costUsd: 0.01 }));
-    acc.recordCost(cost({ promptTokens: 2000, completionTokens: 99, costUsd: 0.05 }));
-    acc.add("task:b", callSample({ input: 2000, cache_read: 0, output: 99 }));
-    acc.add("task:a", callSample({ input: 1000, cache_read: 0, output: 50 }));
+    acc.recordCost("sess-a", cost({ costUsd: 0.01 }));
+    acc.recordCost("sess-b", cost({ costUsd: 0.05 }));
+    acc.recordCost("sess-a", cost({ costUsd: 0.01 }));
+    acc.add("task:b", sample(), "sess-b");
+    acc.add("task:a", sample(), "sess-a");
 
-    expect(acc.drain("task:a")?.costUsd).toBeCloseTo(0.01, 10);
+    expect(acc.drain("task:a")?.costUsd).toBeCloseTo(0.02, 10);
     expect(acc.drain("task:b")?.costUsd).toBeCloseTo(0.05, 10);
   });
 
-  it("drops a straggler cost that arrives after the turn drained", () => {
+  it("claims a session's cost once, so the next turn starts fresh", () => {
     const acc = new UsageAccumulator();
     acc.enableCostCorrelation();
-    acc.begin("task:5");
-    acc.add("task:5", callSample());
-    acc.drain("task:5"); // turn closed, row written
-    // A late cost for the same tuple must not throw or resurrect the turn.
-    expect(() => acc.recordCost(cost())).not.toThrow();
-    expect(acc.size()).toBe(0);
+    // Turn 1 on a long-lived (webchat) session.
+    acc.begin("webchat:c");
+    acc.recordCost("sess-c", cost({ costUsd: 0.01 }));
+    acc.add("webchat:c", sample(), "sess-c");
+    expect(acc.drain("webchat:c")?.costUsd).toBeCloseTo(0.01, 10);
+    // Turn 2 on the same session, new cost — must not re-count turn 1's.
+    acc.begin("webchat:c");
+    acc.recordCost("sess-c", cost({ costUsd: 0.02 }));
+    acc.add("webchat:c", sample(), "sess-c");
+    expect(acc.drain("webchat:c")?.costUsd).toBeCloseTo(0.02, 10);
   });
 
-  it("ignores a cost whose call never belonged to a tracked turn", () => {
+  it("ignores cost for a session with no open turn, without leaking a bucket", () => {
     const acc = new UsageAccumulator();
     acc.enableCostCorrelation();
-    // No begin() — a heartbeat/subagent call the shim never bracketed.
-    expect(() => acc.recordCost(cost())).not.toThrow();
+    // A heartbeat/subagent call the shim never bracketed.
+    expect(() => acc.recordCost("sess-x", cost())).not.toThrow();
     acc.begin("task:6");
-    acc.add("task:6", callSample({ input: 7, cache_read: 0, output: 7 })); // different tuple
+    acc.add("task:6", sample(), "sess-6"); // different session id
     expect(acc.drain("task:6")?.costUsd).toBeUndefined();
   });
 });
