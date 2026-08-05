@@ -95,8 +95,10 @@ describe("upstreamTarget", () => {
 
 describe("prepareChatBody", () => {
   const run = (obj: unknown) => {
-    const { body, sessionCacheKey } = prepareChatBody(Buffer.from(JSON.stringify(obj)));
-    return { parsed: JSON.parse(body.toString("utf8")), sessionCacheKey };
+    const { body, sessionCacheKey, requestKeys } = prepareChatBody(
+      Buffer.from(JSON.stringify(obj)),
+    );
+    return { parsed: JSON.parse(body.toString("utf8")), sessionCacheKey, requestKeys };
   };
 
   it("adds usage.include=true so OpenRouter returns per-request cost", () => {
@@ -109,8 +111,18 @@ describe("prepareChatBody", () => {
     expect(sessionCacheKey).toBe("task:abc-123");
   });
 
-  it("returns a null session key when prompt_cache_key is absent", () => {
+  it("falls back to the `user` field when prompt_cache_key is absent", () => {
+    const { sessionCacheKey } = run({ messages: [], user: "task:xyz" });
+    expect(sessionCacheKey).toBe("task:xyz");
+  });
+
+  it("returns a null session key when neither prompt_cache_key nor user is set", () => {
     expect(run({ messages: [] }).sessionCacheKey).toBeNull();
+  });
+
+  it("reports the request's top-level field names (diagnostic)", () => {
+    const { requestKeys } = run({ model: "m", messages: [], stream: true });
+    expect(requestKeys).toEqual(expect.arrayContaining(["model", "messages", "stream"]));
   });
 
   it("preserves every other field of the request untouched", () => {
