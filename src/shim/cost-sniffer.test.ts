@@ -158,3 +158,32 @@ describe("sniffUsageCost — non-streaming (JSON)", () => {
     expect(feed(huge, "application/json", 1_000_000)).toBeNull();
   });
 });
+
+describe("sniffUsageCost — diagnostics", () => {
+  it("reports the usage frame's field names and that cost was present", () => {
+    const parser = sniffUsageCost("text/event-stream");
+    parser.push(Buffer.from(sseBody({ prompt_tokens: 10, completion_tokens: 2, cost: 0.001 })));
+    parser.finish();
+    const d = parser.diagnostics();
+    expect(d.sawUsage).toBe(true);
+    expect(d.hadCost).toBe(true);
+    expect(d.keys).toEqual(expect.arrayContaining(["prompt_tokens", "completion_tokens", "cost"]));
+  });
+
+  it("flags a usage frame that has tokens but NO cost field (the live symptom)", () => {
+    const parser = sniffUsageCost("text/event-stream");
+    parser.push(Buffer.from(sseBody({ prompt_tokens: 10, completion_tokens: 2 })));
+    parser.finish();
+    const d = parser.diagnostics();
+    expect(d.sawUsage).toBe(true);
+    expect(d.hadCost).toBe(false);
+    expect(d.keys).not.toContain("cost");
+  });
+
+  it("reports no usage seen for a response that never carried one", () => {
+    const parser = sniffUsageCost("text/event-stream");
+    parser.push(Buffer.from(sseBody(null)));
+    parser.finish();
+    expect(parser.diagnostics().sawUsage).toBe(false);
+  });
+});

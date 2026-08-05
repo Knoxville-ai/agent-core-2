@@ -324,11 +324,12 @@ function forwardRequest(
   clientReq.on("end", () => {
     if (streaming || aborted) return;
     const raw = Buffer.concat(chunks);
-    const { body, sessionCacheKey } = prepareChatBody(raw);
+    const { body, sessionCacheKey, requestKeys } = prepareChatBody(raw);
     headers["content-length"] = String(body.length);
     log.debug("cost proxy: forwarding chat request", {
-      has_cache_key: Boolean(sessionCacheKey),
+      has_session_key: Boolean(sessionCacheKey),
       injected: body !== raw,
+      request_keys: requestKeys,
     });
     upstreamReq = forward(baseOptions, makeOnResponse(sessionCacheKey));
     wire(upstreamReq);
@@ -354,30 +355,38 @@ const MAX_INJECT_BODY_BYTES = 8_000_000;
 export function prepareChatBody(raw: Buffer): {
   body: Buffer;
   sessionCacheKey: string | null;
+  /** Top-level request field NAMES (never values/content) — diagnostic only, to
+   *  discover which field, if any, carries a per-request session identifier. */
+  requestKeys: string[];
 } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString("utf8"));
   } catch {
-    return { body: raw, sessionCacheKey: null };
+    return { body: raw, sessionCacheKey: null, requestKeys: [] };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { body: raw, sessionCacheKey: null };
+    return { body: raw, sessionCacheKey: null, requestKeys: [] };
   }
   const obj = parsed as Record<string, unknown>;
+  const requestKeys = Object.keys(obj);
+  // openclaw's session id is usually `prompt_cache_key`; `user` is the common
+  // OpenAI-style fallback some setups use instead.
   const sessionCacheKey =
-    typeof obj.prompt_cache_key === "string" && obj.prompt_cache_key
+    (typeof obj.prompt_cache_key === "string" && obj.prompt_cache_key
       ? obj.prompt_cache_key
-      : null;
+      : typeof obj.user === "string" && obj.user
+        ? obj.user
+        : null);
   const existing =
     obj.usage && typeof obj.usage === "object" && !Array.isArray(obj.usage)
       ? (obj.usage as Record<string, unknown>)
       : {};
   obj.usage = { ...existing, include: true };
   try {
-    return { body: Buffer.from(JSON.stringify(obj), "utf8"), sessionCacheKey };
+    return { body: Buffer.from(JSON.stringify(obj), "utf8"), sessionCacheKey, requestKeys };
   } catch {
-    return { body: raw, sessionCacheKey };
+    return { body: raw, sessionCacheKey, requestKeys };
   }
 }
 
@@ -405,6 +414,17 @@ function makeSniffer(
       try {
         const sample = parser.finish();
         if (sample) onCost(sample);
+        // One-shot diagnosis of "does OpenRouter return cost inline?" — logs the
+        // usage frame's field NAMES (never values or content) whenever a usage
+        // frame was seen but did not yield a cost. Debug-level, so it's off in
+        // normal operation.
+        const d = parser.diagnostics();
+        if (d.sawUsage && !sample) {
+          log.debug("cost proxy: usage frame had no usable cost", {
+            had_cost: d.hadCost,
+            usage_keys: d.keys,
+          });
+        }
       } catch {
         /* fail-open */
       }

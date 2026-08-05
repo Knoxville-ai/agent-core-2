@@ -27,6 +27,12 @@ export interface UsageCostParser {
   push(chunk: Buffer): void;
   /** Signal end of body; returns the correlated cost sample, or null. */
   finish(): CostSample | null;
+  /**
+   * What the response's usage frame actually contained — for one-shot diagnosis
+   * of "does OpenRouter return cost here?". Field NAMES only (never values or any
+   * message content). `sawUsage` false means no usage frame was seen at all.
+   */
+  diagnostics(): { sawUsage: boolean; hadCost: boolean; keys: string[] };
 }
 
 /** Coerce to a finite number, or undefined. */
@@ -89,6 +95,18 @@ export function sniffUsageCost(contentType: string | undefined): UsageCostParser
   // JSON state: the accumulating body.
   let jsonBuf = "";
 
+  // Diagnostics: the field NAMES of the last usage frame seen, and whether it
+  // carried a numeric `cost`. Names only — never values or message content.
+  const diag = { sawUsage: false, hadCost: false, keys: [] as string[] };
+  function noteUsage(frame: unknown): void {
+    if (!frame || typeof frame !== "object") return;
+    const usage = (frame as Record<string, unknown>).usage;
+    if (!usage || typeof usage !== "object") return;
+    diag.sawUsage = true;
+    diag.keys = Object.keys(usage as Record<string, unknown>);
+    diag.hadCost = typeof (usage as Record<string, unknown>).cost === "number";
+  }
+
   function handleSseLine(line: string): void {
     const trimmed = line.trimEnd();
     if (!trimmed.startsWith("data:")) return;
@@ -100,6 +118,7 @@ export function sniffUsageCost(contentType: string | undefined): UsageCostParser
     } catch {
       return;
     }
+    noteUsage(frame);
     const sample = costSampleFromPayload(frame);
     if (sample) best = sample; // keep the last cost-bearing frame
   }
@@ -144,10 +163,15 @@ export function sniffUsageCost(contentType: string | undefined): UsageCostParser
       }
       if (overflowed || jsonBuf.trim().length === 0) return null;
       try {
-        return costSampleFromPayload(JSON.parse(jsonBuf));
+        const parsed = JSON.parse(jsonBuf);
+        noteUsage(parsed);
+        return costSampleFromPayload(parsed);
       } catch {
         return null;
       }
+    },
+    diagnostics() {
+      return { sawUsage: diag.sawUsage, hadCost: diag.hadCost, keys: diag.keys };
     },
   };
 }
