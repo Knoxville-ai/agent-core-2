@@ -292,7 +292,7 @@ describe("buildTaskPrompt", () => {
 });
 
 describe("extractFinalAnswer", () => {
-  it("returns only what follows the marker", () => {
+  it("returns only what follows the marker, hasMarker true", () => {
     // openclaw's chat-completions stream concatenates every assistant turn, so
     // the raw buffer is the model thinking out loud. Only the tail is the answer.
     const raw = [
@@ -301,23 +301,36 @@ describe("extractFinalAnswer", () => {
       FINAL_ANSWER_MARKER,
       "PC54 Jet Black L: 412 units across 3 warehouses.",
     ].join("\n");
-    expect(extractFinalAnswer(raw)).toBe(
-      "PC54 Jet Black L: 412 units across 3 warehouses.",
-    );
+    expect(extractFinalAnswer(raw)).toEqual({
+      answer: "PC54 Jet Black L: 412 units across 3 warehouses.",
+      hasMarker: true,
+    });
   });
 
   it("uses the LAST marker when the model emits more than one", () => {
     const raw = `first\n${FINAL_ANSWER_MARKER}\nnot this\n${FINAL_ANSWER_MARKER}\nthis one`;
-    expect(extractFinalAnswer(raw)).toBe("this one");
+    expect(extractFinalAnswer(raw)).toEqual({ answer: "this one", hasMarker: true });
   });
 
-  it("falls back to the full text when the model ignores the marker", () => {
-    // Degrades to exactly the previous behavior, so this can only improve things.
-    expect(extractFinalAnswer("  just an answer  ")).toBe("just an answer");
+  it("reports hasMarker=false when the model never emits the marker, so run() fails the task", () => {
+    // The observed poison-pill symptom: a run stops after a tool errored, the
+    // buffer holds only progress notes, and no ===TASK RESULT=== was ever
+    // emitted. The answer field still carries the raw text (so the failure
+    // summary can show the tail), but hasMarker=false is the signal run() uses
+    // to report the task `failed` instead of `complete`.
+    expect(extractFinalAnswer("  just an answer  ")).toEqual({
+      answer: "just an answer",
+      hasMarker: false,
+    });
   });
 
   it("falls back to the preceding text when the marker is last with nothing after", () => {
-    expect(extractFinalAnswer(`the answer\n${FINAL_ANSWER_MARKER}`)).toBe("the answer");
+    // The marker was emitted, so hasMarker=true — the model reached its "I'm
+    // done" step even if the deliverable line was empty.
+    expect(extractFinalAnswer(`the answer\n${FINAL_ANSWER_MARKER}`)).toEqual({
+      answer: "the answer",
+      hasMarker: true,
+    });
   });
 });
 
