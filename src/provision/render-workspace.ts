@@ -670,6 +670,32 @@ function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
   const cfg: Record<string, unknown> = {};
   if (apiKey) cfg.apiKey = apiKey;
   if (baseUrl) cfg.baseUrl = baseUrl;
+
+  // When the cost proxy is intercepting OpenRouter, make openclaw stamp the
+  // session UUID onto every outbound call as `prompt_cache_key` — the id the
+  // proxy sums each turn's actual cost under (see cost-proxy.ts) and the SAME id
+  // the knox-usage-telemetry plugin reports as `session_id`, so the turn's
+  // telemetry can claim that cost. openclaw only emits `prompt_cache_key` when
+  // the RESOLVED model's `compat.supportsPromptCacheKey` is true on the
+  // openai-completions transport (openclaw 2026.5.20:
+  // buildOpenAICompletionsParams → getCompat, gated on
+  // `compat.supportsPromptCacheKey === true`; `cacheRetention` defaults to
+  // "short", which satisfies the transport's `!== "none"` guard). The built-in
+  // OpenRouter catalog never sets that flag, and there is no provider- or
+  // params-level switch for it — the only route is a `models[]` overlay entry
+  // for THIS agent's model. It MERGES onto the built-in provider (openclaw
+  // overlays a configured entry's `compat` onto the discovered dynamic model and
+  // backfills api/baseUrl/context window from the catalog), so apiKey/baseUrl and
+  // the model's pricing/context window are preserved — we add only the compat
+  // flag. `id` is the model id WITHOUT the provider prefix (== LLM_MODEL, since
+  // model.primary is `${LLM_PROVIDER}/${LLM_MODEL}`); `name` is schema-required.
+  // Without this the request carries no session id and the proxy has nothing to
+  // attribute cost to — cost never lands (the symptom this fixes).
+  if (costTrackingEnabled(env) && env.LLM_MODEL) {
+    cfg.models = [
+      { id: env.LLM_MODEL, name: env.LLM_MODEL, compat: { supportsPromptCacheKey: true } },
+    ];
+  }
   return Object.keys(cfg).length > 0 ? cfg : null;
 }
 

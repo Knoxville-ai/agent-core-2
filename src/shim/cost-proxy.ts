@@ -414,17 +414,21 @@ function makeSniffer(
       try {
         const sample = parser.finish();
         if (sample) onCost(sample);
-        // One-shot diagnosis of "does OpenRouter return cost inline?" — logs the
-        // usage frame's field NAMES (never values or content) whenever a usage
-        // frame was seen but did not yield a cost. Debug-level, so it's off in
-        // normal operation.
+        // Self-proving diagnosis of the whole cost path, logged for EVERY chat
+        // response: did OpenRouter send a usage frame, did it carry a numeric
+        // cost, and did we pull a sample — plus the usage frame's field NAMES
+        // (never values or content) and the generation id. One deploy of this
+        // answers "does cost arrive inline at all?" without inference. Debug, so
+        // it's off in normal operation; a cost that lands in the DB is the real
+        // signal, this is the fallback when it doesn't.
         const d = parser.diagnostics();
-        if (d.sawUsage && !sample) {
-          log.debug("cost proxy: usage frame had no usable cost", {
-            had_cost: d.hadCost,
-            usage_keys: d.keys,
-          });
-        }
+        log.debug("cost proxy: sniffer outcome", {
+          saw_usage: d.sawUsage,
+          had_cost: d.hadCost,
+          got_sample: Boolean(sample),
+          usage_keys: d.keys,
+          gen_id: sample?.generationId ?? null,
+        });
       } catch {
         /* fail-open */
       }
