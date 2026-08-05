@@ -104,6 +104,51 @@ describe("buildOpenclawConfig model provider block", () => {
     });
   });
 
+  it("OpenRouter + cost tracking → proxy baseUrl + models[] compat overlay (prompt_cache_key)", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "qwen/qwen3.7-plus",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: true,
+        OPENROUTER_COST_PROXY_PORT: 18790,
+      }),
+      "/ws",
+    );
+    // The provider is pointed at the in-shim cost proxy, and the primary model
+    // carries `compat.supportsPromptCacheKey: true` — the flag that makes openclaw
+    // stamp the session UUID onto each call so the proxy can attribute cost. The
+    // overlay adds ONLY id/name/compat; apiKey + baseUrl stay on the provider.
+    expect(providers(config)).toEqual({
+      openrouter: {
+        apiKey: "sk-or-test",
+        baseUrl: "http://127.0.0.1:18790/api/v1",
+        models: [
+          {
+            id: "qwen/qwen3.7-plus",
+            name: "qwen/qwen3.7-plus",
+            compat: { supportsPromptCacheKey: true },
+          },
+        ],
+      },
+    });
+  });
+
+  it("OpenRouter with cost tracking OFF → no proxy, no models overlay", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "qwen/qwen3.7-plus",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: false,
+      }),
+      "/ws",
+    );
+    // Kill switch off → openclaw talks straight to the built-in OpenRouter
+    // provider (no baseUrl) and no compat overlay is emitted.
+    expect(providers(config)).toEqual({ openrouter: { apiKey: "sk-or-test" } });
+  });
+
   it("hosted model with no key and no base URL → no providers block", () => {
     const config = buildOpenclawConfig(
       makeEnv({ LLM_PROVIDER: "anthropic", LLM_API_KEY: "" }),
