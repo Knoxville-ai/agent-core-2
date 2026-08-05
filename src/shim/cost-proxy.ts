@@ -405,6 +405,17 @@ function makeSniffer(
       try {
         const sample = parser.finish();
         if (sample) onCost(sample);
+        // One-shot diagnosis of "does OpenRouter return cost inline?" — logs the
+        // usage frame's field NAMES (never values or content) whenever a usage
+        // frame was seen but did not yield a cost. Debug-level, so it's off in
+        // normal operation.
+        const d = parser.diagnostics();
+        if (d.sawUsage && !sample) {
+          log.debug("cost proxy: usage frame had no usable cost", {
+            had_cost: d.hadCost,
+            usage_keys: d.keys,
+          });
+        }
       } catch {
         /* fail-open */
       }
