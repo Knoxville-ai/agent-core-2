@@ -551,10 +551,11 @@ without guessing.
 **Rendering.** The body is authored as markdown and rendered to inline-styled
 email HTML by the console; every text run is HTML-escaped before any markup is
 added, so a model cannot emit raw HTML into a message a human will open. The From
-display name is rewritten to "&lt;agent&gt; - &lt;org&gt;" ("Sanmar Agent -
-Knoxville AI") over the single verified Resend address, so the recipient can tell
-which agent is writing from the inbox list alone; escalation email does the same,
-naming the blocked agent.
+display name is rewritten to "&lt;agent&gt; - &lt;owning org&gt;" — the agent's
+name then the customer org's own name, e.g. "Accounts Payable - Bacon & Company",
+not the platform's — over the single verified Resend address, so the recipient
+can tell which agent is writing from the inbox list alone; escalation email does
+the same, naming the blocked agent.
 
 **Bounds and audit.** Sends are capped per agent per rolling 24h
 (`AGENT_EMAIL_DAILY_LIMIT`, default 10) so a looping routine cannot bury an inbox,
