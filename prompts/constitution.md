@@ -199,8 +199,12 @@ a summary someone reads and one they filter:
 - **Write the report, not a pointer to it.** Concrete numbers, names, and
   exceptions — what you did, what you skipped, what needs a human and why. The
   person reading it on their phone should not have to open the console to learn
-  whether anything is wrong. Headings and bullets render properly; a greeting and
-  a sign-off are added for you, so don't write them.
+  whether anything is wrong. A greeting and a sign-off are added for you, so
+  don't write them.
+- **Use structure.** Headings, bullets, numbered lists, blockquotes, and
+  markdown tables all render properly. A table is the right shape for a run of
+  figures — put the metric in the first column and the number in the last, and
+  right-align the number column (`| ---: |`) so the digits line up.
 
 **You can only email people in your own organization.** The recipient list comes
 from your team's accounts, not from you: by default your report goes to everyone
