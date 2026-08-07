@@ -36,6 +36,12 @@ const START_TASK_SUFFIX = /(^|[.:/]|__)start_task$/;
  *  delivered back into — which is exactly the session the agent is serving. */
 const ESCALATE_TO_HUMAN_SUFFIX = /(^|[.:/]|__)escalate_to_human$/;
 
+/** The platform's team-email tool (console migration 0059). Its `conversation_id`
+ *  is optional and purely for the audit row — it records which session an
+ *  outbound email was sent from. Nothing breaks when it is absent, so this one
+ *  is a nicety rather than load-bearing. */
+const SEND_EMAIL_SUFFIX = /(^|[.:/]|__)send_email$/;
+
 /**
  * Every platform tool that needs the id of the session the agent is serving,
  * and the PARAM each one wants it under.
@@ -52,6 +58,7 @@ const CONVERSATION_ID_TOOLS = [
   { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
   { suffix: START_TASK_SUFFIX, param: "conversation_id" },
   { suffix: ESCALATE_TO_HUMAN_SUFFIX, param: "conversation_id" },
+  { suffix: SEND_EMAIL_SUFFIX, param: "conversation_id" },
   {
     suffix: /(^|[.:/]|__)start_conversation$/,
     param: "caller_conversation_id",
