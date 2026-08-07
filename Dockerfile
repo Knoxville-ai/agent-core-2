@@ -117,19 +117,61 @@ RUN /opt/skills-venv/bin/uv pip install --no-cache \
       --python /opt/skills-venv/bin/python \
       'mcp>=1.9.0' anyio
 
-# --- Warm-cache requests for sportsinc-sportslink ----------------------------
-# sportsinc-sportslink declares `install.uv: [requests>=2.28]` in its SKILL.md,
-# and scripts/sportslink.py imports `requests` to reach the SportsLink API. Same
-# rationale as the mcp/anyio bake above: the authoritative install is the
-# RUNTIME provisionSkillDeps step (src/skills/deps.ts), but pre-baking it here
-# means the Sports Inc payables flow still works when the network policy blocks
-# outbound PyPI — otherwise the boot-time `uv pip install requests` soft-fails
-# and sportslink.py exits `config_error` ("the 'requests' package is required").
-# Pinned to the same `requests>=2.28` the skill declares, so the runtime install
-# is a no-op ("already satisfied"). A few hundred KB.
-RUN /opt/skills-venv/bin/uv pip install --no-cache \
+# --- sportsinc-sportslink: API client + scanned-invoice PDF/OCR pipeline ------
+# sportsinc-sportslink declares
+# `install.uv: [requests>=2.28, pypdf>=4.0, pillow>=10.0, playwright>=1.40,
+#               rapidocr-onnxruntime>=1.3]`
+# in its SKILL.md. Same rationale as the mcp/anyio bake above: the authoritative
+# install is the RUNTIME provisionSkillDeps step (src/skills/deps.ts), but
+# pre-baking here means the Sports Inc payables flow still works when the
+# network policy blocks outbound PyPI — otherwise the boot-time `uv pip install`
+# soft-fails and the flow dies mid-run (sportslink.py exits `config_error`
+# "the 'requests' package is required"; invoice_pdf.py cannot import pypdf).
+# Every spec baked below is byte-identical to the skill's, so the runtime
+# install is a no-op ("already satisfied") rather than an upgrade.
+#
+# Why the scanned-document path needs more than `requests`: Sports Inc scans
+# some supplier invoices instead of receiving them as EDI, so the API returns
+# header totals with no line items. Recovering those lines runs
+#   portal download (playwright) → page split + image extract (pypdf, Pillow)
+#   → OCR to text (rapidocr) → arithmetic reconciliation
+# and a missing library anywhere in that chain leaves the document unbillable.
+#
+#   * pypdf      — reads the downloaded PDF, classifies pages, merges multi-page
+#                  portal downloads. Pure Python, tiny.
+#   * Pillow     — converts the embedded scan to PNG. SI's scans are JPEG 2000,
+#                  so this needs a build with openjpeg; the PyPI manylinux
+#                  wheels bundle it (`features.check_codec('jpg_2000')` is
+#                  True). Already satisfied by the 'Pillow>=10.3,<12' baked for
+#                  the graphic-artist stack, so it is NOT re-listed on the uv
+#                  line below — re-resolving it here could float it past that
+#                  `<12` bound. The build-time check asserts the codec is there.
+#   * playwright — installed with Chromium in the block below.
+#   * rapidocr-onnxruntime — the OCR engine (~16 MB), and the reason this bake
+#                  matters most: it ships its PP-OCRv4 det/rec/cls .onnx models
+#                  INSIDE the wheel, so once baked there is no first-use model
+#                  download to be blocked. It reuses the onnxruntime already
+#                  installed for rembg. Without it, ocr.py raises
+#                  `OcrUnavailable` and a 300dpi image goes into context
+#                  instead of text.
+#
+# The apt line is the part the runtime step CANNOT do (it runs unprivileged, as
+# the agent uid — same constraint as the Chromium system libs below):
+# rapidocr-onnxruntime depends on `opencv_python`, the FULL Qt-linked build, not
+# `opencv-python-headless`. Its bundled Qt5Gui links against libGL/libSM/libICE,
+# none of which are in node:24-bookworm-slim, so `import cv2` dies with
+# "libGL.so.1: cannot open shared object file" and OCR silently falls back to
+# images. libglib2.0-0 is listed for completeness (libgthread-2.0 comes from the
+# same package); Chromium's install-deps below also pulls it.
+#
+# Adds ~100 MB, nearly all of it opencv-python.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libsm6 libice6 \
+ && rm -rf /var/lib/apt/lists/* \
+ && /opt/skills-venv/bin/uv pip install --no-cache \
       --python /opt/skills-venv/bin/python \
-      'requests>=2.28'
+      'requests>=2.28' 'pypdf>=4.0' 'rapidocr-onnxruntime>=1.3' \
+ && /opt/skills-venv/bin/python -c "import cv2, rapidocr_onnxruntime, pypdf; from PIL import features; assert features.check_codec('jpg_2000'), 'Pillow lacks JPEG 2000 support'"
 
 # --- Delegated-credential exec shim ------------------------------------------
 # openclaw's chat-completions/embedded run (the path a platform-brokered A2A
