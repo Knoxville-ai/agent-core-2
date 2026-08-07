@@ -477,6 +477,13 @@ agent ──escalate_to_human──▶ platform    inserts an `escalations` row,
                                   parked session is re-invoked with their decision
 ```
 
+**Notification.** Routing still resolves a specific assignee (who owns it in the
+console), but the *email* goes to every member of the escalation's org and carries
+the whole question — context, every question, every option with its description —
+so it can be decided from the inbox and the console link is for recording the
+answer, not discovering what was asked. Whoever answers first unblocks the agent.
+Per-user opt-out: `users.notify_escalations`.
+
 **Parking.** The tool marks the parked conversation `awaiting_escalation_id` (the
 console idle-sweeper skips it) and moves any task running in that conversation to a
 new `waiting_on_human` status. The task reaper only ever touches `status='running'`,
@@ -520,6 +527,42 @@ all). The flag was already on the wire (`BundleCapability.requiresHumanApproval`
 was previously dropped at assembly, so it did nothing; now it drives the escalation
 gate. A gated capability renders even when it has no `promptFragment`, so its
 requirement can never silently vanish.
+
+## Agent-authored email (console migration 0059)
+
+The platform `send_email` MCP tool lets an agent mail a written report to the
+humans in its own org — built for the "email me a daily summary" routine, where a
+scheduled run gathers what the agent did and pushes a recap to inboxes rather than
+waiting for someone to open the console. It complements `report_outcome` (which
+records the result) rather than replacing it; a summary run still closes with an
+outcome.
+
+**The destination set is closed by construction.** Recipients are resolved
+server-side from the *caller's own org* — the agent supplies at most a `to` list
+that can only narrow that set, and an address outside the org is rejected with an
+error naming the reachable ones. This is the load-bearing property: an agent's
+context routinely holds customer and vendor data and is reachable by prompt
+injection, so a send-to-anyone tool would be an exfiltration path. Narrowing the
+destinations to people who already see the agent's work removes the class of
+problem instead of trying to detect it. `get_my_bundle` carries the reachable
+roster (`emailRecipients`) so the model can map "email Zach" to an address
+without guessing.
+
+**Rendering.** The body is authored as markdown and rendered to inline-styled
+email HTML by the console; every text run is HTML-escaped before any markup is
+added, so a model cannot emit raw HTML into a message a human will open. The From
+display name is rewritten per agent ("Sanmar Agent via Knoxville AI") over the
+single verified Resend address.
+
+**Bounds and audit.** Sends are capped per agent per rolling 24h
+(`AGENT_EMAIL_DAILY_LIMIT`, default 10) so a looping routine cannot bury an inbox,
+and every send — success or failure — is written to `public.agent_emails` with the
+subject, body, and resolved recipients. Per-user opt-out lives on
+`users.notify_agent_email`, separate from the escalation switch.
+
+The constitution's *Emailing your team* section is the agent-facing half of this:
+what makes a summary worth reading, and the standing refusal to forward mail
+outside the org however the request is framed.
 
 ## Image attachments on disk
 
