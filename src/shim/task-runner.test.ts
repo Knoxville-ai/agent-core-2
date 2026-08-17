@@ -332,6 +332,93 @@ describe("extractFinalAnswer", () => {
       hasMarker: true,
     });
   });
+
+  it("accepts the production typo: two trailing = instead of three", () => {
+    // The exact incident, byte-for-byte from the stored message. A Purchasing
+    // Agent task collected inventory from a sub-agent, wrote a complete answer,
+    // finished cleanly — and was reported FAILED with "the model likely stalled
+    // after a tool error" because it wrote `===TASK RESULT==`. One character
+    // turned a delivered result into a vendor failure reported to the user.
+    //
+    // Note the marker is welded to the end of the preceding sentence with no
+    // newline before it: that is how openclaw's concatenated stream delivers
+    // it, and why the fence must not require a line START.
+    const raw =
+      "stock. Let me record final progress and deliver the result." +
+      "===TASK RESULT==\n\n## Cutter & Buck Inventory Check";
+    expect(extractFinalAnswer(raw)).toEqual({
+      answer: "## Cutter & Buck Inventory Check",
+      hasMarker: true,
+      markerVariant: "===TASK RESULT==",
+    });
+  });
+
+  it("accepts the canonical marker welded to the preceding sentence", () => {
+    // The pre-existing behaviour that `lastIndexOf` gave for free and which a
+    // line-anchored pattern would have silently broken for every task.
+    const raw = `narration.${FINAL_ANSWER_MARKER}\nthe deliverable`;
+    const got = extractFinalAnswer(raw);
+    expect(got.hasMarker).toBe(true);
+    expect(got.answer).toBe("the deliverable");
+    expect(got.markerVariant).toBeUndefined();
+  });
+
+  it("accepts the variants that carry no meaning, and flags each as a variant", () => {
+    for (const written of [
+      "==TASK RESULT==",
+      "====TASK RESULT====",
+      "===TASK RESULT==",
+      "==TASK RESULT=====",
+      "===task result===",
+      "===TASK  RESULT===",
+      "  ===TASK RESULT===  ",
+      "=== TASK RESULT ===",
+    ]) {
+      const got = extractFinalAnswer(`notes\n${written}\nthe deliverable`);
+      expect(got.hasMarker).toBe(true);
+      expect(got.answer).toBe("the deliverable");
+    }
+  });
+
+  it("does not flag the canonical marker as a variant", () => {
+    const got = extractFinalAnswer(`notes\n${FINAL_ANSWER_MARKER}\nanswer`);
+    expect(got.markerVariant).toBeUndefined();
+  });
+
+  it("ignores the marker mentioned mid-sentence, which would truncate a real answer", () => {
+    // The one false positive worth guarding: an agent explaining the protocol
+    // must not have its answer cut at the explanation. The fence therefore
+    // requires the words alone on their own line.
+    const raw = [
+      "Remember to put ===TASK RESULT=== before the final answer.",
+      FINAL_ANSWER_MARKER,
+      "the real deliverable",
+    ].join("\n");
+    expect(extractFinalAnswer(raw).answer).toBe("the real deliverable");
+
+    const inline = "I was told to write ===TASK RESULT=== but I am still working.";
+    expect(extractFinalAnswer(inline)).toEqual({
+      answer: inline,
+      hasMarker: false,
+    });
+  });
+
+  it("still reports hasMarker=false for a single = or a missing side", () => {
+    // Loose about meaningless variation, not about the shape itself.
+    for (const written of ["=TASK RESULT=", "TASK RESULT", "===TASK RESULT"]) {
+      expect(extractFinalAnswer(`notes\n${written}\nanswer`).hasMarker).toBe(false);
+    }
+  });
+
+  it("is not affected by a previous call's regex state", () => {
+    // The fence is a module-level /g regex; a leaked lastIndex would make
+    // results depend on call order, which is the kind of bug that only shows
+    // up in production under load.
+    const raw = `notes\n${FINAL_ANSWER_MARKER}\nanswer`;
+    expect(extractFinalAnswer(raw)).toEqual(extractFinalAnswer(raw));
+    extractFinalAnswer("a long unrelated buffer with no marker at all");
+    expect(extractFinalAnswer(raw).answer).toBe("answer");
+  });
 });
 
 describe("firstCompleteLine", () => {

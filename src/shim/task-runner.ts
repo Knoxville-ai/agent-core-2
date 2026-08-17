@@ -412,15 +412,32 @@ export class TaskRunner {
           output_len: outcome.text.length,
         });
         const tail = final.answer.slice(-800);
+        // State what was observed, and nothing more. An earlier version of this
+        // message asserted the model "likely stalled after a tool error or
+        // aborted mid-work" — a cause this branch has no evidence for, since a
+        // clean finish with a mis-typed delimiter lands here too. That guess
+        // was read as fact by the calling agent and relayed to the user as a
+        // vendor failure, for work that had actually succeeded.
         await reporter.finish({
           status: "failed",
           summary: tail || null,
           error:
-            "The run ended without emitting the ===TASK RESULT=== marker. The " +
-            "model likely stalled after a tool error or aborted mid-work " +
-            "before producing a final answer.",
+            `The run produced ${outcome.text.length} characters but no ` +
+            `${FINAL_ANSWER_MARKER} line, so there is no way to tell which ` +
+            "part was the deliverable. The summary holds the tail of what it " +
+            "did emit — read that before assuming the work itself failed; a " +
+            "run can finish its work and still miss the marker.",
         });
         return;
+      }
+      if (final.markerVariant) {
+        // Accepted, but surfaced: if models drift toward a spelling we do not
+        // ask for, that belongs in the logs rather than silently absorbed.
+        log.warn("final-answer marker accepted in a non-canonical form", {
+          task_id: spec.taskId,
+          written: final.markerVariant,
+          expected: FINAL_ANSWER_MARKER,
+        });
       }
       await reporter.finish({
         status: "complete",
@@ -716,6 +733,38 @@ export function firstCompleteLine(text: string): string | null {
 export const FINAL_ANSWER_MARKER = "===TASK RESULT===";
 
 /**
+ * What we ACCEPT as that marker, as opposed to what we ask for.
+ *
+ * Models mis-transcribe the delimiter. Observed in production: a task that had
+ * already collected its data from a sub-agent, written a complete answer, and
+ * finished cleanly was reported FAILED because it wrote `===TASK RESULT==` —
+ * two trailing `=` instead of three. An exact `indexOf` turned a finished
+ * deliverable into "the model likely stalled after a tool error", the caller
+ * retried down a slower path, and the user was told the vendor lookup failed
+ * when it had succeeded twice.
+ *
+ * So the fence is deliberately loose about everything that carries no meaning:
+ * the run of `=` on either side (two or more, and the sides need not match),
+ * internal spacing, and case.
+ *
+ * It is strict about exactly one thing — the marker must END its line. That is
+ * the invariant the real data supports, and it is NOT the same as "alone on its
+ * own line": openclaw's chat-completions stream concatenates every assistant
+ * turn with no separator, so in production the marker arrives welded to the
+ * preceding sentence — `...deliver the result.===TASK RESULT==\n\n## Report`.
+ * Requiring a line start would reject the very case this exists to accept.
+ *
+ * Requiring the line to END there is what keeps a model *talking about* the
+ * marker from matching ("Remember to put ===TASK RESULT=== before your
+ * answer."), which is the only false positive worth caring about: a spurious
+ * match silently truncates a real answer at the wrong place.
+ *
+ * `g` so we can take the LAST match, `i` for case. No `m` — the `$` in the
+ * lookahead is meant as end-of-input, with `\n` handled explicitly.
+ */
+const FINAL_ANSWER_FENCE = /={2,}[ \t]*TASK[ \t]+RESULT[ \t]*={2,}[ \t]*(?=\r?\n|$)/gi;
+
+/**
  * Pull the deliverable out of a task run\'s raw output.
  *
  * openclaw\'s chat-completions stream concatenates EVERY assistant turn in an
@@ -725,24 +774,48 @@ export const FINAL_ANSWER_MARKER = "===TASK RESULT===";
  * reads and relays to the user — buries the answer in narration.
  *
  * The prompt asks for a marker before the final answer; the answer is
- * everything after the LAST one. `hasMarker` reports whether the model ever
- * emitted the marker at all — the caller uses it to decide whether the turn
- * actually reached a deliverable (see the marker-absence branch in run()).
- * When no marker is present, `answer` is still the full trimmed text so a
- * failure summary can carry the tail of what the model DID produce.
+ * everything after the LAST one. Matching is by `FINAL_ANSWER_FENCE` rather
+ * than an exact string — see the note there for why a one-character
+ * mis-transcription used to fail a completed task.
+ *
+ * `hasMarker` reports whether the model emitted a recognisable marker at all —
+ * the caller uses it to decide whether the turn actually reached a deliverable
+ * (see the marker-absence branch in run()). When none is present, `answer` is
+ * still the full trimmed text so a failure summary can carry the tail of what
+ * the model DID produce.
  */
 export interface FinalAnswer {
   answer: string;
   hasMarker: boolean;
+  /** The marker as the model actually wrote it, when it differs from
+   *  `FINAL_ANSWER_MARKER`. Logged so drift in how models spell the fence is
+   *  visible rather than silently absorbed. */
+  markerVariant?: string;
 }
 export function extractFinalAnswer(text: string): FinalAnswer {
   const trimmed = text.trim();
-  const idx = trimmed.lastIndexOf(FINAL_ANSWER_MARKER);
-  if (idx === -1) return { answer: trimmed, hasMarker: false };
-  const tail = trimmed.slice(idx + FINAL_ANSWER_MARKER.length).trim();
-  // A marker with nothing after it means the model emitted it and then stopped;
-  // the text before it is still the best answer we have.
-  return { answer: tail || trimmed.slice(0, idx).trim(), hasMarker: true };
+
+  // Last match wins: the prompt asks for the marker once, but a model that
+  // restates it should still have its final section taken as the answer.
+  FINAL_ANSWER_FENCE.lastIndex = 0;
+  let last: RegExpExecArray | null = null;
+  for (let m = FINAL_ANSWER_FENCE.exec(trimmed); m; m = FINAL_ANSWER_FENCE.exec(trimmed)) {
+    last = m;
+    // A zero-length match cannot happen with this pattern, but an empty match
+    // would spin forever if it ever could — advance defensively.
+    if (m.index === FINAL_ANSWER_FENCE.lastIndex) FINAL_ANSWER_FENCE.lastIndex++;
+  }
+  if (!last) return { answer: trimmed, hasMarker: false };
+
+  const written = last[0].trim();
+  const tail = trimmed.slice(last.index + last[0].length).trim();
+  return {
+    // A marker with nothing after it means the model emitted it and then
+    // stopped; the text before it is still the best answer we have.
+    answer: tail || trimmed.slice(0, last.index).trim(),
+    hasMarker: true,
+    ...(written === FINAL_ANSWER_MARKER ? {} : { markerVariant: written }),
+  };
 }
 
 /**
