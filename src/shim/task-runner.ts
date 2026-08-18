@@ -671,6 +671,20 @@ export function buildTaskPrompt(spec: TaskSpec): string {
     "- Do NOT call `report_outcome`. That tool closes a chat session and a task " +
       "is not one; the platform will reject the call. Finishing this turn IS how " +
       "you report — the runtime records your result the moment you stop.",
+    "- ENDING YOUR TURN ENDS THE TASK. There is no later: nothing will be " +
+      "delivered to you, and you will not be woken to pick anything up. If you " +
+      "are waiting on something, wait for it INSIDE this turn. Never end your " +
+      "turn intending to resume — that is not a pause, it is the end of the " +
+      "task, and whatever you were waiting for arrives to nobody.",
+    "- To hand work to ANOTHER agent, use `start_task` and then wait for it " +
+      "with `wait_for_task` / `get_task_result`. Do NOT use `start_conversation` " +
+      "or `send_message` for it: those block and give up after ~50s, which is " +
+      "shorter than real vendor or system work often takes. You have no such " +
+      "limit — nobody is holding a connection open for you — so a blocking call " +
+      "imports a deadline that does not apply to you. If one does return " +
+      "`still_running`, that is NOT a handoff: it means the reply is lost " +
+      "unless you keep waiting. Do not re-send it either; a second send starts " +
+      "a second concurrent turn.",
     "- Do not ask clarifying questions — there is nobody on the other end of " +
       "this turn to answer them. Make a reasonable call, state the assumption " +
       "you made, and continue.",
@@ -707,6 +721,10 @@ function buildResumePrompt(spec: TaskSpec): string {
     "- Your FINAL message is the result delivered back to the caller.",
     `- Put ${FINAL_ANSWER_MARKER} on its own line immediately before that final answer.`,
     "- Do NOT call `report_outcome`; finishing this turn reports the result.",
+    "- Ending your turn ends the task — there is no later. Wait for anything you " +
+      "need INSIDE this turn.",
+    "- Hand work to another agent with `start_task` + `wait_for_task`, never " +
+      "`send_message` (it gives up after ~50s; you have no such limit).",
     "- You may `escalate_to_human` again only if you hit a genuinely NEW blocking " +
       "decision — never to re-ask what was just answered.",
   ].join("\n");

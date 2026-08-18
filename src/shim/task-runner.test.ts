@@ -281,6 +281,37 @@ describe("buildTaskPrompt", () => {
     expect(prompt).toContain("Do NOT call `report_outcome`");
   });
 
+  it("says ending the turn ends the task, and routes downstream work to start_task", () => {
+    // The production failure this exists to prevent: a Purchasing Agent
+    // executing a task reached a vendor agent with send_message, got
+    // `still_running` at the 50s soft deadline, and wrote "I'll yield my turn
+    // now and pick up the result when it arrives." Ending the turn ended the
+    // task. The vendor's answer landed six seconds later, into a conversation
+    // nobody was reading, and the caller was told the check had failed.
+    //
+    // Both halves matter: the tool choice avoids the 50s ceiling a task does
+    // not otherwise have, and the turn rule kills the "I'll resume later"
+    // belief that actually loses the work.
+    const prompt = buildTaskPrompt(makeSpec("a", false));
+    expect(prompt).toContain("ENDING YOUR TURN ENDS THE TASK");
+    expect(prompt).toContain("wait for it INSIDE this turn");
+    expect(prompt).toContain("`start_task`");
+    expect(prompt).toContain("still_running");
+    expect(prompt).toMatch(/Do NOT use `start_conversation`|never `send_message`/);
+  });
+
+  it("repeats both rules on resume, where the same trap applies", () => {
+    const prompt = buildTaskPrompt({
+      ...makeSpec("a", false),
+      resumePrompt: "Ship it.",
+    });
+    // Title case here, SHOUTED in the main prompt — so this also proves the
+    // resume branch was actually taken rather than falling through.
+    expect(prompt).toContain("Ending your turn ends the task");
+    expect(prompt).toContain("`start_task`");
+    expect(prompt).not.toContain("ENDING YOUR TURN ENDS THE TASK");
+  });
+
   it("requires narration before each tool call (stream keepalive + visibility)", () => {
     // A long silent stretch of tool calls is what let the gateway stream go idle
     // past undici's body timeout; the model narrating between calls is the soft
