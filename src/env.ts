@@ -25,6 +25,22 @@ const Schema = z.object({
   LLM_MODEL: z.string().min(1),
   LLM_API_KEY: z.string().optional().default(""),
 
+  //   LLM_COST_TRACKED_MODELS — other model ids this agent may actually run.
+  //
+  // A task can pin a model per request (`x-openclaw-model`, set from a
+  // routine's or task's configured model), so the container default is not the
+  // only model that runs here. Actual cost is correlated by the session id
+  // openclaw stamps as `prompt_cache_key`, and openclaw only stamps it for a
+  // model whose `compat.supportsPromptCacheKey` is true — which the vessel can
+  // only assert via a per-model `models[]` overlay entry (there is no
+  // provider-level switch; verified against the 2026.5.20 schema).
+  //
+  // So a pinned model absent from this list runs fine and records NO actual
+  // cost, silently falling back to the console's token×rate estimate. Comma- or
+  // space-separated BARE ids, same shape as LLM_MODEL (no provider prefix).
+  // Unset → just LLM_MODEL, which is exactly the previous behaviour.
+  LLM_COST_TRACKED_MODELS: z.string().optional(),
+
   // Optional provider base URL override. When set it is written into
   // openclaw.json as models.providers.<LLM_PROVIDER>.baseUrl so the agent
   // can talk to ANY OpenAI-compatible endpoint instead of the provider's

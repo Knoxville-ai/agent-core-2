@@ -83,6 +83,9 @@ export const SKILL_RUN_SPOOL_LEAF = ".knox/skill-runs";
 /** The statuses the table's check constraint accepts. */
 const VALID_STATUSES = new Set(["success", "failure", "needs_confirmation"]);
 
+/** Statuses a `failed_step` is meaningful — and permitted — on. */
+const FAILED_STEP_STATUSES = new Set(["failure", "unknown"]);
+
 /**
  * Caps. A spool is telemetry on the same volume the agent works on, so it must
  * be bounded even when the far end is broken: a database outage must cost the
@@ -126,6 +129,9 @@ export function toSkillRunRow(
 
   const status = typeof raw.status === "string" ? raw.status : "";
   const trace = Array.isArray(raw.trace) ? raw.trace.slice(0, MAX_TRACE_ENTRIES) : [];
+  // An unrecognised status becomes `unknown` — a newer skill inventing one must
+  // not have its runs silently dropped.
+  const normalizedStatus = VALID_STATUSES.has(status) ? status : "unknown";
 
   return {
     run_id: runId,
@@ -136,15 +142,20 @@ export function toSkillRunRow(
     skill_slug: skill,
     skill_version: clampString(raw.skill_version, 64),
     action,
-    // An unrecognised status becomes `unknown` rather than failing the insert:
-    // a newer skill inventing a status must not silently drop its own runs.
-    status: VALID_STATUSES.has(status) ? status : "unknown",
+    status: normalizedStatus,
     attempts: clampInt(raw.attempts, 1, 1_000) ?? 1,
     session_reused: raw.session_reused === true,
     self_repaired: raw.self_repaired === true,
     duration_ms: clampInt(raw.duration_ms, 0, 86_400_000),
     step_count: clampInt(raw.step_count, 0, 100_000),
-    failed_step: clampString(raw.failed_step, 200),
+    // Only a failure names a failed step. A skill still on an older
+    // `_runrecord.py` reports the step a `needs_confirmation` run paused at,
+    // which the table rejects — and rightly so: a healthy pause must not land
+    // in the tally of where a skill breaks. Dropped here rather than allowed to
+    // fail the whole batch's insert.
+    failed_step: FAILED_STEP_STATUSES.has(normalizedStatus)
+      ? clampString(raw.failed_step, 200)
+      : null,
     error_type: clampString(raw.error_type, 64),
     error_message: clampString(raw.error_message, MAX_ERROR_CHARS),
     trace,

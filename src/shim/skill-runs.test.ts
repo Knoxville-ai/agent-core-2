@@ -91,6 +91,30 @@ describe("toSkillRunRow", () => {
     expect(toSkillRunRow(record({ status: "partial" }), ctx)?.status).toBe("unknown");
   });
 
+  it("drops a failed step from a run that did not fail", () => {
+    // A skill on an older `_runrecord.py` reports the step a paused run
+    // reached. The table rejects that (a healthy pause is not a break), so it
+    // is dropped here rather than left to fail the whole batch's insert.
+    const paused = toSkillRunRow(
+      record({ status: "needs_confirmation", failed_step: "lines-added" }),
+      ctx,
+    );
+    expect(paused?.failed_step).toBeNull();
+
+    const succeeded = toSkillRunRow(
+      record({ status: "success", failed_step: "logged-in" }),
+      ctx,
+    );
+    expect(succeeded?.failed_step).toBeNull();
+
+    // ...but a genuinely unknown status may well be a failure, so it keeps one.
+    const unknown = toSkillRunRow(
+      record({ status: "weird", failed_step: "logged-in" }),
+      ctx,
+    );
+    expect(unknown?.failed_step).toBe("logged-in");
+  });
+
   it("accepts needs_confirmation as its own outcome", () => {
     // A paused order is neither a success nor a failure; conflating it with
     // either would misreport the skill's success rate.

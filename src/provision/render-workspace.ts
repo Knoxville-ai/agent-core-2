@@ -336,6 +336,37 @@ export function parseToolList(raw: string | undefined): string[] {
   return out;
 }
 
+/**
+ * Bare model ids that need the `prompt_cache_key` compat flag: the container
+ * default plus anything a task may pin per request.
+ *
+ * Order-preserving and deduped — the same env in must produce byte-identical
+ * config out, and the default must stay first so the common single-model case
+ * renders exactly as it did before `LLM_COST_TRACKED_MODELS` existed.
+ *
+ * A provider-prefixed entry is reduced to its bare id: `model.primary` is
+ * `${LLM_PROVIDER}/${LLM_MODEL}`, so the overlay keys on the id WITHOUT the
+ * prefix, and a caller who pastes the full ref should not silently get an entry
+ * that never matches.
+ */
+export function costTrackedModelIds(env: AgentEnv): string[] {
+  const bare = (ref: string): string => {
+    const trimmed = ref.trim();
+    if (!trimmed.startsWith(`${env.LLM_PROVIDER}/`)) return trimmed;
+    return trimmed.slice(env.LLM_PROVIDER.length + 1);
+  };
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of [env.LLM_MODEL, ...parseToolList(env.LLM_COST_TRACKED_MODELS)]) {
+    const id = bare(raw ?? "");
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
+}
+
 /** @deprecated Back-compat alias for {@link parseToolList}. */
 export const parseToolsDeny = parseToolList;
 
@@ -691,10 +722,21 @@ function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
   // model.primary is `${LLM_PROVIDER}/${LLM_MODEL}`); `name` is schema-required.
   // Without this the request carries no session id and the proxy has nothing to
   // attribute cost to — cost never lands (the symptom this fixes).
-  if (costTrackingEnabled(env) && env.LLM_MODEL) {
-    cfg.models = [
-      { id: env.LLM_MODEL, name: env.LLM_MODEL, compat: { supportsPromptCacheKey: true } },
-    ];
+  //
+  // One entry per model this agent may actually run, not just the container
+  // default: a task can pin a model per request via `x-openclaw-model` (a
+  // routine's configured model does exactly this), and a pinned model missing
+  // from this list gets no `prompt_cache_key`, so its turns record no actual
+  // cost and silently fall back to an estimate. See LLM_COST_TRACKED_MODELS.
+  if (costTrackingEnabled(env)) {
+    const models = costTrackedModelIds(env);
+    if (models.length > 0) {
+      cfg.models = models.map((id) => ({
+        id,
+        name: id,
+        compat: { supportsPromptCacheKey: true },
+      }));
+    }
   }
   return Object.keys(cfg).length > 0 ? cfg : null;
 }

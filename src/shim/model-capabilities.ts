@@ -74,14 +74,48 @@ function heuristicCapabilities(
   return null;
 }
 
+/**
+ * Providers that are routers, not model owners: their model ids carry the
+ * upstream provider as a prefix (`anthropic/claude-sonnet-4-6`,
+ * `openai/gpt-5.4`, `qwen/qwen3.7-plus`).
+ *
+ * Without this, every model on such a provider missed the table AND every
+ * heuristic — all of which key on the upstream provider name — and fell to
+ * `DEFAULT`, i.e. text-only. On a fleet whose default is
+ * `LLM_PROVIDER=openrouter`, that silently dropped image attachments for any
+ * model whose console catalog row left `multimodal` NULL (the case that means
+ * "use the static table").
+ */
+const ROUTER_PROVIDERS = new Set(["openrouter"]);
+
+/**
+ * How many router prefixes to unwrap. One is all a real ref needs
+ * (`openrouter` + `anthropic/claude-…`); the bound is explicit so a
+ * pathological id like `openrouter/openrouter/…` terminates by rule rather
+ * than by happening to run out of string.
+ */
+const MAX_ROUTER_HOPS = 1;
+
 export function lookupCapabilities(
   provider: string,
   model: string,
+  hops = 0,
 ): ModelCapabilities {
   const p = provider.trim().toLowerCase();
   const m = model.trim();
   const exact = MODELS[p]?.[m];
   if (exact) return exact;
+
+  // Unwrap the router hop: resolve against the upstream provider the model id
+  // names. A ref with no prefix falls through to the conservative default
+  // rather than guessing.
+  if (ROUTER_PROVIDERS.has(p) && hops < MAX_ROUTER_HOPS) {
+    const slash = m.indexOf("/");
+    if (slash > 0 && slash < m.length - 1) {
+      return lookupCapabilities(m.slice(0, slash), m.slice(slash + 1), hops + 1);
+    }
+  }
+
   return heuristicCapabilities(p, m) ?? DEFAULT;
 }
 
@@ -104,4 +138,53 @@ export function resolveCapabilities(
     multimodal: overrides.multimodal ?? base.multimodal,
     fileInput: overrides.fileInput ?? base.fileInput,
   };
+}
+
+/**
+ * Split a `"<provider>/<model>"` ref on the FIRST slash.
+ *
+ * Matches openclaw's own `x-openclaw-model` parsing, so
+ * `"openrouter/qwen/qwen3.7-plus"` is provider `openrouter`, model
+ * `qwen/qwen3.7-plus` — the router prefix stays on the model id, which is what
+ * `lookupCapabilities` then unwraps.
+ */
+export function splitModelRef(
+  ref: string,
+): { provider: string; model: string } | null {
+  const trimmed = ref.trim();
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return null;
+  return {
+    provider: trimmed.slice(0, slash),
+    model: trimmed.slice(slash + 1),
+  };
+}
+
+/**
+ * Capabilities for the model that will ACTUALLY run a turn.
+ *
+ * Both turn paths must answer this the same way, and they were answering it in
+ * two places: the task path followed its per-request override, the chat path
+ * always read the container default. That is correct today only because the
+ * chat path has no override to follow — the moment it gains one, the two
+ * silently disagree and attachments are decided for the wrong model. One
+ * helper so that cannot happen.
+ *
+ * The env flags (`LLM_MULTIMODAL` / `LLM_FILE_INPUT`) describe the container
+ * default, so they are deliberately NOT applied to an override.
+ */
+export function capabilitiesForTurn(opts: {
+  defaultProvider: string;
+  defaultModel: string;
+  defaultOverrides?: { multimodal?: boolean; fileInput?: boolean };
+  /** `"<provider>/<model>"` when this turn pinned one; null/undefined otherwise. */
+  modelRef?: string | null;
+}): ModelCapabilities {
+  const override = opts.modelRef ? splitModelRef(opts.modelRef) : null;
+  if (override) return resolveCapabilities(override.provider, override.model);
+  return resolveCapabilities(
+    opts.defaultProvider,
+    opts.defaultModel,
+    opts.defaultOverrides ?? {},
+  );
 }

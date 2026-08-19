@@ -8,7 +8,7 @@ import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, type Principal } from "./auth.js";
 import { buildDynamicContext, parseAdvisoryCaller } from "./dynamic-context.js";
 import type { CancelRegistry } from "./cancel-registry.js";
-import { resolveCapabilities, type ModelCapabilities } from "./model-capabilities.js";
+import { capabilitiesForTurn, type ModelCapabilities } from "./model-capabilities.js";
 import type {
   AttachmentRow,
   InsertAttachmentRow,
@@ -152,9 +152,18 @@ export async function handleSendMessage(
   // 3. Model capabilities + warning for dropped attachment types. Explicit
   // catalog overrides (LLM_MULTIMODAL / LLM_FILE_INPUT) win over the static
   // (provider, model) table so a runtime-added model still forwards media.
-  const caps = resolveCapabilities(env.LLM_PROVIDER, env.LLM_MODEL, {
-    multimodal: env.LLM_MULTIMODAL,
-    fileInput: env.LLM_FILE_INPUT,
+  //
+  // No `modelRef`: this path sends no `x-openclaw-model`, so an interactive
+  // turn always runs the container default. Routed through the shared helper
+  // anyway — the task path resolves the same question, and the day this path
+  // gains an override the two must not answer it differently.
+  const caps = capabilitiesForTurn({
+    defaultProvider: env.LLM_PROVIDER,
+    defaultModel: env.LLM_MODEL,
+    defaultOverrides: {
+      multimodal: env.LLM_MULTIMODAL,
+      fileInput: env.LLM_FILE_INPUT,
+    },
   });
   const warning = fallbackNote(insertedAttachments, caps, env.LLM_PROVIDER, env.LLM_MODEL);
   if (warning) {

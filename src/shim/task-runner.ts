@@ -5,7 +5,7 @@ import type { AgentEnv } from "../env.js";
 import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import type { DelegatedCredentialStore } from "./delegated-credentials.js";
 import { credentialKeyNames } from "./delegated-credentials.js";
-import { resolveCapabilities } from "./model-capabilities.js";
+import { capabilitiesForTurn, splitModelRef } from "./model-capabilities.js";
 import { fetchOpenclawStream } from "./openclaw-gateway-fetch.js";
 import {
   buildTokenUsage,
@@ -488,16 +488,17 @@ export class TaskRunner {
     let assistantMessageId: string | null = null;
 
     // Image/file-input capabilities must track the model that will ACTUALLY run
-    // this turn. When the task carries a per-request model override, resolve caps
-    // from that model — the env LLM_MULTIMODAL/LLM_FILE_INPUT flags describe the
-    // container default, not the override, so they do not apply to it.
-    const overrideRef = spec.model ? splitModelRef(spec.model) : null;
-    const caps = overrideRef
-      ? resolveCapabilities(overrideRef.provider, overrideRef.model)
-      : resolveCapabilities(env.LLM_PROVIDER, env.LLM_MODEL, {
-          multimodal: env.LLM_MULTIMODAL,
-          fileInput: env.LLM_FILE_INPUT,
-        });
+    // this turn — see capabilitiesForTurn, which both turn paths share so they
+    // cannot answer this differently.
+    const caps = capabilitiesForTurn({
+      defaultProvider: env.LLM_PROVIDER,
+      defaultModel: env.LLM_MODEL,
+      defaultOverrides: {
+        multimodal: env.LLM_MULTIMODAL,
+        fileInput: env.LLM_FILE_INPUT,
+      },
+      modelRef: spec.model,
+    });
 
     if (spec.model) {
       log.info("task model override applied", {
@@ -877,24 +878,8 @@ export function isCleanFinish(term: StreamTermination): boolean {
 }
 
 /**
- * Split a "<provider>/<model>" model ref into its parts.
- *
- * Matches openclaw's own `x-openclaw-model` parsing (parseModelRef): the FIRST
- * slash separates provider from model, so a multi-segment OpenRouter id survives
- * intact — "openrouter/qwen/qwen3.7-plus" → provider "openrouter", model
- * "qwen/qwen3.7-plus". Returns null for a bare model with no provider segment
- * (openclaw would resolve that against the vessel's default provider, and we
- * cannot know the capabilities of a provider-less ref), so the caller falls back
- * to the container-default capabilities.
+ * Re-exported from model-capabilities, which now owns it: splitting a model ref
+ * and deciding what that model can do are the same concern, and keeping the
+ * parse next to the router-prefix unwrap that consumes it stops the two drifting.
  */
-export function splitModelRef(
-  ref: string,
-): { provider: string; model: string } | null {
-  const trimmed = ref.trim();
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash === trimmed.length - 1) return null;
-  return {
-    provider: trimmed.slice(0, slash),
-    model: trimmed.slice(slash + 1),
-  };
-}
+export { splitModelRef };

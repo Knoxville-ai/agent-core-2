@@ -134,6 +134,52 @@ describe("buildOpenclawConfig model provider block", () => {
     });
   });
 
+  it("covers every model a task may pin, not just the container default", () => {
+    // A routine can pin any catalog model, which reaches openclaw as
+    // `x-openclaw-model`. A pinned model absent from this overlay gets no
+    // `prompt_cache_key`, so the cost proxy has nothing to correlate and its
+    // turns silently record no actual cost.
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "qwen/qwen3.7-plus",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: true,
+        OPENROUTER_COST_PROXY_PORT: 18790,
+        LLM_COST_TRACKED_MODELS: "anthropic/claude-sonnet-4-6, openai/gpt-5.4",
+      }),
+      "/ws",
+    );
+    expect(
+      (providers(config).openrouter as { models: Array<{ id: string }> }).models.map(
+        (m) => m.id,
+      ),
+    ).toEqual(["qwen/qwen3.7-plus", "anthropic/claude-sonnet-4-6", "openai/gpt-5.4"]);
+  });
+
+  it("keeps the default first, dedupes, and strips a provider prefix", () => {
+    // Default first so the common single-model config renders byte-identically
+    // to before this env var existed. The prefix strip is because the overlay
+    // keys on the BARE id — a pasted full ref would otherwise never match.
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "qwen/qwen3.7-plus",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: true,
+        OPENROUTER_COST_PROXY_PORT: 18790,
+        LLM_COST_TRACKED_MODELS:
+          "openrouter/anthropic/claude-sonnet-4-6 qwen/qwen3.7-plus anthropic/claude-sonnet-4-6",
+      }),
+      "/ws",
+    );
+    expect(
+      (providers(config).openrouter as { models: Array<{ id: string }> }).models.map(
+        (m) => m.id,
+      ),
+    ).toEqual(["qwen/qwen3.7-plus", "anthropic/claude-sonnet-4-6"]);
+  });
+
   it("OpenRouter with cost tracking OFF → no proxy, no models overlay", () => {
     const config = buildOpenclawConfig(
       makeEnv({
