@@ -607,7 +607,7 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
     expect(t.toolSearch).toEqual({ enabled: true, mode: "tools" });
   });
 
-  it("passes through code mode verbatim (openclaw resolves the --permission fallback)", () => {
+  it("passes through code mode verbatim (openclaw resolves the mode at runtime)", () => {
     const t = tools(buildOpenclawConfig(makeEnv({ OPENCLAW_TOOL_SEARCH: "code" }), "/ws"));
     expect(t.toolSearch).toEqual({ enabled: true, mode: "code" });
   });

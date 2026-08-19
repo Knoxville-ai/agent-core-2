@@ -461,6 +461,47 @@ task id from it to stamp `report_task_progress` calls, and `knox-report-outcome`
 deliberately **ignores** `task:` keys (a task id is not a conversation id, and a
 task reports its terminal state through the callback API instead).
 
+## Tool policy (`config/tool_policy.json`)
+
+**What the console may provide:** a per-agent tool policy in Storage, read at
+boot exactly like `config/skills.json`.
+
+Every model call carries the full schema of every tool the agent can reach. An
+agent bound to the Odoo MCP ships ~127 tool schemas — on the order of 40k tokens
+— on *every* call, whether or not the turn is about Odoo. A browser-workflow
+agent that only runs `exec` and the platform MCP pays that on each of its turns
+for nothing.
+
+```json
+{
+  "version": 1,
+  "profile": "minimal",
+  "allow":     ["exec", "group:openclaw", "knoxville_platform__*"],
+  "alsoAllow": ["odoo_production__sales_*"],
+  "deny":      ["odoo_production__*"]
+}
+```
+
+Every field is optional; an absent or unparseable file changes nothing.
+
+**openclaw's semantics, which are full of footguns:**
+
+1. **Deny wins.** A denied tool stays denied even if `allow` also matches it.
+2. **An empty allowlist is fail-OPEN** — everything, minus deny. Only a
+   non-empty list restricts.
+3. **A non-empty allowlist is COMPLETE**: every tool it does not name is denied.
+   An allowlist that forgets the essentials takes away exec, delegation, memory
+   and outcome reporting — the agent boots, answers, and can do nothing, with no
+   error to explain it. **The vessel therefore appends `group:openclaw`,
+   `group:plugins` and `knoxville_platform__*` to any non-empty allowlist**, so
+   the console cannot brick an agent by omission.
+4. `allow` and `alsoAllow` are mutually exclusive (openclaw rejects both); a file
+   setting both keeps `allow`.
+
+`OPENCLAW_TOOLS_ALLOW` / `_DENY` / `_PROFILE` still exist and **win over this
+file** — they are the per-service break-glass, and an operator using one is
+debugging.
+
 ## Skill run records (console migration 0062)
 
 **What the console must provide:** a `public.skill_runs` table. The vessel

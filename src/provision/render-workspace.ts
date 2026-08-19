@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { costProxyBaseUrl, costTrackingEnabled } from "../shim/cost-proxy.js";
+import { EMPTY_TOOL_POLICY, type ToolPolicy } from "../skills/tool-policy.js";
 import { AgentStorage } from "./supabase-storage.js";
 
 /** Id + on-disk directory of the delegated-credentials OpenClaw plugin shipped in
@@ -187,10 +188,15 @@ export interface RenderWorkspaceInput {
   /** Final SOUL.md contents — already assembled with capability prompts. */
   assembledSoul: string;
   blobs: PromptBlobs;
+  /** Console-managed per-agent tool policy (`config/tool_policy.json`). Must be
+   *  the SAME value the early boot write used, or the two config writes disagree
+   *  and the second silently changes what the model can reach mid-boot. */
+  toolPolicy?: ToolPolicy;
 }
 
 export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void> {
   const { env, assembledSoul, blobs } = input;
+  const toolPolicy = input.toolPolicy ?? EMPTY_TOOL_POLICY;
   const stateDir = env.OPENCLAW_STATE_DIR;
   const ws = join(stateDir, "workspace");
   await mkdir(join(ws, "skills"), { recursive: true });
@@ -212,8 +218,8 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
   // openclaw.json is also written earlier in bootstrap (before any skill
   // install) so the `openclaw skills install` CLI validates against a current,
   // valid config. Re-writing it here keeps renderWorkspace self-contained and
-  // idempotent — same env in, same file out.
-  await writeOpenclawConfig(env);
+  // idempotent — same env AND same tool policy in, same file out.
+  await writeOpenclawConfig(env, toolPolicy);
 
   log.info("workspace rendered", {
     stateDir,
@@ -303,11 +309,14 @@ export function parseExtraMcpServers(
  * install fails and the agent boots without its skills. buildOpenclawConfig is
  * a pure function of env, so both writes produce identical bytes.
  */
-export async function writeOpenclawConfig(env: AgentEnv): Promise<void> {
+export async function writeOpenclawConfig(
+  env: AgentEnv,
+  toolPolicy: ToolPolicy = EMPTY_TOOL_POLICY,
+): Promise<void> {
   const stateDir = env.OPENCLAW_STATE_DIR;
   const ws = join(stateDir, "workspace");
   await mkdir(ws, { recursive: true });
-  const config = buildOpenclawConfig(env, ws);
+  const config = buildOpenclawConfig(env, ws, toolPolicy);
   await writeFile(
     join(stateDir, "openclaw.json"),
     JSON.stringify(config, null, 2),
@@ -375,10 +384,15 @@ export const parseToolsDeny = parseToolList;
  * `undefined` when off (so no key is emitted and the config bytes are unchanged
  * for agents that have not opted in).
  *
- * "code" mode requires the node `--permission` flag, which the vessel image
- * does not set; openclaw would silently fall back to "tools" at runtime. We
- * emit exactly what was asked and let openclaw resolve, rather than second-
- * guessing the flag here.
+ * Both modes are genuinely available on this image. An earlier note here said
+ * "code" needs a node `--permission` flag the vessel does not set and would
+ * silently degrade to "tools" — that was wrong: openclaw gates code mode on
+ * `process.allowedNodeEnvironmentFlags.has("--permission")`, which asks whether
+ * the node BUILD accepts the flag (true on node >= 20; this image is node:24),
+ * and it passes `--permission` to the subprocess it spawns itself.
+ *
+ * We still emit exactly what was asked and let openclaw resolve. The reason to
+ * prefer "tools" is behavioural, not a missing capability — see env.ts.
  */
 export function resolveToolSearchConfig(
   value: "off" | "tools" | "code" | undefined,
@@ -413,7 +427,11 @@ export function resolveHeartbeatEvery(env: AgentEnv): string {
 
 /** Exported for unit tests — builds the openclaw.json object from env + the
  *  rendered workspace path. */
-export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
+export function buildOpenclawConfig(
+  env: AgentEnv,
+  workspace: string,
+  toolPolicy: ToolPolicy = EMPTY_TOOL_POLICY,
+): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
   if (env.PLATFORM_MCP_URL) {
     mcpServers.knoxville_platform = {
@@ -442,14 +460,26 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
   }
 
   // Optional per-agent tool policy lists (see env.ts / the tools block below).
-  const toolsDeny = parseToolList(env.OPENCLAW_TOOLS_DENY);
-  const toolsAllow = parseToolList(env.OPENCLAW_TOOLS_ALLOW);
+  // Env wins over the Storage policy. The env vars are the per-Railway-service
+  // expert lever and the break-glass: an operator who has set one is debugging
+  // something, and a console-managed file should not quietly override them.
+  const toolsDeny = parseToolList(env.OPENCLAW_TOOLS_DENY).length
+    ? parseToolList(env.OPENCLAW_TOOLS_DENY)
+    : toolPolicy.deny;
+  const toolsAllow = parseToolList(env.OPENCLAW_TOOLS_ALLOW).length
+    ? parseToolList(env.OPENCLAW_TOOLS_ALLOW)
+    : toolPolicy.allow;
   // openclaw rejects a scope that sets BOTH allow and alsoAllow. loadEnv already
   // fails fast on that combination; this is defense in depth so a config built
   // from a hand-made env (tests, callers that bypass loadEnv) can never emit the
   // invalid pair — `allow` wins, `alsoAllow` is dropped.
+  const envAlsoAllow = parseToolList(env.OPENCLAW_TOOLS_ALSO_ALLOW);
   const toolsAlsoAllow =
-    toolsAllow.length > 0 ? [] : parseToolList(env.OPENCLAW_TOOLS_ALSO_ALLOW);
+    toolsAllow.length > 0
+      ? []
+      : envAlsoAllow.length
+        ? envAlsoAllow
+        : toolPolicy.alsoAllow;
   // Root-level tools.toolSearch (deferred discovery); undefined => not emitted.
   const toolSearch = resolveToolSearchConfig(env.OPENCLAW_TOOL_SEARCH);
 
@@ -551,7 +581,9 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
       exec: {
         pathPrepend: [EXEC_SHIM_BIN, SKILLS_VENV_BIN],
       },
-      ...(env.OPENCLAW_TOOLS_PROFILE ? { profile: env.OPENCLAW_TOOLS_PROFILE } : {}),
+      ...(env.OPENCLAW_TOOLS_PROFILE || toolPolicy.profile
+        ? { profile: env.OPENCLAW_TOOLS_PROFILE || toolPolicy.profile }
+        : {}),
       ...(toolsAllow.length > 0 ? { allow: toolsAllow } : {}),
       ...(toolsAlsoAllow.length > 0 ? { alsoAllow: toolsAlsoAllow } : {}),
       ...(toolsDeny.length > 0 ? { deny: toolsDeny } : {}),

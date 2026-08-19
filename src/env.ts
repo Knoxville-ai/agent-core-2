@@ -157,10 +157,15 @@ const Schema = z.object({
   //
   // Prefer OPENCLAW_TOOLS_DENY for coarse cuts ("this agent needs zero Odoo":
   // `deny=odoo_production__*`) — it cannot brick the agent by omission the way a
-  // too-narrow allowlist can. Reserve ALLOW for deliberate lockdown. The
-  // console-managed per-agent policy table (agent_mcp_tool_policies) will drive
-  // this automatically with a complete, fail-open allowlist; until then this is
-  // an expert, per-Railway-service lever.
+  // too-narrow allowlist can. Reserve ALLOW for deliberate lockdown.
+  //
+  // These env vars are now the per-service OVERRIDE and the break-glass. The
+  // routine path is `config/tool_policy.json` in Storage (see
+  // ../skills/tool-policy.ts), which the console can change without a redeploy
+  // and which adds the essential tools to any allowlist so it cannot brick an
+  // agent by omission. Setting either env var here wins over that file — an
+  // operator who reaches for it is debugging, and a console-managed file should
+  // not quietly override them.
   OPENCLAW_TOOLS_ALLOW: z.string().optional(),
   OPENCLAW_TOOLS_ALSO_ALLOW: z.string().optional(),
   //   OPENCLAW_TOOL_SEARCH — deferred tool discovery (openclaw tools.toolSearch).
@@ -177,9 +182,17 @@ const Schema = z.object({
   // resident" split on this path. On weaker models (the qwen fleet already
   // reaches for the wrong tool) forcing a search->describe->call dance for
   // every action is a real behavioral risk and adds round trips. Turn it on for
-  // ONE agent, eval it, then widen. `code` mode needs the node `--permission`
-  // flag (absent in our image) and silently falls back to `tools`, so prefer
-  // `tools` explicitly.
+  // ONE agent, eval it, then widen — that behavioural caution is the reason
+  // this is off, and it still stands.
+  //
+  // A correction: earlier comments here claimed `code` mode needs a node
+  // `--permission` flag our image lacks, and silently degrades to `tools`. That
+  // is wrong. openclaw gates code mode on
+  // `process.allowedNodeEnvironmentFlags.has("--permission")`, which asks
+  // whether the node BUILD accepts the flag — true on node >= 20, and this
+  // image is node:24 — and openclaw passes `--permission` to the short-lived
+  // subprocess it spawns itself. So `code` would genuinely run. Prefer `tools`
+  // for the behavioural reason above, not because `code` is unavailable.
   OPENCLAW_TOOL_SEARCH: z.enum(["off", "tools", "code"]).default("off"),
   //   OPENCLAW_TOOLS_ESCALATE — comma/space-separated tool ids the console flagged
   //                            as requiring human approval before use. Rendered

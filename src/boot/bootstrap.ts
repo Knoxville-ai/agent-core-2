@@ -20,6 +20,7 @@ import {
   writeOpenclawConfig,
 } from "../provision/render-workspace.js";
 import { loadBootListSkills } from "../skills/boot-list.js";
+import { EMPTY_TOOL_POLICY, loadToolPolicy } from "../skills/tool-policy.js";
 import { ClawhubSkillResolver } from "../skills/clawhub.js";
 import { provisionSkillDeps } from "../skills/deps.js";
 import {
@@ -80,7 +81,16 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   // the end of boot, which would be too late: every skill install would fail
   // and the agent would come up with no skills. renderWorkspace writes the same
   // file again later; buildOpenclawConfig is pure so the bytes are identical.
-  await writeOpenclawConfig(env);
+  // Console-managed per-agent tool policy. Loaded BEFORE the config is written
+  // because a non-empty allowlist changes which tools the skill-install CLI
+  // itself sees. Soft-fails to an empty policy: a Storage hiccup must not brick
+  // a boot, and an empty policy is exactly today's behaviour.
+  const toolPolicy = await loadToolPolicy(env).catch((err) => {
+    log.warn("tool policy load failed; continuing with none", { err: String(err) });
+    return EMPTY_TOOL_POLICY;
+  });
+
+  await writeOpenclawConfig(env, toolPolicy);
 
   let installedSkills: InstalledSkill[] = [];
   if (bundle) {
@@ -153,7 +163,7 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
     playbook,
     escalatedTools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
   });
-  await renderWorkspace({ env, assembledSoul: systemPrompt, blobs });
+  await renderWorkspace({ env, assembledSoul: systemPrompt, blobs, toolPolicy });
 
   log.info("bootstrap complete", {
     assignments: bundle?.assignments.length ?? 0,
