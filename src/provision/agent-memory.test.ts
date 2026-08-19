@@ -16,14 +16,16 @@ import { MemoryCheckpoint, type StorageLike } from "./agent-memory.js";
 /** In-memory StorageLike: key (relative to agent prefix) → contents. */
 class FakeStorage implements StorageLike {
   files = new Map<string, string>();
+  contentTypes = new Map<string, string>();
   uploads: string[] = [];
   removes: string[] = [];
 
   async downloadText(rel: string): Promise<string | null> {
     return this.files.get(rel) ?? null;
   }
-  async uploadText(rel: string, body: string): Promise<void> {
+  async uploadText(rel: string, body: string, contentType: string): Promise<void> {
     this.files.set(rel, body);
+    this.contentTypes.set(rel, contentType);
     this.uploads.push(rel);
   }
   async list(rel: string): Promise<string[]> {
@@ -170,5 +172,68 @@ describe("MemoryCheckpoint", () => {
     expect(storage.uploads).toEqual(["state/notes/a.md"]);
     expect(storage.files.get("state/notes/a.md")).toBe("a2");
     expect(storage.files.get("memory/playbook.md")).toBe("v1");
+  });
+
+  it("round-trips a skill overlay, which is what makes a learned fix durable", async () => {
+    // `workspace/skills/` is wiped and reinstalled from ClawHub on every boot,
+    // so a fix written into a skill's own files lasts exactly until the next
+    // restart. Overlays live in a SIBLING directory the wipe never touches.
+    const storage = new FakeStorage();
+    writeWs(
+      "skill-overlays/drivethru-adidas-click.json",
+      JSON.stringify({ selectors: { "carts.list": ".o-newCartsList" } }),
+    );
+
+    const mc = new MemoryCheckpoint({ workspace, storage });
+    await mc.checkpoint();
+
+    const key = "state/skill-overlays/drivethru-adidas-click.json";
+    expect(storage.files.get(key)).toContain("o-newCartsList");
+    // JSON, not markdown: uploadText hardcoded text/markdown before overlays.
+    expect(storage.contentTypes.get(key)).toBe("application/json");
+
+    // A fresh container with an empty volume gets the fix back.
+    const fresh = mkdtempSync(join(tmpdir(), "knox-mem-overlay-"));
+    try {
+      await new MemoryCheckpoint({ workspace: fresh, storage }).restore();
+      expect(
+        readFileSync(join(fresh, "skill-overlays/drivethru-adidas-click.json"), "utf8"),
+      ).toContain("o-newCartsList");
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  it("mirrors an overlay deletion, so a reverted fix does not come back", async () => {
+    // isAgentOwned gates the DELETE path specifically. Without the overlay
+    // prefix there the key would be dropped from tracking rather than removed
+    // from Storage — and the next boot would restore the reverted fix.
+    const storage = new FakeStorage();
+    storage.files.set("state/skill-overlays/drivethru-sanmar.json", "{}");
+
+    const mc = new MemoryCheckpoint({ workspace, storage });
+    await mc.restore();
+    expect(existsSync(join(workspace, "skill-overlays/drivethru-sanmar.json"))).toBe(true);
+
+    rmSync(join(workspace, "skill-overlays/drivethru-sanmar.json"));
+    await mc.checkpoint();
+    expect(storage.removes).toContain("state/skill-overlays/drivethru-sanmar.json");
+  });
+
+  it("still never writes back console-authored prompts once overlays exist", async () => {
+    // The exclusion guard, re-asserted with the third namespace in play: the
+    // upload list is exact, so a namespace that leaked would show up here.
+    const storage = new FakeStorage();
+    writeWs("SOUL.md", "edited locally");
+    writeWs("playbook.md", "agent memory");
+    writeWs("skill-overlays/x.json", "{}");
+
+    await new MemoryCheckpoint({ workspace, storage }).checkpoint();
+
+    for (const key of CONSOLE_KEYS) expect(storage.files.has(key)).toBe(false);
+    expect(storage.uploads).toEqual([
+      "memory/playbook.md",
+      "state/skill-overlays/x.json",
+    ]);
   });
 });

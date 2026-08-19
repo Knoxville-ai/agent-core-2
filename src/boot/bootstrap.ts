@@ -143,7 +143,17 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   // only touches workspace/skills/) and never touches the console-authored
   // prompts. index.ts reuses this instance — see BootstrapResult.memory.
   const memory = MemoryCheckpoint.fromEnv(env);
-  await memory.restore();
+  // Soft-fail. Storage reads already degrade to null, but the writes this makes
+  // — mkdir + writeFile per restored file — can throw on a full or read-only
+  // volume, and an unguarded throw here brings the whole agent down. Losing the
+  // restore costs the playbook, notes and learned selector fixes for this boot;
+  // they are still in Storage, and the next boot picks them up. That is a far
+  // better outcome than a container that will not start.
+  await memory.restore().catch((err) => {
+    log.warn("agent memory restore failed; continuing without it", {
+      err: String(err),
+    });
+  });
   const playbook = await readFileOrNull(
     join(env.OPENCLAW_STATE_DIR, "workspace", "playbook.md"),
   );

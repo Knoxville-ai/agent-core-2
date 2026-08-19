@@ -26,6 +26,7 @@ import { AgentStorage } from "./supabase-storage.js";
  */
 
 const MD_CONTENT_TYPE = "text/markdown";
+const JSON_CONTENT_TYPE = "application/json";
 
 // Agent-owned single file: the playbook (already downloaded by boot today).
 const PLAYBOOK_LOCAL = "playbook.md"; // relative to workspace/
@@ -35,6 +36,22 @@ const PLAYBOOK_STORAGE = "memory/playbook.md";
 // prefix so it can never collide with the console's `memory/` prompts.
 const NOTES_LOCAL_DIR = "notes"; // workspace/notes/
 const NOTES_STORAGE_PREFIX = "state/notes";
+
+// Agent-authored SKILL OVERLAYS: learned selector fixes, one JSON file per
+// skill slug. Also under the reserved `state/` prefix.
+//
+// This is what makes a repair outlive the container. `workspace/skills/` is
+// wiped and reinstalled from ClawHub on every boot, so a fix written into a
+// skill's own files lasts exactly until the next restart. Overlays live in a
+// SIBLING directory that the wipe never touches, and are re-applied by the
+// skill itself at import.
+//
+// Flat — one file per slug, not a tree. `listMarkdown` is non-recursive and
+// AgentStorage.list has an unpaginated ceiling, so a nested layout would mean
+// new storage plumbing and a new fake in every test for no gain: the overlay is
+// a small key→selector map, which is one file's worth of content.
+const OVERLAYS_LOCAL_DIR = "skill-overlays"; // workspace/skill-overlays/
+const OVERLAYS_STORAGE_PREFIX = "state/skill-overlays";
 
 /** Subset of AgentStorage that MemoryCheckpoint needs — lets tests inject a fake. */
 export interface StorageLike {
@@ -60,8 +77,8 @@ async function fileExists(path: string): Promise<boolean> {
   return (await readFileOrNull(path)) != null;
 }
 
-/** Flat list of `*.md` basenames directly under a dir; [] if the dir is absent. */
-async function listMarkdown(dir: string): Promise<string[]> {
+/** Flat list of basenames with `suffix` directly under a dir; [] if absent. */
+async function listFiles(dir: string, suffix: string): Promise<string[]> {
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -69,8 +86,18 @@ async function listMarkdown(dir: string): Promise<string[]> {
     return [];
   }
   return entries
-    .filter((e) => e.isFile() && e.name.endsWith(".md"))
+    .filter((e) => e.isFile() && e.name.endsWith(suffix))
     .map((e) => e.name);
+}
+
+/** Flat list of `*.md` basenames directly under a dir; [] if the dir is absent. */
+async function listMarkdown(dir: string): Promise<string[]> {
+  return listFiles(dir, ".md");
+}
+
+/** Content type for a storage key, since uploads are not all markdown now. */
+function contentTypeFor(storageKey: string): string {
+  return storageKey.endsWith(".json") ? JSON_CONTENT_TYPE : MD_CONTENT_TYPE;
 }
 
 export class MemoryCheckpoint {
@@ -96,7 +123,8 @@ export class MemoryCheckpoint {
   private isAgentOwned(storageKey: string): boolean {
     return (
       storageKey === PLAYBOOK_STORAGE ||
-      storageKey.startsWith(`${NOTES_STORAGE_PREFIX}/`)
+      storageKey.startsWith(`${NOTES_STORAGE_PREFIX}/`) ||
+      storageKey.startsWith(`${OVERLAYS_STORAGE_PREFIX}/`)
     );
   }
 
@@ -109,6 +137,11 @@ export class MemoryCheckpoint {
     for (const name of await listMarkdown(notesDir)) {
       const contents = await readFileOrNull(join(notesDir, name));
       if (contents != null) out.set(`${NOTES_STORAGE_PREFIX}/${name}`, contents);
+    }
+    const overlaysDir = join(this.workspace, OVERLAYS_LOCAL_DIR);
+    for (const name of await listFiles(overlaysDir, ".json")) {
+      const contents = await readFileOrNull(join(overlaysDir, name));
+      if (contents != null) out.set(`${OVERLAYS_STORAGE_PREFIX}/${name}`, contents);
     }
     return out;
   }
@@ -133,6 +166,14 @@ export class MemoryCheckpoint {
       await this.restoreOne(
         `${NOTES_STORAGE_PREFIX}/${name}`,
         join(this.workspace, NOTES_LOCAL_DIR, name),
+        seeded,
+      );
+    }
+    for (const name of await this.storage.list(OVERLAYS_STORAGE_PREFIX)) {
+      if (!name.endsWith(".json")) continue;
+      await this.restoreOne(
+        `${OVERLAYS_STORAGE_PREFIX}/${name}`,
+        join(this.workspace, OVERLAYS_LOCAL_DIR, name),
         seeded,
       );
     }
@@ -199,7 +240,7 @@ export class MemoryCheckpoint {
       const h = sha256(contents);
       if (this.hashes.get(key) === h) continue; // unchanged → echo-avoided
       try {
-        await this.storage.uploadText(key, contents, MD_CONTENT_TYPE);
+        await this.storage.uploadText(key, contents, contentTypeFor(key));
         this.hashes.set(key, h);
         log.info("agent memory uploaded", { key });
       } catch (err) {

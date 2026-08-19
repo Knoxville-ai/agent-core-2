@@ -502,6 +502,37 @@ Every field is optional; an absent or unparseable file changes nothing.
 file** — they are the per-service break-glass, and an operator using one is
 debugging.
 
+## Skill overlays (learned selector fixes)
+
+**Storage:** `agent-data/orgs/{org}/agents/{uid}/state/skill-overlays/<slug>.json`,
+agent-owned and round-tripped by `MemoryCheckpoint` like `playbook.md` and
+`state/notes/*.md`. The console does not write these.
+
+A portal changes its markup and a browser skill stops working. The fix is
+almost always a one-line selector change — but `workspace/skills/` is wiped and
+reinstalled from ClawHub on every boot, so a fix written into a skill's own
+files lasts exactly until the next restart. Overlays live in a **sibling**
+directory the wipe never touches, restored before the gateway starts and
+re-applied by the skill itself at import.
+
+```json
+{ "selectors": { "carts.list": ".o-newCartsList" } }
+```
+
+**What an overlay can and cannot do** is the safety model, and it is structural
+rather than advisory. An overlay merges values at known keys in one known file;
+there is no path by which it becomes executable logic. Each selector in a
+skill's `assets/selectors.json` declares a class:
+
+| class | meaning |
+| --- | --- |
+| `open` | navigation and reads. An overlay may repoint these. |
+| `protected` | anything that writes to the vendor — submitting an order, entering a quantity, confirming a delete, filling a ship-to address. A wrong match buys the wrong thing and nothing downstream catches it. Refused, and reported so a human can review. |
+| `credential` | the login form's fields. Repointing one sends the username and password wherever the patch says — exfiltration, not a wrong click. Refused outright; there is no review path because there is no legitimate version of it. |
+
+An overlay may only patch keys that already exist: a new key would be a selector
+nothing reads, or an attempt to introduce one the shipped code never vetted.
+
 ## Skill run records (console migration 0062)
 
 **What the console must provide:** a `public.skill_runs` table. The vessel
