@@ -340,6 +340,35 @@ export class MessagingDB {
   }
 
   /**
+   * Store skill run records (see skill-runs.ts). Returns true when the batch
+   * landed, so the caller knows whether to clear the spool.
+   *
+   * Upserts on `run_id`: the record is written by the skill before the shim
+   * ever sees it, so a retry after a transport failure must not create a second
+   * row for the same run.
+   *
+   * Never throws. A failure here means the spool keeps its files and the next
+   * turn tries again — telemetry that cannot be stored must not become a turn
+   * that cannot finish.
+   */
+  async insertSkillRuns(rows: Record<string, unknown>[]): Promise<boolean> {
+    if (rows.length === 0) return true;
+    try {
+      const { error } = await this.client
+        .from("skill_runs")
+        .upsert(rows, { onConflict: "run_id", ignoreDuplicates: true });
+      if (error) {
+        log.error("insertSkillRuns failed", { err: error.message, rows: rows.length });
+        return false;
+      }
+      return true;
+    } catch (err) {
+      log.error("insertSkillRuns threw", { err: (err as Error).message });
+      return false;
+    }
+  }
+
+  /**
    * Download a chat attachment's raw bytes from the `chat-attachments`
    * bucket and return them base64-encoded, ready to splice into an OpenAI
    * `image_url` data URL. `storagePath` is the bucket-relative key stored on

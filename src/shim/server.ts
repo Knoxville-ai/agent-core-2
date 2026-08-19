@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
@@ -40,6 +41,7 @@ import {
   handleOAuthStatus,
   type OAuthDeps,
 } from "./routes-oauth.js";
+import { SkillRunSpool, SKILL_RUN_SPOOL_LEAF } from "./skill-runs.js";
 import { MessagingDB } from "./supabase-db.js";
 import { sendJson } from "./util.js";
 
@@ -65,10 +67,24 @@ export function startShim(
   // (writer) and the loopback lookup route (reader for the gateway plugin).
   const delegatedCreds = new DelegatedCredentialStore();
   const usage = usageAccumulator ?? new UsageAccumulator();
+  // Skill run records, spooled to disk by the skills themselves and drained
+  // when a turn or task finishes. Deliberately OUTSIDE `workspace/`: the
+  // records are runtime telemetry, and `workspace/` is served over the
+  // operator-facing `/files` endpoint.
+  const skillRuns = new SkillRunSpool(
+    join(env.OPENCLAW_STATE_DIR, SKILL_RUN_SPOOL_LEAF),
+  );
   // Long-running task executor. Detached from every HTTP request: the task
   // routes hand work to it and return 202, and it reports back to the platform
   // on its own schedule (see task-runner.ts).
-  const taskRunner = new TaskRunner({ env, db, memory, delegatedCreds, usage });
+  const taskRunner = new TaskRunner({
+    env,
+    db,
+    memory,
+    delegatedCreds,
+    usage,
+    skillRuns,
+  });
   const oauth: OAuthDeps = {
     env,
     db,
@@ -88,6 +104,7 @@ export function startShim(
       delegatedCreds,
       taskRunner,
       usage,
+      skillRuns,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -142,6 +159,7 @@ async function route(
   delegatedCreds: DelegatedCredentialStore,
   taskRunner: TaskRunner,
   usage: UsageAccumulator,
+  skillRuns: SkillRunSpool,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -244,6 +262,7 @@ async function route(
         memory,
         delegatedCreds,
         usage,
+        skillRuns,
       });
     }
     if (sub === "interrupt") {

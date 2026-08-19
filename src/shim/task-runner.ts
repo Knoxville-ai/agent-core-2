@@ -12,9 +12,11 @@ import {
   fetchDelegatedCredentialsForTurn,
   historyToOpenaiMessages,
   iterOpenaiDeltas,
+  shipSkillRuns,
   type OpenaiUsage,
   type StreamTermination,
 } from "./routes-messages.js";
+import { SkillRunSpool } from "./skill-runs.js";
 import type { AttachmentRow, MessagingDB } from "./supabase-db.js";
 import { TaskReporter } from "./task-reporter.js";
 import { logUsageTotals, type UsageAccumulator } from "./usage-telemetry.js";
@@ -123,6 +125,9 @@ export interface TaskRunnerDeps {
   /** Per-task model-call / prompt-cache rollup, filled by the loopback usage
    *  ingest route and drained when the task's assistant row finalizes. */
   usage: UsageAccumulator;
+  /** Skill run records the task's skills spooled to disk, drained alongside the
+   *  usage rollup so a task's browser work is attributable to the task. */
+  skillRuns: SkillRunSpool;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
 }
@@ -613,6 +618,16 @@ export class TaskRunner {
     // when there is no assistant row to write it onto, so the bucket cannot leak.
     const cacheTotals = this.deps.usage.drain(sessionKey);
     if (cacheTotals) logUsageTotals(sessionKey, cacheTotals);
+
+    // Ship the task's skill runs. Same reasoning as the rollup above: the
+    // records are attributed here because this is where the task they belong to
+    // is known, and always drained so the spool cannot accumulate.
+    await shipSkillRuns(this.deps, {
+      orgId: env.AGENT_ORG,
+      agentUid: env.AGENT_UID,
+      conversationId,
+      taskId: spec.taskId,
+    });
 
     if (assistantMessageId && conversationId) {
       await db.updateMessage(assistantMessageId, {

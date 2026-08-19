@@ -460,6 +460,56 @@ task id from it to stamp `report_task_progress` calls, and `knox-report-outcome`
 deliberately **ignores** `task:` keys (a task id is not a conversation id, and a
 task reports its terminal state through the callback API instead).
 
+## Skill run records (console migration 0062)
+
+**What the console must provide:** a `public.skill_runs` table. The vessel
+writes it with the service-role key, upserting on `run_id`.
+
+Per-turn token usage says what a turn cost; it does not say what the turn was
+*doing*. openclaw runs the agentic loop internally and its OpenAI-compat
+endpoint emits only `delta.content`, so from the shim a browser run that died on
+step 3 of 20 is indistinguishable from one that never started. Nothing joins a
+skill slug to a token, a dollar, or a failure.
+
+So the skills report for themselves. Each browser skill action writes one JSON
+record on the way out:
+
+```
+$OPENCLAW_STATE_DIR/.knox/skill-runs/<run_id>.json
+```
+
+```json
+{
+  "schema": "knox.skill_run/1",
+  "run_id": "…", "skill": "drivethru-adidas-click", "skill_version": "0.8.0",
+  "action": "create-purchase-order", "status": "success|failure|needs_confirmation",
+  "attempts": 1, "session_reused": true, "self_repaired": false,
+  "duration_ms": 18450, "step_count": 9, "failed_step": null,
+  "error_type": null, "error_message": null,
+  "trace": [{"step": "session-restored", "ms": 900}, {"step": "cart-created", "ms": 1400}],
+  "started_at": "…Z", "finished_at": "…Z"
+}
+```
+
+Written write-then-rename, so a `.json` name is always a complete record
+(`.tmp` files are writes in flight and are ignored). Deliberately **outside
+`workspace/`** — `/files/read` serves that directory to operators, and these are
+runtime telemetry.
+
+The shim drains the spool in the same `finally` that drains the per-turn usage
+rollup (`shipSkillRuns`, `src/shim/skill-runs.ts`), stamping on `org_id`,
+`agent_uid`, and `conversation_id` / `task_id` — which the skill subprocess has
+no way to know. Files are deleted only after the rows are stored, so a database
+blip costs a retry rather than the records; a spool that exceeds 1,000 files
+(a long outage) drops its oldest.
+
+Telemetry never fails a turn: an unwritable spool, an unreachable table, and a
+missing directory all degrade to no record.
+
+**`needs_confirmation` is a first-class status,** not a failure. An adidas order
+that paused on an out-of-stock decision did what it was asked; counting it as a
+failure would misreport the skill's success rate.
+
 ## Escalations (console migration 0048)
 
 An agent that hits a decision it cannot make — or an action that needs human

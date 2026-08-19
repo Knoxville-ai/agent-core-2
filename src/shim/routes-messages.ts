@@ -24,6 +24,7 @@ import {
   type DelegatedCredentialStore,
 } from "./delegated-credentials.js";
 import { fetchOpenclawStream } from "./openclaw-gateway-fetch.js";
+import { SkillRunSpool, type SkillRunContext } from "./skill-runs.js";
 import {
   logUsageTotals,
   type CacheUsageTotals,
@@ -89,6 +90,10 @@ export interface MessagesDeps {
   /** Per-turn model-call / prompt-cache rollup, filled by the loopback usage
    *  ingest route and drained here when the assistant row finalizes. */
   usage: UsageAccumulator;
+  /** Skill run records the turn's skills spooled to disk. Drained here because
+   *  this is where the conversation they belong to is known — the skill
+   *  subprocess that wrote them has no idea. */
+  skillRuns: SkillRunSpool;
 }
 
 export async function handleSendMessage(
@@ -459,6 +464,13 @@ export async function handleSendMessage(
       status: finalStatus,
       completedAt: new Date().toISOString(),
       tokenUsage: buildTokenUsage(usageRef.value, env, cacheTotals),
+    });
+    // Ship whatever skills this turn ran. Attributed to the conversation here
+    // because the skill subprocess that wrote the records could not know it.
+    await shipSkillRuns(deps, {
+      orgId: conversation.org_id,
+      agentUid: env.AGENT_UID,
+      conversationId,
     });
     cancels.release(assistantMessageId);
     try {
@@ -881,6 +893,40 @@ export interface OpenaiUsage {
  * Cache-write tokens are reported separately and are NOT part of `input_tokens`
  * (the compat endpoint excludes them), so they must be priced on their own.
  */
+/**
+ * Drain the skill-run spool and store what it held.
+ *
+ * Shared by the chat turn and the task runner — the only difference between
+ * them is whether the records belong to a conversation or a task.
+ *
+ * Never throws and never awaits anything the caller depends on. The spool is
+ * only cleared once the rows are safely stored, so a database blip costs a
+ * retry on the next turn rather than the records themselves; `trim` is the
+ * backstop for the case where that blip lasts.
+ */
+export async function shipSkillRuns(
+  deps: Pick<MessagesDeps, "db" | "skillRuns">,
+  ctx: SkillRunContext,
+): Promise<void> {
+  try {
+    const { rows, files } = await deps.skillRuns.drain(ctx);
+    if (rows.length === 0) return;
+    const stored = await deps.db.insertSkillRuns(rows as unknown as Record<string, unknown>[]);
+    if (stored) {
+      await deps.skillRuns.commit(files);
+      log.info("skill runs shipped", {
+        count: rows.length,
+        skills: [...new Set(rows.map((row) => row.skill_slug))],
+        failures: rows.filter((row) => row.status === "failure").length,
+      });
+    } else {
+      await deps.skillRuns.trim();
+    }
+  } catch (err) {
+    log.warn("skill run shipping failed", { err: (err as Error).message });
+  }
+}
+
 export function buildTokenUsage(
   usage: OpenaiUsage | null,
   env: AgentEnv,
