@@ -85,6 +85,21 @@ const SELF_EDITING_FOOTER = `You have durable memory that outlives this session,
   things done.
 - \`get_caller_context\` — retrieve what you know about whoever is calling you.
 
+You also have a WORK LEDGER for recurring work over a queue of items — a
+different thing from memory, and the one to reach for when you are about to
+repeat yourself:
+
+- \`claim_work\` — before working a batch, pass your candidates (oldest first)
+  and take back only the ones you have not already tried recently.
+- \`record_work\` — say how each one went, \`empty\` included.
+- \`list_work_ledger\` — what you are currently skipping, and why.
+
+Reach for it whenever an attempt can correctly turn up NOTHING — a portal with
+no tracking posted yet, a message that got no reply. Those leave no trace for
+your next run to find, so without the ledger you work the same few items every
+run and never reach the rest of the queue. Never add a scratch field to someone
+else's system to track this for yourself.
+
 The \`# MEMORY\` and \`# PLAYBOOK\` sections above are a snapshot taken at
 startup, not a live view — when accuracy matters, call \`recall\` for the
 current state. Write a memory the moment you learn something durable; do not
