@@ -4,7 +4,11 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { buildTokenUsage, historyToOpenaiMessages } from "./routes-messages.js";
+import {
+  buildTokenUsage,
+  fallbackNote,
+  historyToOpenaiMessages,
+} from "./routes-messages.js";
 import type { AgentEnv } from "../env.js";
 import type { ModelCapabilities } from "./model-capabilities.js";
 import type { AttachmentRow, MessageRow, MessagingDB } from "./supabase-db.js";
@@ -47,6 +51,23 @@ function imageAtt(over: Partial<AttachmentRow>): AttachmentRow {
     width: null,
     height: null,
     original_name: "BC ATHLETICS.png",
+    ...over,
+  } as AttachmentRow;
+}
+
+/** A non-image attachment (defaults to an .xlsx), mirroring what the console
+ *  uploads for a spreadsheet. */
+function fileAtt(over: Partial<AttachmentRow>): AttachmentRow {
+  return {
+    id: "att-x",
+    message_id: "m1",
+    storage_path: "orgs/o/conversations/c/order.xlsx",
+    mime_type:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    size_bytes: 8,
+    width: null,
+    height: null,
+    original_name: "BACON ORDER.xlsx",
     ...over,
   } as AttachmentRow;
 }
@@ -143,6 +164,169 @@ describe("historyToOpenaiMessages image materialization", () => {
     // with the right size, so no re-download.
     await historyToOpenaiMessages(rows, attByMsg, TEXT_ONLY, db, ws, "c1");
     expect(downloads.length).toBe(1);
+  });
+});
+
+describe("historyToOpenaiMessages non-image attachments", () => {
+  let ws: string;
+  beforeEach(() => {
+    ws = mkdtempSync(join(tmpdir(), "knox-ws-"));
+  });
+  afterEach(() => {
+    rmSync(ws, { recursive: true, force: true });
+  });
+
+  it("materializes a spreadsheet and hands the model its on-disk path", async () => {
+    const bytes = Buffer.from("PK\x03\x04 fake xlsx bytes", "binary");
+    const att = fileAtt({ size_bytes: bytes.length });
+    const { db, downloads } = fakeDb({ [att.storage_path]: bytes });
+
+    const out = await historyToOpenaiMessages(
+      [userRow("m1", "give me a breakdown")],
+      new Map([["m1", [att]]]),
+      // A multimodal model still can't "see" an .xlsx — the file must reach it
+      // by path, not as an inlined image.
+      MULTIMODAL,
+      db,
+      ws,
+      "conv-x",
+    );
+
+    const p = join(ws, "attachments", "conv-x", "att-x__BACON_ORDER.xlsx");
+    expect(existsSync(p)).toBe(true);
+    expect(readFileSync(p)).toEqual(bytes);
+
+    // Plain-string content (never inlined as an image), carrying the prompt
+    // text and the on-disk path the model can act on.
+    const content = out[0]!.content as string;
+    expect(typeof content).toBe("string");
+    expect(content).toContain("give me a breakdown");
+    expect(content).toContain(p);
+    expect(content).not.toContain("data:"); // not inlined as a data URL
+    expect(downloads).toEqual([att.storage_path]);
+  });
+
+  it("delivers a non-image file even on a text-only model", async () => {
+    const bytes = Buffer.from("col1,col2\n1,2\n", "utf8");
+    const att = fileAtt({
+      id: "att-csv",
+      storage_path: "orgs/o/conversations/c/data.csv",
+      mime_type: "text/csv",
+      original_name: "data.csv",
+      size_bytes: bytes.length,
+    });
+    const { db } = fakeDb({ [att.storage_path]: bytes });
+
+    const out = await historyToOpenaiMessages(
+      [userRow("m1", "summarize")],
+      new Map([["m1", [att]]]),
+      TEXT_ONLY,
+      db,
+      ws,
+      "conv-csv",
+    );
+
+    const p = join(ws, "attachments", "conv-csv", "att-csv__data.csv");
+    expect(existsSync(p)).toBe(true);
+    const content = out[0]!.content as string;
+    expect(content).toContain("summarize");
+    expect(content).toContain(p);
+  });
+
+  it("mixes an inlined image and an on-disk file in one message", async () => {
+    const img = Buffer.from("\x89PNG image", "binary");
+    const sheet = Buffer.from("PK\x03\x04 sheet", "binary");
+    const imgA = imageAtt({
+      id: "img-1",
+      storage_path: "orgs/o/conversations/c/a.png",
+      original_name: "a.png",
+      size_bytes: img.length,
+    });
+    const fileA = fileAtt({
+      id: "file-1",
+      storage_path: "orgs/o/conversations/c/b.xlsx",
+      original_name: "b.xlsx",
+      size_bytes: sheet.length,
+    });
+    const { db } = fakeDb({
+      [imgA.storage_path]: img,
+      [fileA.storage_path]: sheet,
+    });
+
+    const out = await historyToOpenaiMessages(
+      [userRow("m1", "compare these")],
+      new Map([["m1", [imgA, fileA]]]),
+      MULTIMODAL,
+      db,
+      ws,
+      "conv-mix",
+    );
+
+    // Multimodal array content: the image is inlined, and the text note names
+    // BOTH on-disk paths so the model can read the sheet by path.
+    const content = out[0]!.content as Array<Record<string, unknown>>;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content.some((p) => p.type === "image_url")).toBe(true);
+    const noteText = content
+      .filter((p) => p.type === "text")
+      .map((p) => p.text as string)
+      .join("\n");
+    expect(noteText).toContain(
+      join(ws, "attachments", "conv-mix", "img-1__a.png"),
+    );
+    expect(noteText).toContain(
+      join(ws, "attachments", "conv-mix", "file-1__b.xlsx"),
+    );
+  });
+
+  it("tells the model in-band when an attachment can't be loaded", async () => {
+    const att = fileAtt({
+      id: "att-miss",
+      storage_path: "orgs/o/conversations/c/missing.xlsx",
+      original_name: "missing.xlsx",
+      size_bytes: 10,
+    });
+    const { db } = fakeDb({}); // download misses → materialization fails
+
+    const out = await historyToOpenaiMessages(
+      [userRow("m1", "read it")],
+      new Map([["m1", [att]]]),
+      MULTIMODAL,
+      db,
+      ws,
+      "conv-miss",
+    );
+
+    // Instead of silently dropping the file, the model is told it failed so it
+    // can ask for a re-upload rather than hallucinating contents.
+    const content = out[0]!.content as string;
+    expect(typeof content).toBe("string");
+    expect(content).toContain("could not be loaded");
+    expect(content).toContain("missing.xlsx");
+  });
+});
+
+describe("fallbackNote", () => {
+  it("does NOT warn about non-image files — they're delivered via the workspace", () => {
+    // This is the regression guard for the bug: previously a file on a model
+    // with fileInput=false triggered a misleading 'weren't read' warning, and a
+    // model with fileInput=true suppressed it AND dropped the file. Now a file
+    // is always delivered, so there is nothing to warn about.
+    const xlsx = fileAtt({});
+    expect(fallbackNote([xlsx], TEXT_ONLY, "openrouter", "gpt-5.6-luna")).toBeNull();
+    expect(
+      fallbackNote([xlsx], { multimodal: true, fileInput: true }, "openrouter", "gpt-5.6-luna"),
+    ).toBeNull();
+  });
+
+  it("warns when an image is sent to a non-multimodal model", () => {
+    const note = fallbackNote([imageAtt({})], TEXT_ONLY, "openai", "o3-mini");
+    expect(note).toContain("can't see images");
+    expect(note).toContain("o3-mini");
+  });
+
+  it("does not warn about images on a multimodal model", () => {
+    expect(fallbackNote([imageAtt({})], MULTIMODAL, "openai", "gpt-4o")).toBeNull();
   });
 });
 

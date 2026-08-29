@@ -176,9 +176,11 @@ export async function handleSendMessage(
     attsByMessage.set(a.message_id, arr);
   }
   // openclaw's tools (bash/python inside skills) run against the rendered
-  // workspace, so materialize image attachments there and hand the model the
-  // on-disk paths. Without this, images only exist as inlined base64 in the
-  // prompt — a deterministic compositing skill has no file to read.
+  // workspace, so materialize every attachment there and hand the model the
+  // on-disk paths. This is the ONLY path by which a non-image file (a
+  // spreadsheet, PDF, doc) reaches the model — it can't be "seen" like an
+  // image, but the agent can run code against it on disk. Images are
+  // ADDITIONALLY inlined as base64 below for multimodal models to see.
   const workspaceDir = join(env.OPENCLAW_STATE_DIR, "workspace");
   const openaiMessages = await historyToOpenaiMessages(
     history,
@@ -603,10 +605,12 @@ const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 /** Stop inlining once the per-turn budget across all images is exhausted, so
  *  a conversation with many images can't blow up the upstream payload. */
 const MAX_TOTAL_INLINE_BYTES = 20 * 1024 * 1024;
-/** Cap for writing an image to the workspace filesystem. Higher than the
- *  inline caps: a skill can composite a high-res source we'd never inline
- *  into the prompt, so being on disk is worth more headroom. */
-const MAX_DISK_IMAGE_BYTES = 64 * 1024 * 1024;
+/** Cap for writing an attachment to the workspace filesystem. Higher than the
+ *  inline caps: a skill can read a large source we'd never inline into the
+ *  prompt (a hi-res image to composite, a multi-MB spreadsheet to parse), so
+ *  being on disk is worth more headroom. The console caps uploads well under
+ *  this (20 MB), so in practice nothing an operator uploads is rejected here. */
+const MAX_DISK_ATTACHMENT_BYTES = 64 * 1024 * 1024;
 
 /** One part of an OpenAI multimodal `content` array. */
 type ContentPart =
@@ -616,23 +620,22 @@ type ContentPart =
 /**
  * Build OpenAI-format messages from conversation history.
  *
- * Two independent things happen to image attachments:
+ * EVERY attachment (image or not) is **materialized to disk** —
+ * written to `workspace/attachments/<conversationId>/` (idempotently) so
+ * openclaw's tools and skills can read it by path. The on-disk paths are then
+ * described to the model in a text note so it can act on the files (parse a
+ * spreadsheet/PDF/doc with python, or hand an image to a compositing skill
+ * like drivethru-graphic-artist) instead of asking the user to re-upload.
+ * This is the delivery mechanism for NON-image files: a model can't "see" an
+ * `.xlsx`, but it can run code against one on disk — so without this a
+ * spreadsheet upload was silently dropped from the model's view entirely.
  *
- *   1. **Materialize to disk** — every image is written to
- *      `workspace/attachments/<conversationId>/` (idempotently) so openclaw's
- *      tools and skills can read it by path. The on-disk paths are then
- *      described to the model in a text part so it can hand them to a
- *      deterministic compositing skill (e.g. drivethru-graphic-artist)
- *      instead of asking the user to re-upload. This happens regardless of
- *      whether the model is multimodal — a compositor doesn't need vision.
+ * Images are **additionally inlined as base64** — for multimodal models each
+ * image is also emitted as an `image_url` data URL so the model can *see* it,
+ * subject to the per-image and per-turn byte budgets. Non-image files are
+ * never inlined; they reach the model only via their on-disk path.
  *
- *   2. **Inline as base64** — for multimodal models each image is also
- *      emitted as an `image_url` data URL so the model can *see* it, subject
- *      to the per-image and per-turn byte budgets.
- *
- * Rows with no image attachments keep the plain-string content shape.
- * Non-image files are left out here — the caller already surfaced a
- * `fallbackNote` warning for those.
+ * Rows with no attachments keep the plain-string content shape.
  */
 export async function historyToOpenaiMessages(
   rows: MessageRow[],
@@ -663,27 +666,34 @@ export async function historyToOpenaiMessages(
       if (storedMcq) text = mcqToModelText(storedMcq);
     }
     const msgAttachments = attachmentsByMessage.get(r.id) ?? [];
-    const imageAtts = msgAttachments.filter((a) =>
-      a.mime_type.startsWith("image/"),
-    );
 
-    if (imageAtts.length === 0) {
+    // Fast path: a plain text row with nothing attached keeps the string shape.
+    if (msgAttachments.length === 0) {
       if (!text) continue;
       out.push({ role: r.role, content: text });
       continue;
     }
 
     const savedPaths: Array<{ att: AttachmentRow; localPath: string }> = [];
+    const failed: AttachmentRow[] = [];
     const imageParts: ContentPart[] = [];
-    for (const att of imageAtts) {
-      // 1. Ensure the image is on disk for skills to read by path.
-      const materialized = await materializeImage(att, attachDir, db);
+    for (const att of msgAttachments) {
+      const isImage = att.mime_type.startsWith("image/");
+
+      // 1. Ensure the file is on disk for tools/skills to read by path. This
+      //    applies to EVERY attachment — it's how a non-image file (spreadsheet,
+      //    PDF, doc) reaches the model at all, and how an image reaches a
+      //    deterministic compositing skill.
+      const materialized = await materializeAttachment(att, attachDir, db);
       if (materialized) {
         savedPaths.push({ att, localPath: materialized.localPath });
+      } else {
+        failed.push(att);
       }
 
-      // 2. Additionally inline it for multimodal models to see.
-      if (!caps.multimodal) continue;
+      // 2. Additionally inline IMAGES for multimodal models to see. Non-image
+      //    files are never inlined — they reach the model via the on-disk path.
+      if (!isImage || !caps.multimodal) continue;
       if (att.size_bytes > MAX_INLINE_IMAGE_BYTES) {
         log.warn("skipping oversized inline image", {
           storage_path: att.storage_path,
@@ -692,8 +702,10 @@ export async function historyToOpenaiMessages(
         continue;
       }
       if (inlinedBytes + att.size_bytes > MAX_TOTAL_INLINE_BYTES) {
-        log.warn("inline image budget exhausted; skipping remaining images");
-        break;
+        // Budget spent — stop inlining, but keep materializing the rest so they
+        // remain reachable on disk (hence `continue`, not `break`).
+        log.warn("inline image budget exhausted; skipping remaining inlines");
+        continue;
       }
       const base64 =
         materialized?.base64 ??
@@ -706,11 +718,13 @@ export async function historyToOpenaiMessages(
       });
     }
 
-    // No image was inlined (text-only model, or all inline attempts skipped).
-    // Fold any on-disk path note into the plain-string content so the model
-    // can still act on the files, and drop the row only if nothing is left.
+    const note = buildAttachmentNote(savedPaths, failed);
+
+    // No image was inlined (text-only model, non-image files, or all inline
+    // attempts skipped). Fold the attachment note into the plain-string content
+    // so the model can still act on the on-disk files, and drop the row only if
+    // nothing is left.
     if (imageParts.length === 0) {
-      const note = savedPaths.length ? buildAttachmentPathNote(savedPaths) : "";
       const merged = [text, note].filter(Boolean).join("\n\n");
       if (!merged) continue;
       out.push({ role: r.role, content: merged });
@@ -720,9 +734,7 @@ export async function historyToOpenaiMessages(
     // At least one inlined image → multimodal content array.
     const parts: ContentPart[] = [];
     if (text) parts.push({ type: "text", text });
-    if (savedPaths.length) {
-      parts.push({ type: "text", text: buildAttachmentPathNote(savedPaths) });
-    }
+    if (note) parts.push({ type: "text", text: note });
     parts.push(...imageParts);
     out.push({ role: r.role, content: parts });
   }
@@ -730,15 +742,16 @@ export async function historyToOpenaiMessages(
 }
 
 /**
- * Write an image attachment into the workspace so openclaw tools/skills can
- * read it by path. Idempotent: if a file of the expected size is already
+ * Write an attachment (of any type) into the workspace so openclaw tools/skills
+ * can read it by path. Idempotent: if a file of the expected size is already
  * there (e.g. materialized on a previous turn), we skip the re-download.
  *
  * Returns the absolute local path plus the base64 bytes when we had to
- * download them (so the caller can reuse them for inlining without a second
- * fetch), or null if the image was too large or the download/write failed.
+ * download them (so the caller can reuse them for inlining an image without a
+ * second fetch), or null if the file was too large or the download/write
+ * failed.
  */
-async function materializeImage(
+async function materializeAttachment(
   att: AttachmentRow,
   dir: string,
   db: MessagingDB,
@@ -748,8 +761,8 @@ async function materializeImage(
   if (await fileHasSize(localPath, att.size_bytes)) {
     return { localPath, base64: null };
   }
-  if (att.size_bytes > MAX_DISK_IMAGE_BYTES) {
-    log.warn("skipping on-disk materialization of oversized image", {
+  if (att.size_bytes > MAX_DISK_ATTACHMENT_BYTES) {
+    log.warn("skipping on-disk materialization of oversized attachment", {
       storage_path: att.storage_path,
       size_bytes: att.size_bytes,
     });
@@ -775,7 +788,7 @@ async function materializeImage(
  *  (a UUID) guarantees uniqueness; the sanitized original name keeps it
  *  recognizable and preserves an extension the compositor can sniff. */
 function attachmentFileName(att: AttachmentRow): string {
-  const base = att.original_name ? basename(att.original_name) : "image";
+  const base = att.original_name ? basename(att.original_name) : "attachment";
   let safe = base.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_");
   if (!extname(safe)) safe += extForMime(att.mime_type);
   return `${att.id}__${safe}`;
@@ -801,25 +814,60 @@ async function fileHasSize(path: string, size: number): Promise<boolean> {
   }
 }
 
-/** A text block, addressed to the model, listing where each image was saved
- *  on disk so it can pass real paths to compositing/graphic skills. */
-function buildAttachmentPathNote(
+/**
+ * A text block, addressed to the model, describing the attachments on a
+ * message: where each was saved on disk (so the agent's tools/skills can read
+ * it by path) and any that could not be loaded. Returns "" when there is
+ * nothing to say, so callers can `filter(Boolean)` it out.
+ */
+function buildAttachmentNote(
   saved: Array<{ att: AttachmentRow; localPath: string }>,
+  failed: AttachmentRow[] = [],
 ): string {
-  const lines = saved.map(({ att, localPath }) => {
-    const name = att.original_name ?? basename(localPath);
-    return `  - ${name} → ${localPath}`;
-  });
-  return (
-    "The image attachment(s) on this message are saved on the local filesystem " +
-    "so tools and skills can read them directly (no re-upload needed):\n" +
-    lines.join("\n") +
-    "\nWhen a skill needs image file paths (e.g. the drivethru-graphic-artist " +
-    "compositor), pass these paths."
-  );
+  const blocks: string[] = [];
+  if (saved.length > 0) {
+    const lines = saved.map(({ att, localPath }) => {
+      const name = att.original_name ?? basename(localPath);
+      const kind = att.mime_type.startsWith("image/")
+        ? "image"
+        : att.mime_type;
+      return `  - ${name} (${kind}) → ${localPath}`;
+    });
+    blocks.push(
+      "Attachment(s) on this message are saved on the local filesystem so your " +
+        "tools and skills can read them directly — no re-upload needed:\n" +
+        lines.join("\n") +
+        "\nRead or parse them with your code tools (e.g. open a spreadsheet or " +
+        "document in python with pandas/openpyxl/pypdf, or pass an image path " +
+        "to a compositing skill like drivethru-graphic-artist). Do not ask the " +
+        "user to re-send a file listed here.",
+    );
+  }
+  if (failed.length > 0) {
+    const names = failed
+      .map((a) => a.original_name ?? a.storage_path)
+      .join(", ");
+    blocks.push(
+      `⚠️ ${failed.length} attachment(s) could not be loaded (${names}). Tell ` +
+        "the user the file failed to load and ask them to re-upload it — do " +
+        "not guess at its contents.",
+    );
+  }
+  return blocks.join("\n\n");
 }
 
-function fallbackNote(
+/**
+ * A user-facing note for attachments the model won't be able to fully use, or
+ * null when there is nothing to flag.
+ *
+ * Non-image files (spreadsheets, PDFs, docs) are NOT flagged here: they are
+ * materialized to the workspace and read by the agent's code tools (see
+ * historyToOpenaiMessages), so they genuinely reach the agent regardless of the
+ * model's native `fileInput` capability. The one remaining gap is vision — a
+ * non-multimodal model can't SEE an image, even though the file is on disk — so
+ * that is the only case we warn about.
+ */
+export function fallbackNote(
   attachments: AttachmentRow[],
   caps: ModelCapabilities,
   provider: string,
@@ -827,23 +875,16 @@ function fallbackNote(
 ): string | null {
   if (attachments.length === 0) return null;
   const images = attachments.filter((a) => a.mime_type.startsWith("image/"));
-  const nonImages = attachments.filter((a) => !a.mime_type.startsWith("image/"));
-  const complaints: string[] = [];
-  if (images.length > 0 && !caps.multimodal) {
-    complaints.push(`${images.length} image${images.length !== 1 ? "s" : ""}`);
-  }
-  if (nonImages.length > 0 && !caps.fileInput) {
-    complaints.push(`${nonImages.length} file${nonImages.length !== 1 ? "s" : ""}`);
-  }
-  if (complaints.length === 0) return null;
+  if (images.length === 0 || caps.multimodal) return null;
   const modelLabel =
     provider && model ? `\`${provider}/${model}\`` : "this agent's model";
-  const joined = complaints.join(" and ");
-  const verb = complaints.length === 1 && images.length === 1 ? "was" : "were";
+  const noun = `${images.length} image${images.length !== 1 ? "s" : ""}`;
+  const verb = images.length === 1 ? "was" : "were";
   return (
-    `⚠️ ${modelLabel} doesn't support image or file inputs. ` +
-    `Your ${joined} ${verb} saved to the conversation but weren't read by the agent. ` +
-    "Switch to a multimodal model in agent settings to have the agent act on them."
+    `⚠️ ${modelLabel} can't see images. ` +
+    `Your ${noun} ${verb} saved to the conversation (and are available to the ` +
+    "agent's file tools by path) but can't be viewed directly. " +
+    "Switch to a multimodal model in agent settings for the agent to see images."
   );
 }
 
