@@ -5,6 +5,7 @@ import {
   conversationIdFromSessionKey,
   conversationIdParamFor,
   isEscalateToHumanTool,
+  isSendCustomerEmailTool,
   isStartTaskTool,
   taskIdFromSessionKey,
 } from "./outcome.js";
@@ -39,26 +40,29 @@ export default definePluginEntry({
   id: "knox-report-outcome",
   name: "Knox Conversation Id Injector",
   description:
-    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, and send_email MCP calls so the model never has to know or type it.",
+    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, and send_customer_email MCP calls so the model never has to know or type it.",
   register(api) {
     api.on(
       "before_tool_call",
       async (event, ctx) => {
         const toolName = event?.toolName;
 
-        // escalate_to_human from a TASK session parks the task itself, so it
-        // takes `task_id` (the plugin cannot derive a work conversation from a
-        // `task:` key — the platform resolves it from the task). From a webchat/
-        // a2a session it parks the conversation and falls through to the normal
-        // conversation_id stamping below.
-        if (isEscalateToHumanTool(toolName)) {
+        // escalate_to_human and send_customer_email both PARK the session they
+        // are called from until a human answers (0048 / 0068). From a TASK
+        // session that means parking the task itself, so they take `task_id` (the
+        // plugin cannot derive a work conversation from a `task:` key — the
+        // platform resolves it from the task). From a webchat/a2a session they
+        // park the conversation and fall through to the normal conversation_id
+        // stamping below.
+        if (isEscalateToHumanTool(toolName) || isSendCustomerEmailTool(toolName)) {
           const taskId = taskIdFromSessionKey(ctx?.sessionKey);
           if (taskId) {
             const params = buildOutcomeParams(event?.params ?? {}, taskId, "task_id");
             if (!params) return;
+            const parkLabel = String(toolName).split(/[.:/]|__/).pop();
             console.error(
               `[knox-report-outcome] stamped task_id=${taskId} onto ` +
-                `escalate_to_human (session=${ctx?.sessionKey})`,
+                `${parkLabel} (session=${ctx?.sessionKey})`,
             );
             return { params };
           }

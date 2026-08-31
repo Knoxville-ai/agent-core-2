@@ -42,6 +42,16 @@ const ESCALATE_TO_HUMAN_SUFFIX = /(^|[.:/]|__)escalate_to_human$/;
  *  is a nicety rather than load-bearing. */
 const SEND_EMAIL_SUFFIX = /(^|[.:/]|__)send_email$/;
 
+/** The platform's human-approved OUTBOUND-customer-email tool (console migration
+ *  0068). Like escalate_to_human it PARKS the session it is called from until a
+ *  human approves the draft, so its `conversation_id` (or `task_id` in a task
+ *  session) is the session being parked — the one the agent is serving. The
+ *  model cannot know it and the tool REJECTS the call without it, so here this is
+ *  load-bearing, not a nicety. Distinct from send_email: "send_customer_email"
+ *  does not contain the "send_email" substring, so the two suffixes never
+ *  collide. */
+const SEND_CUSTOMER_EMAIL_SUFFIX = /(^|[.:/]|__)send_customer_email$/;
+
 /**
  * Every platform tool that needs the id of the session the agent is serving,
  * and the PARAM each one wants it under.
@@ -59,6 +69,7 @@ const CONVERSATION_ID_TOOLS = [
   { suffix: START_TASK_SUFFIX, param: "conversation_id" },
   { suffix: ESCALATE_TO_HUMAN_SUFFIX, param: "conversation_id" },
   { suffix: SEND_EMAIL_SUFFIX, param: "conversation_id" },
+  { suffix: SEND_CUSTOMER_EMAIL_SUFFIX, param: "conversation_id" },
   {
     suffix: /(^|[.:/]|__)start_conversation$/,
     param: "caller_conversation_id",
@@ -82,6 +93,13 @@ export function isStartTaskTool(toolName) {
 /** True when `toolName` is the platform `escalate_to_human` tool. */
 export function isEscalateToHumanTool(toolName) {
   return typeof toolName === "string" && ESCALATE_TO_HUMAN_SUFFIX.test(toolName);
+}
+
+/** True when `toolName` is the platform `send_customer_email` tool. Like
+ *  escalate_to_human it parks the session it is called from, so a TASK session
+ *  stamps `task_id` and a webchat/a2a session stamps `conversation_id`. */
+export function isSendCustomerEmailTool(toolName) {
+  return typeof toolName === "string" && SEND_CUSTOMER_EMAIL_SUFFIX.test(toolName);
 }
 
 /**

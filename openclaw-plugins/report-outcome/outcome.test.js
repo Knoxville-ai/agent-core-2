@@ -6,6 +6,7 @@ import {
   conversationIdFromSessionKey,
   isReportOutcomeTool,
   isEscalateToHumanTool,
+  isSendCustomerEmailTool,
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
@@ -21,6 +22,10 @@ describe("conversationIdParamFor", () => {
     // escalate_to_human parks the session it names (0048), so it takes the same
     // conversation_id the runtime stamps for report_outcome.
     expect(conversationIdParamFor("knoxville_platform__escalate_to_human")).toBe(
+      "conversation_id",
+    );
+    // send_customer_email parks the session too (0068), until a human approves.
+    expect(conversationIdParamFor("knoxville_platform__send_customer_email")).toBe(
       "conversation_id",
     );
   });
@@ -83,6 +88,30 @@ describe("isEscalateToHumanTool", () => {
   it("does not match neighbouring tools", () => {
     for (const name of ["report_outcome", "start_task", "send_message", null]) {
       expect(isEscalateToHumanTool(name), String(name)).toBe(false);
+    }
+  });
+});
+
+describe("isSendCustomerEmailTool", () => {
+  it("matches the bare and server-prefixed tool name", () => {
+    expect(isSendCustomerEmailTool("send_customer_email")).toBe(true);
+    expect(isSendCustomerEmailTool("knoxville_platform.send_customer_email")).toBe(true);
+    expect(isSendCustomerEmailTool("knoxville_platform:send_customer_email")).toBe(true);
+    expect(isSendCustomerEmailTool("knoxville_platform__send_customer_email")).toBe(true);
+  });
+
+  it("does not collide with the team send_email tool (either direction)", () => {
+    // "send_customer_email" does not contain the "send_email" substring, and
+    // vice versa — the two suffixes are disjoint.
+    expect(isSendCustomerEmailTool("send_email")).toBe(false);
+    expect(isEscalateToHumanTool("send_customer_email")).toBe(false);
+    expect(conversationIdParamFor("send_email")).toBe("conversation_id");
+    expect(conversationIdParamFor("send_customer_email")).toBe("conversation_id");
+  });
+
+  it("does not match neighbouring tools", () => {
+    for (const name of ["send_email", "send_message", "report_outcome", null]) {
+      expect(isSendCustomerEmailTool(name), String(name)).toBe(false);
     }
   });
 });
