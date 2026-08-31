@@ -49,8 +49,13 @@ const DEFAULT: ModelCapabilities = { multimodal: false, fileInput: false };
  * conservative: only families that uniformly ship vision, so we never inline
  * an image into a text-only model and trigger an upstream 400.
  *
- * `fileInput` (PDF/doc ingestion) stays false — no provider path for it is
- * wired up yet, so inferring it would be wrong.
+ * `fileInput` here means NATIVE provider document ingestion (sending a file as
+ * a content part the model reads directly). No provider path for that is wired
+ * up yet, so it stays false — inferring it would be wrong. This is separate
+ * from how non-image attachments actually reach the model today: they are
+ * materialized to the workspace and read by the agent's code tools (see
+ * routes-messages `historyToOpenaiMessages`), which does not depend on this
+ * flag.
  */
 function heuristicCapabilities(
   provider: string,
