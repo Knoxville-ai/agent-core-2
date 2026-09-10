@@ -22,8 +22,8 @@ platform ──POST /conversations/{id}/messages──▶ agent-core shim
    openclaw ──tools/call report_outcome({ conversation_id, status, summary })──▶ platform MCP
 ```
 
-The model authors `status` (`success` | `failure` | `error` | `unknown`) and a
-1-2 sentence `summary`. The plugin authors nothing but the `conversation_id`,
+The model authors `status` (`success` | `nothing_to_do` | `failure` | `error` |
+`unknown`) and a 1-2 sentence `summary`. The plugin authors nothing but the `conversation_id`,
 which it takes verbatim from the OpenClaw session key. No shim staging or
 loopback call is needed — the conversation id already rides the session key.
 
