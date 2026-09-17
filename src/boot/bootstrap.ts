@@ -12,6 +12,7 @@ import type { AgentEnv } from "../env.js";
 import { log } from "../log.js";
 import { assembleSystemPrompt, parseEscalatedTools } from "../prompt/assemble.js";
 import { MemoryCheckpoint } from "../provision/agent-memory.js";
+import { fetchPinnableModelIds } from "../provision/pinnable-models.js";
 import {
   defaultIdentity,
   loadConstitution,
@@ -63,6 +64,13 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   const blobs = await loadPromptBlobs(env);
   const constitution = await loadConstitution(env);
 
+  // Models this agent's routines can pin via a per-request override, so both
+  // openclaw.json writes below overlay them with the prompt-cache-key compat
+  // flag and their turns stay cost-tracked (see pinnable-models.ts). Fail-open
+  // to [] — never blocks boot. Fetched once and passed to BOTH writes so the
+  // early (pre-skill-install) and final configs remain byte-identical.
+  const extraModelIds = await fetchPinnableModelIds(env);
+
   const workspaceSkillsDir = join(env.OPENCLAW_STATE_DIR, "workspace", "skills");
 
   // Reconcile skills from scratch every boot: wipe once, then install from the
@@ -79,8 +87,9 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   // on-disk openclaw.json is stale/invalid until renderWorkspace rewrites it at
   // the end of boot, which would be too late: every skill install would fail
   // and the agent would come up with no skills. renderWorkspace writes the same
-  // file again later; buildOpenclawConfig is pure so the bytes are identical.
-  await writeOpenclawConfig(env);
+  // file again later; buildOpenclawConfig is pure so the bytes are identical
+  // (both writes get the same extraModelIds).
+  await writeOpenclawConfig(env, extraModelIds);
 
   let installedSkills: InstalledSkill[] = [];
   if (bundle) {
@@ -153,7 +162,7 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
     playbook,
     escalatedTools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
   });
-  await renderWorkspace({ env, assembledSoul: systemPrompt, blobs });
+  await renderWorkspace({ env, assembledSoul: systemPrompt, blobs, extraModelIds });
 
   log.info("bootstrap complete", {
     assignments: bundle?.assignments.length ?? 0,

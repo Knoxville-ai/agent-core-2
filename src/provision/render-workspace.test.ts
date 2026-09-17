@@ -134,6 +134,67 @@ describe("buildOpenclawConfig model provider block", () => {
     });
   });
 
+  it("OpenRouter + extraModelIds → overlays the default AND every pinnable routine model", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "qwen/qwen3.7-plus",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: true,
+        OPENROUTER_COST_PROXY_PORT: 18790,
+      }),
+      "/ws",
+      ["openai/gpt-5.6-luna", "anthropic/claude-sonnet-5"],
+    );
+    // Every model a routine can pin gets the compat flag, so a per-request
+    // `x-openclaw-model` override still stamps a session id and its cost lands.
+    expect(providers(config)).toEqual({
+      openrouter: {
+        apiKey: "sk-or-test",
+        baseUrl: "http://127.0.0.1:18790/api/v1",
+        models: [
+          { id: "qwen/qwen3.7-plus", name: "qwen/qwen3.7-plus", compat: { supportsPromptCacheKey: true } },
+          { id: "openai/gpt-5.6-luna", name: "openai/gpt-5.6-luna", compat: { supportsPromptCacheKey: true } },
+          {
+            id: "anthropic/claude-sonnet-5",
+            name: "anthropic/claude-sonnet-5",
+            compat: { supportsPromptCacheKey: true },
+          },
+        ],
+      },
+    });
+  });
+
+  it("OpenRouter + extraModelIds dedupes the default and repeats", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "qwen/qwen3.7-plus",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: true,
+        OPENROUTER_COST_PROXY_PORT: 18790,
+      }),
+      "/ws",
+      ["qwen/qwen3.7-plus", "openai/gpt-5.6-luna", "openai/gpt-5.6-luna", ""],
+    );
+    const models = (providers(config).openrouter as { models: Array<{ id: string }> }).models;
+    expect(models.map((m) => m.id)).toEqual(["qwen/qwen3.7-plus", "openai/gpt-5.6-luna"]);
+  });
+
+  it("OpenRouter cost tracking OFF → extraModelIds are ignored (no overlay)", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "qwen/qwen3.7-plus",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: false,
+      }),
+      "/ws",
+      ["openai/gpt-5.6-luna"],
+    );
+    expect(providers(config)).toEqual({ openrouter: { apiKey: "sk-or-test" } });
+  });
+
   it("OpenRouter with cost tracking OFF → no proxy, no models overlay", () => {
     const config = buildOpenclawConfig(
       makeEnv({
