@@ -187,6 +187,10 @@ export interface RenderWorkspaceInput {
   /** Final SOUL.md contents — already assembled with capability prompts. */
   assembledSoul: string;
   blobs: PromptBlobs;
+  /** Models a routine can pin beyond LLM_MODEL, overlaid with the
+   *  prompt-cache-key compat flag so their cost is tracked (see
+   *  pinnable-models.ts). Defaults to none. */
+  extraModelIds?: readonly string[];
 }
 
 export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void> {
@@ -212,8 +216,9 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
   // openclaw.json is also written earlier in bootstrap (before any skill
   // install) so the `openclaw skills install` CLI validates against a current,
   // valid config. Re-writing it here keeps renderWorkspace self-contained and
-  // idempotent — same env in, same file out.
-  await writeOpenclawConfig(env);
+  // idempotent — same env + extraModelIds in, same file out. bootstrap passes
+  // the SAME extraModelIds to both writes so the bytes stay identical.
+  await writeOpenclawConfig(env, input.extraModelIds ?? []);
 
   log.info("workspace rendered", {
     stateDir,
@@ -303,11 +308,14 @@ export function parseExtraMcpServers(
  * install fails and the agent boots without its skills. buildOpenclawConfig is
  * a pure function of env, so both writes produce identical bytes.
  */
-export async function writeOpenclawConfig(env: AgentEnv): Promise<void> {
+export async function writeOpenclawConfig(
+  env: AgentEnv,
+  extraModelIds: readonly string[] = [],
+): Promise<void> {
   const stateDir = env.OPENCLAW_STATE_DIR;
   const ws = join(stateDir, "workspace");
   await mkdir(ws, { recursive: true });
-  const config = buildOpenclawConfig(env, ws);
+  const config = buildOpenclawConfig(env, ws, extraModelIds);
   await writeFile(
     join(stateDir, "openclaw.json"),
     JSON.stringify(config, null, 2),
@@ -382,7 +390,11 @@ export function resolveHeartbeatEvery(env: AgentEnv): string {
 
 /** Exported for unit tests — builds the openclaw.json object from env + the
  *  rendered workspace path. */
-export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<string, unknown> {
+export function buildOpenclawConfig(
+  env: AgentEnv,
+  workspace: string,
+  extraModelIds: readonly string[] = [],
+): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
   if (env.PLATFORM_MCP_URL) {
     mcpServers.knoxville_platform = {
@@ -557,7 +569,7 @@ export function buildOpenclawConfig(env: AgentEnv, workspace: string): Record<st
     //     LLM_BASE_URL
     //   - in-container Ollama → { apiKey: "ollama", baseUrl: loopback } with
     //     no LLM_API_KEY set (see buildProviderConfig)
-    const providerConfig = buildProviderConfig(env);
+    const providerConfig = buildProviderConfig(env, extraModelIds);
     if (providerConfig) {
       config.models = {
         providers: {
@@ -648,7 +660,10 @@ export const LOCAL_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
  * `baseURL` with `models.providers.<provider>: Invalid input` and refuses to
  * start, so this casing matters — see README "Verification status".
  */
-function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
+function buildProviderConfig(
+  env: AgentEnv,
+  extraModelIds: readonly string[] = [],
+): Record<string, unknown> | null {
   const provider = env.LLM_PROVIDER.trim().toLowerCase();
 
   // Endpoint: when cost tracking is on, OpenRouter traffic is routed through the
@@ -683,18 +698,29 @@ function buildProviderConfig(env: AgentEnv): Record<string, unknown> | null {
   // "short", which satisfies the transport's `!== "none"` guard). The built-in
   // OpenRouter catalog never sets that flag, and there is no provider- or
   // params-level switch for it — the only route is a `models[]` overlay entry
-  // for THIS agent's model. It MERGES onto the built-in provider (openclaw
-  // overlays a configured entry's `compat` onto the discovered dynamic model and
-  // backfills api/baseUrl/context window from the catalog), so apiKey/baseUrl and
-  // the model's pricing/context window are preserved — we add only the compat
-  // flag. `id` is the model id WITHOUT the provider prefix (== LLM_MODEL, since
-  // model.primary is `${LLM_PROVIDER}/${LLM_MODEL}`); `name` is schema-required.
-  // Without this the request carries no session id and the proxy has nothing to
-  // attribute cost to — cost never lands (the symptom this fixes).
+  // per model. It MERGES onto the built-in provider (openclaw overlays a
+  // configured entry's `compat` onto the discovered dynamic model and backfills
+  // api/baseUrl/context window from the catalog), so apiKey/baseUrl and the
+  // model's pricing/context window are preserved — we add only the compat flag.
+  // Each `id` is a model id WITHOUT the provider prefix (the `<model>` half of
+  // model.primary `${LLM_PROVIDER}/${model}`); `name` is schema-required.
+  //
+  // We overlay the container default (LLM_MODEL) AND every model a routine can
+  // pin via the per-request `x-openclaw-model` override (`extraModelIds` — this
+  // agent's routine models, fetched from the catalog at boot). The overlay is
+  // per model id, so a routine that overrides to a model NOT in this list emits
+  // no session id and the proxy cannot attribute its cost — the turn records
+  // 0 tokens / $0 (the symptom this fixes). Listing every pinnable model keeps
+  // per-routine model selection cost-tracked without a dedicated agent per model.
   if (costTrackingEnabled(env) && env.LLM_MODEL) {
-    cfg.models = [
-      { id: env.LLM_MODEL, name: env.LLM_MODEL, compat: { supportsPromptCacheKey: true } },
-    ];
+    const seen = new Set<string>();
+    const overlay: Array<Record<string, unknown>> = [];
+    for (const id of [env.LLM_MODEL, ...extraModelIds]) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      overlay.push({ id, name: id, compat: { supportsPromptCacheKey: true } });
+    }
+    cfg.models = overlay;
   }
   return Object.keys(cfg).length > 0 ? cfg : null;
 }
