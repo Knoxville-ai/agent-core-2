@@ -29,6 +29,7 @@ import {
   type CacheUsageTotals,
   type UsageAccumulator,
 } from "./usage-telemetry.js";
+import type { ToolCallHub } from "./tool-telemetry.js";
 import { readJsonBody } from "./util.js";
 import {
   type Mcq,
@@ -89,6 +90,11 @@ export interface MessagesDeps {
   /** Per-turn model-call / prompt-cache rollup, filled by the loopback usage
    *  ingest route and drained here when the assistant row finalizes. */
   usage: UsageAccumulator;
+  /** Per-turn tool-call tracking, filled by the loopback tool-call ingest route
+   *  (fed by the knox-tool-telemetry plugin). We register this turn's context so
+   *  each tool call is attributed to the right conversation + assistant row, and
+   *  close it out in the `finally` below. */
+  toolCalls: ToolCallHub;
 }
 
 export async function handleSendMessage(
@@ -266,6 +272,16 @@ export async function handleSendMessage(
   // agentic loop reports back through the loopback ingest route under this same
   // session key; we drain the rollup in the `finally` below.
   deps.usage.begin(sessionKey);
+
+  // Register this turn's context for tool-call tracking. Every tool call openclaw
+  // makes reports back through the /internal/tool-call loopback route under this
+  // session key; the hub anchors each one to this conversation + assistant row so
+  // the console can render it live under the right bubble. Closed in `finally`.
+  deps.toolCalls.begin(sessionKey, {
+    conversationId,
+    assistantMessageId,
+    taskId: null,
+  });
 
   // Platform-brokered delegated credentials (agent-to-agent turns only).
   // On a delegated turn, pull the credentials the calling agent shared for THIS
@@ -456,6 +472,18 @@ export async function handleSendMessage(
     // case token_usage keeps exactly its previous shape.
     const cacheTotals = deps.usage.drain(sessionKey);
     if (cacheTotals) logUsageTotals(sessionKey, cacheTotals);
+    // Close out this turn's tool-call tracking. The rows are already persisted;
+    // this just drops the turn's context and logs the tally. Any tool call whose
+    // `after_tool_call` never arrived stays `status='called'` — a call we saw
+    // start but not finish.
+    const toolTotals = deps.toolCalls.end(sessionKey);
+    if (toolTotals.count > 0) {
+      log.info("turn tool calls", {
+        session_key: sessionKey,
+        tool_calls: toolTotals.count,
+        tool_errors: toolTotals.errorCount,
+      });
+    }
     await db.updateMessage(assistantMessageId, {
       content: questionPayload ? JSON.stringify(questionPayload) : buffer,
       status: finalStatus,

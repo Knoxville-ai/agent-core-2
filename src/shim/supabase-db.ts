@@ -2,6 +2,11 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import type {
+  InsertToolCallRow,
+  ToolCallDB,
+  UpdateToolCallRow,
+} from "./tool-telemetry.js";
 
 /**
  * Storage bucket the console uploads chat attachments into (see
@@ -115,7 +120,7 @@ export interface CallerContextQuery {
   limit?: number;
 }
 
-export class MessagingDB {
+export class MessagingDB implements ToolCallDB {
   private readonly client: SupabaseClient;
 
   // `client` is injectable purely for tests (the query builder is otherwise a
@@ -387,5 +392,64 @@ export class MessagingDB {
       return [];
     }
     return (data ?? []) as AttachmentRow[];
+  }
+
+  /**
+   * Insert one row into `agent_tool_calls` (console migration 0120), the audit +
+   * billing ledger for tool use. Written directly by the shim (service role) as
+   * the `knox-tool-telemetry` plugin reports each call over loopback — the same
+   * direct-write path the shim uses for `messages`. The console renders these
+   * rows live in the session over Supabase realtime.
+   *
+   * `args_preview` is already redacted + size-bounded by the plugin before it
+   * reaches the shim; it is stored verbatim as JSONB. Returns the new row id, or
+   * null on failure (logged, never thrown — telemetry must not break a turn).
+   */
+  async insertToolCall(row: InsertToolCallRow): Promise<string | null> {
+    const insert: Record<string, unknown> = {
+      org_id: row.orgId,
+      agent_uid: row.agentUid,
+      seq: row.seq,
+      tool_name: row.toolName,
+      status: "called",
+    };
+    if (row.conversationId) insert.conversation_id = row.conversationId;
+    if (row.messageId) insert.message_id = row.messageId;
+    if (row.taskId) insert.task_id = row.taskId;
+    if (row.server) insert.server = row.server;
+    if (row.toolCallId) insert.tool_call_id = row.toolCallId;
+    if (row.argsPreview !== undefined && row.argsPreview !== null) {
+      insert.args_preview = row.argsPreview;
+    }
+    const { data, error } = await this.client
+      .from("agent_tool_calls")
+      .insert(insert)
+      .select("id")
+      .single();
+    if (error) {
+      log.warn("insertToolCall failed", { err: error.message });
+      return null;
+    }
+    return (data as { id: string }).id;
+  }
+
+  /** Enrich a tool-call row with its outcome (status / error / duration) once the
+   *  `after_tool_call` hook reports it. Best-effort. */
+  async updateToolCall(id: string, patch: UpdateToolCallRow): Promise<boolean> {
+    const payload: Record<string, unknown> = {};
+    if (patch.status !== undefined) payload.status = patch.status;
+    if (patch.error !== undefined) payload.error = patch.error;
+    if (patch.durationMs !== undefined) payload.duration_ms = patch.durationMs;
+    if (patch.completedAt !== undefined) payload.completed_at = patch.completedAt;
+    if (Object.keys(payload).length === 0) return true;
+    const { error } = await this.client
+      .from("agent_tool_calls")
+      .update(payload)
+      .eq("id", id);
+    if (error) {
+      log.warn("updateToolCall failed", { err: error.message });
+      return false;
+    }
+    return true;
   }
 }

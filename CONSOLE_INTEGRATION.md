@@ -589,6 +589,58 @@ real file paths instead of the agent asking the user to re-upload. Because the
 files land under `workspace/`, they are also visible in the console Files tab
 (the `/files/*` allowlist already covers that root).
 
+## Tool-call tracking (console migration 0120)
+
+Every tool the agent calls — in a web-chat session, a long-running task, or a
+routine run — is recorded to `public.agent_tool_calls` and surfaced live in the
+session, the same way a coding assistant shows its own tool calls. This exists
+because openclaw runs the agentic tool loop **internally**: the shim reaches it
+over the OpenAI-compat `/v1/chat/completions` endpoint, whose stream carries only
+assistant *content* deltas (`iterOpenaiDeltas` drops the tool-call branch on
+purpose). So tool use was invisible — not in the session, not in the database, and
+impossible to report or bill on.
+
+```
+model calls a tool  (inside openclaw)
+      │  before_tool_call        openclaw-plugins/tool-telemetry
+      ▼
+  POST 127.0.0.1:<shim>/internal/tool-call  { phase:"start", session_key,
+        tool_name, server, tool_call_id?, args_preview(REDACTED) }
+      │
+  shim (ToolCallHub) → insert public.agent_tool_calls, attributed to the live
+        turn's conversation / task / assistant message (by session key)
+      │                              → console renders it live over realtime
+      │  after_tool_call (best-effort)
+      ▼
+  POST .../internal/tool-call  { phase:"end", session_key, status, duration_ms }
+      │
+  shim → update the row's status (ok|error) + duration
+```
+
+**What is captured.** `tool_name`, the originating MCP server / built-in group
+(`server`, derived from the tool-name prefix), a **redacted, size-bounded**
+`args_preview`, the outcome (`status` = called | ok | error) and `duration_ms`,
+the sequence within the turn, and the conversation / task / assistant-message it
+belongs to. A call's session key (`webchat:` / `a2a:` / `task:`) is the anchor,
+so a call is always attributed to the right conversation or task — and routine
+runs inherit it, since a routine run **is** an `mcp_task` bound to a conversation
+(console migration 0051), so its tool calls are the run's task/conversation rows.
+
+**Redaction is done in the gateway, before anything crosses the loopback.**
+`openclaw-plugins/tool-telemetry/redact.js` withholds credential-shaped keys
+(`*token*`, `*secret*`, `*api_key*`, `auth*`, …), summarizes the `exec` tool's
+`env` bag — where the delegated-credentials plugin injects brokered API keys — to
+key **names** only, and bounds every value. No secret and no raw prompt text is
+meant to reach the shim, let alone the database.
+
+**Boundaries.** The plugin is observe-only (it never rewrites a tool call),
+fire-and-forget (a failed/slow POST never delays or breaks a call), and rides
+**every** vessel — like usage-telemetry, unlike the platform-MCP plugins — gated
+by `AGENT_TOOL_CALL_TRACKING` (default on; set false to skip wiring the plugin
+and make the route a no-op). If the running openclaw never fires
+`after_tool_call`, rows simply stay `status='called'` — a complete audit + billing
+signal on their own.
+
 ## Migration strategy
 
 The v0.3 image deploys side-by-side with v0.2:

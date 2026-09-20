@@ -5,6 +5,7 @@ import type { AgentEnv } from "../env.js";
 import { credentialKeyNames, type DelegatedCredentialStore } from "./delegated-credentials.js";
 import { requireGatewayToken } from "./routes-files.js";
 import { parseUsageSample, type UsageAccumulator } from "./usage-telemetry.js";
+import type { ToolCallHub } from "./tool-telemetry.js";
 import { readJsonBody, sendJson } from "./util.js";
 
 /**
@@ -102,5 +103,82 @@ export async function handleLlmUsageIngest(
     return;
   }
   usage.add(sessionKey, sample, sessionId);
+  sendJson(res, 200, { ok: true, recorded: true });
+}
+
+/**
+ * Loopback tool-call ingest for the openclaw `knox-tool-telemetry` plugin.
+ *
+ *   POST /internal/tool-call
+ *     { phase: "start", session_key, tool_name, server?, tool_call_id?, args_preview? }
+ *     { phase: "end",   session_key, tool_name?, tool_call_id?, status, duration_ms? }
+ *     -> { ok: true }
+ *
+ * OpenClaw runs the tool loop internally and the OpenAI-compat stream the shim
+ * reads carries no tool calls, so this side channel is the ONLY way the shim
+ * learns a tool ran. The `start` phase inserts a row into `agent_tool_calls`
+ * (attributed to the live turn's conversation/task/assistant message); the `end`
+ * phase enriches it with the outcome. See tool-telemetry.ts.
+ *
+ * Same loopback + gateway-token trust anchor as `/internal/llm-usage`.
+ * `args_preview` was already redacted + size-bounded by the plugin, inside the
+ * gateway, before it crossed this route — no secret and no raw prompt text is
+ * ever meant to arrive here.
+ *
+ * Always 200s. Telemetry must never be able to fail a tool call, so a bad body
+ * is counted and dropped rather than surfaced as an error the plugin would retry.
+ */
+export async function handleToolCallIngest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  env: AgentEnv,
+  hub: ToolCallHub,
+): Promise<void> {
+  requireGatewayToken(req.headers.authorization, env);
+  if (!hub.enabled) {
+    sendJson(res, 200, { ok: true, recorded: false });
+    return;
+  }
+  const body = await readJsonBody<Record<string, unknown>>(req).catch(() => null);
+  const phase = typeof body?.phase === "string" ? body.phase : "";
+  const sessionKey = typeof body?.session_key === "string" ? body.session_key : null;
+  const toolName = typeof body?.tool_name === "string" ? body.tool_name : null;
+  const toolCallId =
+    typeof body?.tool_call_id === "string" ? body.tool_call_id : null;
+
+  try {
+    if (phase === "start") {
+      if (!toolName) {
+        sendJson(res, 200, { ok: true, recorded: false });
+        return;
+      }
+      await hub.recordStart({
+        sessionKey,
+        toolName,
+        server: typeof body?.server === "string" ? body.server : null,
+        toolCallId,
+        argsPreview: body?.args_preview ?? null,
+      });
+    } else if (phase === "end") {
+      const status = body?.status === "error" ? "error" : "ok";
+      const durationRaw = body?.duration_ms;
+      await hub.recordEnd({
+        sessionKey,
+        toolName,
+        toolCallId,
+        status,
+        durationMs:
+          typeof durationRaw === "number" && Number.isFinite(durationRaw)
+            ? durationRaw
+            : null,
+      });
+    } else {
+      sendJson(res, 200, { ok: true, recorded: false });
+      return;
+    }
+  } catch (err) {
+    // Fail open — a telemetry error must never propagate to the tool call.
+    log.warn("tool-call ingest threw (non-fatal)", { err: String(err) });
+  }
   sendJson(res, 200, { ok: true, recorded: true });
 }

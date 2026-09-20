@@ -18,6 +18,7 @@ import {
 import type { AttachmentRow, MessagingDB } from "./supabase-db.js";
 import { TaskReporter } from "./task-reporter.js";
 import { logUsageTotals, type UsageAccumulator } from "./usage-telemetry.js";
+import type { ToolCallHub } from "./tool-telemetry.js";
 
 /**
  * The long-running task executor (console migration 0047).
@@ -123,6 +124,10 @@ export interface TaskRunnerDeps {
   /** Per-task model-call / prompt-cache rollup, filled by the loopback usage
    *  ingest route and drained when the task's assistant row finalizes. */
   usage: UsageAccumulator;
+  /** Per-task tool-call tracking, fed by the loopback tool-call ingest route.
+   *  Each task turn registers its context so tool calls are attributed to the
+   *  task's work conversation + assistant row. */
+  toolCalls: ToolCallHub;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
 }
@@ -545,6 +550,16 @@ export class TaskRunner {
     // session key; drained after the stream ends.
     this.deps.usage.begin(sessionKey);
 
+    // Register this task turn's context for tool-call tracking, so every tool
+    // call the executor makes is attributed to the task's work conversation +
+    // assistant row (and, via the session key, the task itself). Closed out after
+    // the stream ends, below.
+    this.deps.toolCalls.begin(sessionKey, {
+      conversationId,
+      assistantMessageId,
+      taskId: spec.taskId,
+    });
+
     const usageRef: { value: OpenaiUsage | null } = { value: null };
     const terminalRef: { value: StreamTermination } = {
       value: { finishReason: null, sawDone: false },
@@ -613,6 +628,16 @@ export class TaskRunner {
     // when there is no assistant row to write it onto, so the bucket cannot leak.
     const cacheTotals = this.deps.usage.drain(sessionKey);
     if (cacheTotals) logUsageTotals(sessionKey, cacheTotals);
+
+    // Close out this task turn's tool-call tracking (rows already persisted).
+    const toolTotals = this.deps.toolCalls.end(sessionKey);
+    if (toolTotals.count > 0) {
+      log.info("task turn tool calls", {
+        task_id: spec.taskId,
+        tool_calls: toolTotals.count,
+        tool_errors: toolTotals.errorCount,
+      });
+    }
 
     if (assistantMessageId && conversationId) {
       await db.updateMessage(assistantMessageId, {

@@ -48,6 +48,20 @@ const USAGE_TELEMETRY_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/usage-telemetry", import.meta.url),
 );
 
+/** Tool telemetry: forwards every tool call the agent makes — name + REDACTED
+ *  args, then outcome — to the shim over loopback, which records it to
+ *  `agent_tool_calls`.
+ *
+ *  openclaw runs the tool loop internally and its OpenAI-compat stream carries
+ *  no tool calls, so the `before_tool_call` / `after_tool_call` hooks are the
+ *  only place the shim can observe them. Like usage-telemetry this rides EVERY
+ *  vessel (any agent makes tool calls), gated by AGENT_TOOL_CALL_TRACKING.
+ *  Resolved the same way as the plugins above. */
+export const TOOL_TELEMETRY_PLUGIN_ID = "knox-tool-telemetry";
+const TOOL_TELEMETRY_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/tool-telemetry", import.meta.url),
+);
+
 /** The platform constitution shipped in the image (see `prompts/constitution.md`).
  *  Resolved relative to this module so it works from both `src/` (tests) and
  *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
@@ -630,6 +644,29 @@ export function buildOpenclawConfig(
     // no actual cost. This plugin reads ONLY the usage counts off the event, never
     // conversation text, so granting the access is safe.
     entries[USAGE_TELEMETRY_PLUGIN_ID] = {
+      enabled: true,
+      hooks: { allowConversationAccess: true },
+    };
+    plugins.entries = entries;
+    config.plugins = plugins;
+  }
+
+  // Tool-call telemetry rides EVERY vessel too, gated by AGENT_TOOL_CALL_TRACKING
+  // (default on). Any agent makes tool calls, and — unlike the token usage above —
+  // they are otherwise completely invisible to the platform: openclaw runs the
+  // tool loop internally and its chat-completions stream carries none of them.
+  if (env.AGENT_TOOL_CALL_TRACKING) {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, TOOL_TELEMETRY_PLUGIN_DIR] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    // `before_tool_call` needs no special access (the three injector plugins use
+    // it without any), but `after_tool_call` may be classed as a conversation
+    // hook in some openclaw builds — grant the same opt-in usage-telemetry uses so
+    // the outcome/duration enrichment can fire. Safe: this plugin reads only the
+    // tool name + params (which it redacts), never conversation text.
+    entries[TOOL_TELEMETRY_PLUGIN_ID] = {
       enabled: true,
       hooks: { allowConversationAccess: true },
     };

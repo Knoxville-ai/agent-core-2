@@ -1,0 +1,8 @@
+{
+  "name": "knox-tool-telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "OpenClaw plugin: forward each tool call the agent makes (name + redacted args, then outcome) to the agent-core shim over loopback, so tool use is surfaced in the session and recorded for audit and billing."
+}
