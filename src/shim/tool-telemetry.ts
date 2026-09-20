@@ -80,6 +80,8 @@ export interface ToolCallEndEvent {
   toolName?: string | null;
   toolCallId?: string | null;
   status: "ok" | "error";
+  /** Bounded diagnostic on failure; already length-capped by the plugin. */
+  error?: string | null;
   durationMs?: number | null;
 }
 
@@ -259,6 +261,7 @@ export class ToolCallHub {
     try {
       await this.#db.updateToolCall(open.rowId, {
         status: ev.status,
+        error: ev.status === "error" ? (ev.error ?? null) : null,
         durationMs,
         completedAt: new Date().toISOString(),
       });

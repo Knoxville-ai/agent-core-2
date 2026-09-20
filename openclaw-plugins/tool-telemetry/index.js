@@ -1,6 +1,6 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
-import { count, redactArgs, serverFromToolName } from "./redact.js";
+import { count, redactArgs, serverFromToolName, truncateError } from "./redact.js";
 
 /**
  * Knox tool-telemetry — surfaces and records every tool call the agent makes.
@@ -80,11 +80,15 @@ async function report(body) {
   }
 }
 
-/** True when an `after_tool_call` event reports the call failed. OpenClaw shapes
- *  vary across versions, so read every field that could carry the verdict and
- *  default to success only when nothing says otherwise. */
+/** True when an `after_tool_call` event reports the call failed.
+ *
+ * The authoritative signal in openclaw 2026.5.20 is `event.error` (a non-empty
+ * string set only on failure — see PluginHookAfterToolCallEvent). The remaining
+ * checks are defensive across openclaw versions/shapes; we default to success
+ * only when nothing says otherwise. */
 function isError(event) {
   if (!event || typeof event !== "object") return false;
+  if (typeof event.error === "string" && event.error.trim()) return true;
   if (event.isError === true || event.ok === false || event.success === false) return true;
   if (typeof event.status === "string" && /error|fail/i.test(event.status)) return true;
   const result = event.result;
@@ -136,12 +140,16 @@ export default definePluginEntry({
       async (event, ctx) => {
         const toolName = event?.toolName;
         if (typeof toolName !== "string" || !toolName) return;
+        const errored = isError(event);
         await report({
           phase: "end",
           session_key: ctx?.sessionKey ?? event?.sessionKey ?? null,
           tool_name: toolName,
           tool_call_id: toolCallId(event),
-          status: isError(event) ? "error" : "ok",
+          status: errored ? "error" : "ok",
+          // A bounded diagnostic on failure only — the "what went wrong" half of
+          // the audit trail. Kept (not redacted) but length-capped; see redact.js.
+          error: errored ? truncateError(event?.error) : null,
           duration_ms: count(event?.durationMs ?? event?.duration_ms),
         });
       },

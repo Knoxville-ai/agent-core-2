@@ -133,6 +133,26 @@ describe("ToolCallHub.recordEnd", () => {
     expect(updates[0].patch.status).toBe("error");
   });
 
+  it("stores the error text on an error, and nothing on success", async () => {
+    const { hub, updates } = makeHub();
+    hub.begin("webchat:c", { conversationId: "c", assistantMessageId: "m", taskId: null });
+    await hub.recordStart({ sessionKey: "webchat:c", toolName: "a", toolCallId: "call-a" });
+    await hub.recordStart({ sessionKey: "webchat:c", toolName: "b", toolCallId: "call-b" });
+    await hub.recordEnd({
+      sessionKey: "webchat:c",
+      status: "error",
+      error: "boom",
+      toolCallId: "call-a",
+    });
+    await hub.recordEnd({ sessionKey: "webchat:c", status: "ok", error: "ignored", toolCallId: "call-b" });
+    const errUpdate = updates.find((u) => u.id === "row-1");
+    const okUpdate = updates.find((u) => u.id === "row-2");
+    expect(errUpdate?.patch).toMatchObject({ status: "error", error: "boom" });
+    // An ok status never carries an error, even if one was passed.
+    expect(okUpdate?.patch.status).toBe("ok");
+    expect(okUpdate?.patch.error).toBeNull();
+  });
+
   it("uses the reported duration when present", async () => {
     const { hub, updates } = makeHub();
     hub.begin("webchat:c", { conversationId: "c", assistantMessageId: "m", taskId: null });
