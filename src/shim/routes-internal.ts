@@ -167,6 +167,7 @@ export async function handleToolCallIngest(
         toolName,
         toolCallId,
         status,
+        error: typeof body?.error === "string" ? body.error : null,
         durationMs:
           typeof durationRaw === "number" && Number.isFinite(durationRaw)
             ? durationRaw

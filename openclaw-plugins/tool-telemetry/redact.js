@@ -152,3 +152,20 @@ export function count(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
   return Math.floor(value);
 }
+
+const MAX_ERROR = 1000;
+
+/**
+ * A bounded error message for the `agent_tool_calls.error` column, or null.
+ *
+ * Unlike args, a tool's error string is a human-facing diagnostic (and the whole
+ * point of the audit trail — "what failed"), so it is kept rather than redacted
+ * — but still length-bounded so a pathological stack trace can't bloat the row.
+ * Returns null for a missing/blank error so a successful call stores nothing.
+ */
+export function truncateError(value) {
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  if (!s) return null;
+  return s.length <= MAX_ERROR ? s : `${s.slice(0, MAX_ERROR)}…(+${s.length - MAX_ERROR} chars)`;
+}

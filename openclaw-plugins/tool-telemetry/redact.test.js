@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { count, redactArgs, serverFromToolName } from "./redact.js";
+import { count, redactArgs, serverFromToolName, truncateError } from "./redact.js";
 
 describe("redactArgs — credential-shaped keys", () => {
   it("redacts values under sensitive key names, keeps benign ones", () => {
@@ -134,6 +134,26 @@ describe("serverFromToolName", () => {
     expect(serverFromToolName("bash")).toBeNull();
     expect(serverFromToolName("")).toBeNull();
     expect(serverFromToolName(null)).toBeNull();
+  });
+});
+
+describe("truncateError", () => {
+  it("returns null for missing/blank errors", () => {
+    expect(truncateError(undefined)).toBeNull();
+    expect(truncateError(null)).toBeNull();
+    expect(truncateError("")).toBeNull();
+    expect(truncateError("   ")).toBeNull();
+    expect(truncateError(123)).toBeNull();
+  });
+
+  it("keeps a short error as-is (trimmed)", () => {
+    expect(truncateError("  boom  ")).toBe("boom");
+  });
+
+  it("caps a very long error", () => {
+    const out = truncateError("e".repeat(1500));
+    expect(out.length).toBeLessThan(1500);
+    expect(out).toMatch(/…\(\+500 chars\)$/);
   });
 });
 

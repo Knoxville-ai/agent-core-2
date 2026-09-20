@@ -233,13 +233,19 @@ describe("handleToolCallIngest", () => {
       hub,
     );
     await handleToolCallIngest(
-      jsonReq({ phase: "end", session_key: "webchat:c", status: "error", duration_ms: 42 }),
+      jsonReq({
+        phase: "end",
+        session_key: "webchat:c",
+        status: "error",
+        error: "kaboom",
+        duration_ms: 42,
+      }),
       fakeRes().res,
       makeEnv(),
       hub,
     );
     expect(updates).toHaveLength(1);
-    expect(updates[0].patch).toMatchObject({ status: "error", durationMs: 42 });
+    expect(updates[0].patch).toMatchObject({ status: "error", error: "kaboom", durationMs: 42 });
   });
 
   it("ignores an unknown phase without inserting", async () => {
