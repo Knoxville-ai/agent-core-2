@@ -273,6 +273,24 @@ const Schema = z.object({
     .default("30")
     .transform((v) => Math.max(5, Number.parseInt(v, 10) || 30)),
 
+  // ── Tool-call tracking (console migration 0120) ─────────────────────────────
+  // Records every tool call the agent makes (name + redacted args + outcome) to
+  // `agent_tool_calls` via the knox-tool-telemetry openclaw plugin, so tool use
+  // is surfaced live in the session and available for audit and per-tool-call
+  // billing. On by default; every vessel makes tool calls and the capture cost is
+  // one fire-and-forget loopback POST per call plus one row insert.
+  //
+  // Kill switch: set to false to skip wiring the plugin (render-workspace) and
+  // make the loopback route a no-op — no rows written, no per-call overhead.
+  AGENT_TOOL_CALL_TRACKING: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => {
+      const s = v.trim().toLowerCase();
+      return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()

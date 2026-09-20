@@ -1,0 +1,12 @@
+{
+  "id": "knox-tool-telemetry",
+  "name": "Knox Tool Telemetry",
+  "description": "Forward each tool call the agent makes (name + redacted args, then outcome) to the agent-core shim over loopback, so tool use is surfaced in the session and recorded for audit and billing.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

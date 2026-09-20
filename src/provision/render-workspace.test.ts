@@ -14,6 +14,7 @@ import {
   REPORT_OUTCOME_PLUGIN_ID,
   TASK_PROGRESS_PLUGIN_ID,
   USAGE_TELEMETRY_PLUGIN_ID,
+  TOOL_TELEMETRY_PLUGIN_ID,
   parseToolList,
   resolveHeartbeatEvery,
   writeOpenclawConfig,
@@ -37,6 +38,7 @@ function makeEnv(overrides: Partial<AgentEnv>): AgentEnv {
     AGENT_HTTP_PORT: 8080,
     OPENCLAW_GATEWAY_PORT: 18789,
     OPENCLAW_STATE_DIR: "/home/agent/.openclaw",
+    AGENT_TOOL_CALL_TRACKING: true,
     LOG_LEVEL: "info",
     ...overrides,
   } as AgentEnv;
@@ -472,6 +474,38 @@ describe("buildOpenclawConfig platform plugins", () => {
         (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/usage-telemetry")),
       ).toBe(true);
     }
+  });
+
+  it("ALWAYS wires tool telemetry, platform MCP or not (every vessel makes tool calls)", () => {
+    for (const env of [
+      makeEnv({}),
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+    ]) {
+      const p = plugins(buildOpenclawConfig(env, "/ws"));
+      // `after_tool_call` may be a conversation hook in some openclaw builds, so
+      // grant the same opt-in usage-telemetry uses (the plugin reads only the tool
+      // name + redacted params, never conversation text). See buildOpenclawConfig.
+      expect(p.entries?.[TOOL_TELEMETRY_PLUGIN_ID]).toEqual({
+        enabled: true,
+        hooks: { allowConversationAccess: true },
+      });
+      expect(
+        (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/tool-telemetry")),
+      ).toBe(true);
+    }
+  });
+
+  it("does NOT wire tool telemetry when AGENT_TOOL_CALL_TRACKING is off (kill switch)", () => {
+    const p = plugins(
+      buildOpenclawConfig(makeEnv({ AGENT_TOOL_CALL_TRACKING: false }), "/ws"),
+    );
+    expect(p.entries?.[TOOL_TELEMETRY_PLUGIN_ID]).toBeUndefined();
+    expect(
+      (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/tool-telemetry")),
+    ).toBe(false);
   });
 
   it("merges with an existing plugins block (Codex OAuth entries survive)", () => {

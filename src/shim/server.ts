@@ -27,8 +27,10 @@ import { DelegatedCredentialStore } from "./delegated-credentials.js";
 import {
   handleDelegatedCredentialsLookup,
   handleLlmUsageIngest,
+  handleToolCallIngest,
 } from "./routes-internal.js";
 import { UsageAccumulator } from "./usage-telemetry.js";
+import { ToolCallHub } from "./tool-telemetry.js";
 import {
   handleSkillsInstall,
   handleSkillsList,
@@ -65,10 +67,28 @@ export function startShim(
   // (writer) and the loopback lookup route (reader for the gateway plugin).
   const delegatedCreds = new DelegatedCredentialStore();
   const usage = usageAccumulator ?? new UsageAccumulator();
+  // Per-turn tool-call tracking, fed by the knox-tool-telemetry openclaw plugin
+  // over the /internal/tool-call loopback route. Shared between the message +
+  // task paths (which register each turn's context) and the loopback route
+  // (which records the calls). Records to `agent_tool_calls`; the console renders
+  // them live in the session over realtime. Gated by AGENT_TOOL_CALL_TRACKING.
+  const toolCalls = new ToolCallHub({
+    db,
+    orgId: env.AGENT_ORG,
+    agentUid: env.AGENT_UID,
+    enabled: env.AGENT_TOOL_CALL_TRACKING,
+  });
   // Long-running task executor. Detached from every HTTP request: the task
   // routes hand work to it and return 202, and it reports back to the platform
   // on its own schedule (see task-runner.ts).
-  const taskRunner = new TaskRunner({ env, db, memory, delegatedCreds, usage });
+  const taskRunner = new TaskRunner({
+    env,
+    db,
+    memory,
+    delegatedCreds,
+    usage,
+    toolCalls,
+  });
   const oauth: OAuthDeps = {
     env,
     db,
@@ -88,6 +108,7 @@ export function startShim(
       delegatedCreds,
       taskRunner,
       usage,
+      toolCalls,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -142,6 +163,7 @@ async function route(
   delegatedCreds: DelegatedCredentialStore,
   taskRunner: TaskRunner,
   usage: UsageAccumulator,
+  toolCalls: ToolCallHub,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -177,6 +199,15 @@ async function route(
   if (path === "/internal/llm-usage") {
     if (method !== "POST") throw new HttpError(405, "method not allowed");
     return handleLlmUsageIngest(req, res, env, usage);
+  }
+
+  // Per-tool-call telemetry from the knox-tool-telemetry openclaw plugin. Same
+  // loopback + gateway-token trust anchor as the usage ingest above. Records
+  // each tool call the agent makes to `agent_tool_calls` for in-session
+  // surfacing, audit, and per-tool-call billing.
+  if (path === "/internal/tool-call") {
+    if (method !== "POST") throw new HttpError(405, "method not allowed");
+    return handleToolCallIngest(req, res, env, toolCalls);
   }
 
   // Live skill management (console operator surface). Gateway-token authed like
@@ -244,6 +275,7 @@ async function route(
         memory,
         delegatedCreds,
         usage,
+        toolCalls,
       });
     }
     if (sub === "interrupt") {
