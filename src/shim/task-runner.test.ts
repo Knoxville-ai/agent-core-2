@@ -8,6 +8,7 @@ import {
   firstCompleteLine,
   isCleanFinish,
   splitModelRef,
+  ROUTINE_BOUNDED_CEILING,
   TaskRunner,
   type TaskSpec,
 } from "./task-runner.js";
@@ -220,6 +221,50 @@ describe("TaskRunner scheduling", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(seen).toEqual(["d1", "d2"]);
+  });
+
+  it("starts routine-bounded tasks at once, outside the general cap", async () => {
+    // A routine's parallel runs are capped per routine by the platform; queued
+    // behind the general cap they would send no heartbeat and be reaped.
+    const { runner, inFlight, finish } = makeRunner(makeEnv());
+    for (const id of ["a", "b", "c"]) runner.accept(makeSpec(id, false));
+    for (const id of ["r1", "r2", "r3", "r4"]) {
+      runner.accept({ ...makeSpec(id, false), routineBounded: true });
+    }
+    await new Promise((r) => setImmediate(r));
+
+    expect([...inFlight].sort()).toEqual(["a", "b", "r1", "r2", "r3", "r4"]);
+    expect(runner.queuedCount).toBe(1);
+
+    // Finishing a routine task frees nothing in the general lane.
+    await finish("r1");
+    expect(inFlight.has("c")).toBe(false);
+    await finish("a");
+    expect(inFlight.has("c")).toBe(true);
+  });
+
+  it("caps the routine-bounded lane at its fixed ceiling", async () => {
+    const { runner, inFlight, finish } = makeRunner(
+      makeEnv({ AGENT_MAX_QUEUED_TASKS: 50 } as Partial<AgentEnv>),
+    );
+    const ids = Array.from({ length: ROUTINE_BOUNDED_CEILING + 2 }, (_, i) => `r${i}`);
+    for (const id of ids) runner.accept({ ...makeSpec(id, false), routineBounded: true });
+    await new Promise((r) => setImmediate(r));
+
+    expect(inFlight.size).toBe(ROUTINE_BOUNDED_CEILING);
+    expect(runner.queuedCount).toBe(2);
+    await finish("r0");
+    expect(inFlight.size).toBe(ROUTINE_BOUNDED_CEILING);
+    expect(runner.queuedCount).toBe(1);
+  });
+
+  it("serial mode: a credential-carrying routine task still takes the credential lane", async () => {
+    const { runner, inFlight } = makeRunner(serialEnv({ AGENT_MAX_CONCURRENT_TASKS: 8 }));
+    runner.accept({ ...makeSpec("d1", true), routineBounded: true });
+    runner.accept({ ...makeSpec("d2", true), routineBounded: true });
+    await new Promise((r) => setImmediate(r));
+
+    expect([...inFlight]).toEqual(["d1"]);
   });
 
   it("rejects a start once the queue is full rather than sitting on the work", () => {

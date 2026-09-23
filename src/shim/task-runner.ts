@@ -102,7 +102,25 @@ export interface TaskSpec {
    * the wait. Absent on a normal (first) task run.
    */
   resumePrompt?: string | null;
+  /**
+   * The platform has already bounded how many tasks like this run at once — a
+   * routine's parallel runs, capped per routine by its max_parallel_runs
+   * (console migration 0122). Such a task gets its own lane, outside
+   * AGENT_MAX_CONCURRENT_TASKS, and starts immediately: queued behind the
+   * general cap it would send no heartbeat and be reaped before it ran, and the
+   * point of the per-routine setting is that nobody sizes the vessel for it.
+   * The lane still has a fixed ceiling (ROUTINE_BOUNDED_CEILING) so a
+   * misbehaving platform can never run the container out of memory.
+   */
+  routineBounded?: boolean;
 }
+
+/**
+ * Hard ceiling on the routine-bounded lane. Matches the console's maximum
+ * max_parallel_runs, so one routine at its limit always fits; it is a backstop,
+ * not a knob — the per-routine setting is the real limit.
+ */
+export const ROUTINE_BOUNDED_CEILING = 20;
 
 export type TaskState = "queued" | "running" | "finished";
 
@@ -114,6 +132,8 @@ interface TrackedTask {
   /** True when this task holds (or wants) the serialized credential lane.
    *  Only ever set in `serial` mode — in `parallel` mode there is no lane. */
   usesCredentialLane: boolean;
+  /** True when this task runs in the routine-bounded lane (see TaskSpec). */
+  usesRoutineLane: boolean;
 }
 
 export interface TaskRunnerDeps {
@@ -137,6 +157,7 @@ export class TaskRunner {
   private readonly tasks = new Map<string, TrackedTask>();
   private readonly queue: string[] = [];
   private generalRunning = 0;
+  private routineRunning = 0;
   private credentialLaneBusy = false;
 
   constructor(deps: TaskRunnerDeps) {
@@ -159,6 +180,7 @@ export class TaskRunner {
     state: TaskState;
     delegated: boolean;
     credential_lane: boolean;
+    routine_lane: boolean;
     started_at: number;
   }> {
     return [...this.tasks.values()].map((t) => ({
@@ -168,6 +190,7 @@ export class TaskRunner {
       // Whether this task is serialized behind the credential lane — the thing
       // an operator actually wants to see when delegated throughput looks low.
       credential_lane: t.usesCredentialLane,
+      routine_lane: t.usesRoutineLane,
       started_at: t.startedAt,
     }));
   }
@@ -188,6 +211,9 @@ export class TaskRunner {
       this.deps.env.AGENT_DELEGATED_TASK_MODE === "serial" &&
       spec.delegated &&
       spec.sharesCredentials;
+    // The credential lane wins: serializing secrets is a correctness rule, the
+    // routine lane only a throughput one.
+    const usesRoutineLane = !usesCredentialLane && spec.routineBounded === true;
 
     this.tasks.set(spec.taskId, {
       spec,
@@ -195,6 +221,7 @@ export class TaskRunner {
       abort: new AbortController(),
       startedAt: Date.now(),
       usesCredentialLane,
+      usesRoutineLane,
     });
     this.queue.push(spec.taskId);
     log.info("task accepted", {
@@ -202,6 +229,7 @@ export class TaskRunner {
       delegated: spec.delegated,
       shares_credentials: spec.sharesCredentials,
       credential_lane: usesCredentialLane,
+      routine_lane: usesRoutineLane,
       queued: this.queue.length,
     });
     this.pump();
@@ -251,7 +279,9 @@ export class TaskRunner {
       }
       const canStart = task.usesCredentialLane
         ? !this.credentialLaneBusy
-        : this.generalRunning < this.deps.env.AGENT_MAX_CONCURRENT_TASKS;
+        : task.usesRoutineLane
+          ? this.routineRunning < ROUTINE_BOUNDED_CEILING
+          : this.generalRunning < this.deps.env.AGENT_MAX_CONCURRENT_TASKS;
       if (!canStart) {
         i += 1;
         continue;
@@ -259,6 +289,7 @@ export class TaskRunner {
       this.queue.splice(i, 1);
       task.state = "running";
       if (task.usesCredentialLane) this.credentialLaneBusy = true;
+      else if (task.usesRoutineLane) this.routineRunning += 1;
       else this.generalRunning += 1;
       // `run` handles its own errors, but the lane accounting must survive even
       // an unexpected throw: a leaked credential lane would stall every
@@ -272,6 +303,7 @@ export class TaskRunner {
         })
         .finally(() => {
           if (task.usesCredentialLane) this.credentialLaneBusy = false;
+          else if (task.usesRoutineLane) this.routineRunning -= 1;
           else this.generalRunning -= 1;
           task.state = "finished";
           this.tasks.delete(task.spec.taskId);
