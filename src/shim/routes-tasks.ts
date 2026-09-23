@@ -37,6 +37,7 @@ interface TaskStartBody {
   shares_credentials?: unknown;
   model?: unknown;
   resume_prompt?: unknown;
+  routine_bounded?: unknown;
 }
 
 export interface TasksDeps {
@@ -136,6 +137,12 @@ export async function handleTaskStart(
     // Set only when the platform is re-dispatching a task that paused on a human
     // escalation (0048): the human's decision, delivered as the resume turn.
     resumePrompt: str(body.resume_prompt),
+    // A routine's parallel run (console 0122): the platform already capped how
+    // many of these run at once, so it gets the routine lane instead of
+    // queueing behind AGENT_MAX_CONCURRENT_TASKS. Every caller here holds a
+    // platform-signed token, and the lane has its own hard ceiling, so the
+    // flag can shift where a task runs but never how much the vessel takes on.
+    routineBounded: body.routine_bounded === true,
   };
 
   if (!deps.runner.accept(spec)) {
