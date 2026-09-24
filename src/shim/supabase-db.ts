@@ -270,6 +270,9 @@ export class MessagingDB implements ToolCallDB {
         .select("title,body,kind,tags")
         .eq("agent_uid", agentUid)
         .is("superseded_by", null)
+        // Only lessons in force (console 0125): a PROPOSED lesson is waiting on
+        // a human and must not steer the agent before it is confirmed.
+        .eq("status", "active")
         .order("created_at", { ascending: false })
         .limit(limit);
       if (error) {

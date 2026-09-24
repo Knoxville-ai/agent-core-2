@@ -64,7 +64,15 @@ const SEND_CUSTOMER_EMAIL_SUFFIX = /(^|[.:/]|__)send_customer_email$/;
  * which the platform uses to thread the delegation into one session tree and to
  * compute the real call depth.
  */
+/** The platform's non-blocking learning tools (console migration 0125). Neither
+ *  parks anything — they only LINK the question / review to the work it came
+ *  from, so the console can show "asked during task X". Same stamping rule as
+ *  escalate_to_human: `task_id` in a task session, `conversation_id` otherwise.
+ *  Absent ids are harmless (the row is simply unlinked), so this is a nicety. */
+const LEARNING_LINK_SUFFIX = /(^|[.:/]|__)(ask_question|submit_for_review)$/;
+
 const CONVERSATION_ID_TOOLS = [
+  { suffix: LEARNING_LINK_SUFFIX, param: "conversation_id" },
   { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
   { suffix: START_TASK_SUFFIX, param: "conversation_id" },
   { suffix: ESCALATE_TO_HUMAN_SUFFIX, param: "conversation_id" },
@@ -100,6 +108,11 @@ export function isEscalateToHumanTool(toolName) {
  *  stamps `task_id` and a webchat/a2a session stamps `conversation_id`. */
 export function isSendCustomerEmailTool(toolName) {
   return typeof toolName === "string" && SEND_CUSTOMER_EMAIL_SUFFIX.test(toolName);
+}
+
+/** True when `toolName` is ask_question or submit_for_review (0125). */
+export function isLearningLinkTool(toolName) {
+  return typeof toolName === "string" && LEARNING_LINK_SUFFIX.test(toolName);
 }
 
 /**

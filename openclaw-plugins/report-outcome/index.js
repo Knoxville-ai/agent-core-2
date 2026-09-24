@@ -5,6 +5,7 @@ import {
   conversationIdFromSessionKey,
   conversationIdParamFor,
   isEscalateToHumanTool,
+  isLearningLinkTool,
   isSendCustomerEmailTool,
   isStartTaskTool,
   taskIdFromSessionKey,
@@ -40,7 +41,7 @@ export default definePluginEntry({
   id: "knox-report-outcome",
   name: "Knox Conversation Id Injector",
   description:
-    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, and send_customer_email MCP calls so the model never has to know or type it.",
+    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, send_customer_email, ask_question and submit_for_review MCP calls so the model never has to know or type it.",
   register(api) {
     api.on(
       "before_tool_call",
@@ -54,7 +55,13 @@ export default definePluginEntry({
         // platform resolves it from the task). From a webchat/a2a session they
         // park the conversation and fall through to the normal conversation_id
         // stamping below.
-        if (isEscalateToHumanTool(toolName) || isSendCustomerEmailTool(toolName)) {
+        // ask_question / submit_for_review (0125) never park, but take the same
+        // task_id-in-a-task-session link so the console shows where they came from.
+        if (
+          isEscalateToHumanTool(toolName) ||
+          isSendCustomerEmailTool(toolName) ||
+          isLearningLinkTool(toolName)
+        ) {
           const taskId = taskIdFromSessionKey(ctx?.sessionKey);
           if (taskId) {
             const params = buildOutcomeParams(event?.params ?? {}, taskId, "task_id");
