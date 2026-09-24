@@ -7,6 +7,7 @@ import {
   isReportOutcomeTool,
   isEscalateToHumanTool,
   isSendCustomerEmailTool,
+  isLearningLinkTool,
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
@@ -277,5 +278,24 @@ describe("headline: the model reports on the exact session it is serving", () =>
       conversationIdFromSessionKey("webchat:conv-own"),
     );
     expect(webchat.conversation_id).toBe("conv-own");
+  });
+});
+
+describe("isLearningLinkTool", () => {
+  it("matches ask_question and submit_for_review, bare and prefixed", () => {
+    expect(isLearningLinkTool("ask_question")).toBe(true);
+    expect(isLearningLinkTool("knoxville_platform__submit_for_review")).toBe(true);
+    expect(isLearningLinkTool("knoxville_platform.ask_question")).toBe(true);
+  });
+
+  it("does not match the other learning tools or neighbours", () => {
+    for (const name of ["check_lessons", "get_feedback", "propose_lesson", "escalate_to_human", null]) {
+      expect(isLearningLinkTool(name), String(name)).toBe(false);
+    }
+  });
+
+  it("stamps conversation_id outside a task session", () => {
+    expect(conversationIdParamFor("ask_question")).toBe("conversation_id");
+    expect(conversationIdParamFor("submit_for_review")).toBe("conversation_id");
   });
 });
