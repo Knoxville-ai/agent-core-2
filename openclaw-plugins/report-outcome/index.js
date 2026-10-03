@@ -4,6 +4,7 @@ import {
   buildOutcomeParams,
   conversationIdFromSessionKey,
   conversationIdParamFor,
+  isCreateReminderTool,
   isEscalateToHumanTool,
   isLearningLinkTool,
   isSendCustomerEmailTool,
@@ -41,7 +42,7 @@ export default definePluginEntry({
   id: "knox-report-outcome",
   name: "Knox Conversation Id Injector",
   description:
-    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, send_customer_email, ask_question and submit_for_review MCP calls so the model never has to know or type it.",
+    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, send_customer_email, ask_question, submit_for_review and create_reminder MCP calls so the model never has to know or type it.",
   register(api) {
     api.on(
       "before_tool_call",
@@ -57,10 +58,12 @@ export default definePluginEntry({
         // stamping below.
         // ask_question / submit_for_review (0125) never park, but take the same
         // task_id-in-a-task-session link so the console shows where they came from.
+        // create_reminder (0137) takes it to find who the reminder reports to.
         if (
           isEscalateToHumanTool(toolName) ||
           isSendCustomerEmailTool(toolName) ||
-          isLearningLinkTool(toolName)
+          isLearningLinkTool(toolName) ||
+          isCreateReminderTool(toolName)
         ) {
           const taskId = taskIdFromSessionKey(ctx?.sessionKey);
           if (taskId) {
