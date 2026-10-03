@@ -8,6 +8,7 @@ import {
   isEscalateToHumanTool,
   isSendCustomerEmailTool,
   isLearningLinkTool,
+  isCreateReminderTool,
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
@@ -297,5 +298,24 @@ describe("isLearningLinkTool", () => {
   it("stamps conversation_id outside a task session", () => {
     expect(conversationIdParamFor("ask_question")).toBe("conversation_id");
     expect(conversationIdParamFor("submit_for_review")).toBe("conversation_id");
+  });
+});
+
+describe("isCreateReminderTool", () => {
+  it("matches create_reminder, bare and prefixed", () => {
+    expect(isCreateReminderTool("create_reminder")).toBe(true);
+    expect(isCreateReminderTool("knoxville_platform__create_reminder")).toBe(true);
+    expect(isCreateReminderTool("knoxville_platform.create_reminder")).toBe(true);
+  });
+
+  it("does not match the other reminder tools or neighbours", () => {
+    for (const name of ["resolve_reminder", "list_my_reminders", "cancel_reminder", "create_routine", null]) {
+      expect(isCreateReminderTool(name), String(name)).toBe(false);
+    }
+  });
+
+  it("stamps conversation_id outside a task session — it decides who the reminder reports to", () => {
+    expect(conversationIdParamFor("knoxville_platform__create_reminder")).toBe("conversation_id");
+    expect(conversationIdParamFor("resolve_reminder")).toBe(null);
   });
 });
