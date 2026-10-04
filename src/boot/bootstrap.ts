@@ -28,7 +28,9 @@ import {
   installBundleSkills,
   resetWorkspaceSkills,
 } from "../skills/install.js";
+import { clearLock, readLock } from "../skills/lock.js";
 import type { InstalledSkill, SkillResolver } from "../skills/resolver.js";
+import type { SkillSync } from "../skills/sync.js";
 
 /**
  * Boot pipeline:
@@ -36,22 +38,53 @@ import type { InstalledSkill, SkillResolver } from "../skills/resolver.js";
  *   1. Fetch the agent's bundle via the platform MCP (`get_my_bundle`).
  *      Empty / no-MCP-configured is OK — the agent still boots as a
  *      vanilla openclaw vessel.
- *   2. Write a valid openclaw.json, then install every declared skill into
- *      `workspace/skills/` (the install CLI validates the config, so it must be
- *      current first). Two capabilities requiring the same skill at different
- *      versions is a fatal error (SkillVersionConflictError).
+ *   2. Write a valid openclaw.json (every openclaw CLI call validates it), then
+ *      bring `workspace/skills/` to the desired state:
+ *        - library mode (the console serves `get_skill_sync_plan`): SkillSync
+ *          reconciles against the lock on the volume — no wipe; only what
+ *          changed is fetched. If the plan can't be fetched, the last-known-good
+ *          set stays and boot continues, unless a capability skill has nothing
+ *          installed at all (fail loud, as before).
+ *        - legacy mode (an older console, or no platform MCP): wipe, then
+ *          install the bundle's ClawHub skills (fail loud; two capabilities
+ *          pinning one skill differently is SkillVersionConflictError) and the
+ *          console boot list (`config/skills.json`, soft-fail), then their deps.
  *   3. Validate every `required: true` envVarSpec is present in
  *      process.env under its alias. Fail loud with every missing key.
  *   4. Assemble SOUL.md: base prompt + identity + per-capability fragments.
- *   5. Render the workspace + openclaw.json against the assembled prompt.
+ *   5. Render the workspace + openclaw.json against the assembled prompt; the
+ *      config carries the lock's `skills.entries` revs.
  *
  * Returns the bundle + installed skills so `manifest.ts` (or whatever
  * downstream consumer) can record what shipped this boot.
  */
 
+export interface BootstrapOptions {
+  /** The vessel's SkillSync (null/omitted when the platform MCP isn't
+   *  configured — the legacy path is then the only one). index.ts keeps using
+   *  the same instance for the /skills/sync route and the background poll. */
+  skillSync?: SkillSync | null;
+}
+
+/** A capability's skill has nothing on disk and the plan couldn't be fetched. */
+export class RequiredSkillsUnavailableError extends Error {
+  constructor(
+    public readonly refs: string[],
+    cause: string,
+  ) {
+    super(
+      `Required capability skill(s) ${refs.join(", ")} are not installed and the skills plan ` +
+        `could not be fetched (${cause}). Boot can't continue without them; it will retry on restart.`,
+    );
+    this.name = "RequiredSkillsUnavailableError";
+  }
+}
+
 export interface BootstrapResult {
   bundle: AgentBundle | null;
   installedSkills: InstalledSkill[];
+  /** Which path installed the skills this boot. */
+  skillsMode: "library" | "legacy";
   systemPrompt: string;
   /** The agent-owned memory checkpoint, restored during boot. Returned so
    *  index.ts reuses this exact instance for the shim + SIGTERM flush instead
@@ -59,7 +92,10 @@ export interface BootstrapResult {
   memory: MemoryCheckpoint;
 }
 
-export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
+export async function bootstrap(
+  env: AgentEnv,
+  opts: BootstrapOptions = {},
+): Promise<BootstrapResult> {
   const bundle = await fetchBundle(env);
   const blobs = await loadPromptBlobs(env);
   const constitution = await loadConstitution(env);
@@ -67,80 +103,88 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
   // Models this agent's routines can pin via a per-request override, so both
   // openclaw.json writes below overlay them with the prompt-cache-key compat
   // flag and their turns stay cost-tracked (see pinnable-models.ts). Fail-open
-  // to [] — never blocks boot. Fetched once and passed to BOTH writes so the
-  // early (pre-skill-install) and final configs remain byte-identical.
+  // to [] — never blocks boot. Fetched once and passed to BOTH writes.
   const extraModelIds = await fetchPinnableModelIds(env);
 
   const workspaceSkillsDir = join(env.OPENCLAW_STATE_DIR, "workspace", "skills");
 
-  // Reconcile skills from scratch every boot: wipe once, then install from the
-  // two authoritative sources — the drive-through bundle AND the console-managed
-  // boot list (config/skills.json). Anything in neither is intentionally not
-  // persisted (no stale-skill drift). The single wipe here is shared so the
-  // boot-list install doesn't clobber the bundle install and vice-versa.
-  await resetWorkspaceSkills(workspaceSkillsDir);
-
-  // Write a valid openclaw.json BEFORE installing any skill. Skill installs
-  // shell out to `openclaw skills install`, whose CLI loads + validates the
-  // config and refuses to run against an invalid one. On a boot that follows a
-  // failed one — e.g. a since-fixed bad provider block, or a model switch — the
-  // on-disk openclaw.json is stale/invalid until renderWorkspace rewrites it at
-  // the end of boot, which would be too late: every skill install would fail
-  // and the agent would come up with no skills. renderWorkspace writes the same
-  // file again later; buildOpenclawConfig is pure so the bytes are identical
-  // (both writes get the same extraModelIds).
+  // Write a valid openclaw.json BEFORE any skill work. Skill installs (ClawHub)
+  // and the eligibility check shell out to the openclaw CLI, which loads +
+  // validates the config and refuses to run against an invalid one. On a boot
+  // that follows a failed one — e.g. a since-fixed bad provider block, or a
+  // model switch — the on-disk openclaw.json is stale/invalid until
+  // renderWorkspace rewrites it at the end of boot, which would be too late.
+  // renderWorkspace writes it again with the post-reconcile lock's revs.
   await writeOpenclawConfig(env, extraModelIds);
 
+  const sync = opts.skillSync ?? null;
+  const outcome = sync ? await sync.reconcile("boot") : null;
   let installedSkills: InstalledSkill[] = [];
-  if (bundle) {
-    installedSkills = await installBundleSkills(bundle, workspaceSkillsDir, resolver(env));
-    try {
-      validateBundleEnv(bundle);
-    } catch (err) {
-      if (err instanceof BundleEnvValidationError) {
-        // Log every missing key BEFORE throwing so operators can see the
-        // full picture from the crash log even if the stack trace is
-        // truncated by their log pipeline.
-        for (const m of err.missing) {
-          log.error("bundle env missing", {
-            key: m.key,
-            label: m.label,
-            capability: m.capability,
-            listing: m.listing,
-            bound_on_console: m.bound,
-          });
-        }
+  let skillsMode: "library" | "legacy" = "legacy";
+
+  if (sync && outcome && outcome.status !== "legacy") {
+    // ── Library mode: SkillSync owns workspace/skills/ ──────────────────────
+    skillsMode = "library";
+    if (outcome.status === "error") {
+      // The plan couldn't be fetched: the last-known-good folders from the lock
+      // keep running and the poll retries. Keep the fail-loud posture for
+      // capability skills only when there is genuinely nothing to run.
+      const missing = await sync.missingRequiredSkills(requiredSkillRefs(bundle));
+      if (missing.length > 0) {
+        throw new RequiredSkillsUnavailableError(missing, outcome.error ?? "unknown error");
       }
-      throw err;
+      log.warn("skills plan unavailable at boot; running the last-known-good skills", {
+        err: outcome.error,
+      });
     }
-    logResolvedEnv(bundle);
+    installedSkills = await lockedSkills(env.OPENCLAW_STATE_DIR, workspaceSkillsDir);
+    if (bundle) validateAndLogBundleEnv(bundle);
+  } else {
+    // ── Legacy mode: an older console (no skills library) or no platform MCP.
+    // The lock no longer describes skills/ once the wipe below runs.
+    if (sync) await sync.resetForLegacy();
+    else await clearLock(env.OPENCLAW_STATE_DIR);
+
+    // Reconcile skills from scratch every boot: wipe once, then install from the
+    // two authoritative sources — the drive-through bundle AND the console-managed
+    // boot list (config/skills.json). Anything in neither is intentionally not
+    // persisted (no stale-skill drift). The single wipe here is shared so the
+    // boot-list install doesn't clobber the bundle install and vice-versa.
+    await resetWorkspaceSkills(workspaceSkillsDir);
+
+    if (bundle) {
+      installedSkills = await installBundleSkills(bundle, workspaceSkillsDir, resolver(env));
+      validateAndLogBundleEnv(bundle);
+    }
+
+    // Console-managed boot list — the durable per-agent skill list the console's
+    // agent-skills UI writes to Storage. Additive + soft-fail so a console-added
+    // skill survives restarts without one bad slug bricking the agent. Skips refs
+    // the bundle already pinned.
+    const bootListReqs = await loadBootListSkills(env);
+    const bootInstalled = await installBootListSkills(
+      bootListReqs,
+      workspaceSkillsDir,
+      resolver(env),
+      { skip: new Set(installedSkills.map((s) => s.ref)) },
+    );
+    installedSkills = [...installedSkills, ...bootInstalled];
+
+    // Install each installed skill's declared Python deps (SKILL.md →
+    // metadata.openclaw.install.uv) into the interpreter the agent shells out to,
+    // plus the Playwright Chromium build for any browser skill. Runs before the
+    // gateway spawns any skill so `python3 scripts/foo.py` finds its imports.
+    // Soft-fail so a dep hiccup degrades one skill rather than bricking boot.
+    // (Library mode does this per skill, before activation, inside SkillSync.)
+    await provisionSkillDeps(installedSkills);
   }
-
-  // Console-managed boot list — the durable per-agent skill list the console's
-  // agent-skills UI writes to Storage. Additive + soft-fail so a console-added
-  // skill survives restarts without one bad slug bricking the agent. Skips refs
-  // the bundle already pinned.
-  const bootListReqs = await loadBootListSkills(env);
-  const bootInstalled = await installBootListSkills(
-    bootListReqs,
-    workspaceSkillsDir,
-    resolver(env),
-    { skip: new Set(installedSkills.map((s) => s.ref)) },
-  );
-  installedSkills = [...installedSkills, ...bootInstalled];
-
-  // Install each installed skill's declared Python deps (SKILL.md →
-  // metadata.openclaw.install.uv) into the interpreter the agent shells out to,
-  // plus the Playwright Chromium build for any browser skill. Runs before the
-  // gateway spawns any skill so `python3 scripts/foo.py` finds its imports.
-  // Soft-fail so a dep hiccup degrades one skill rather than bricking boot.
-  await provisionSkillDeps(installedSkills);
 
   // Restore agent-owned memory (playbook.md + notes/) with volume-wins
   // precedence BEFORE assembling SOUL, so the current playbook can be folded
-  // into the `# PLAYBOOK` section. This runs after the skills reset above (which
-  // only touches workspace/skills/) and never touches the console-authored
-  // prompts. index.ts reuses this instance — see BootstrapResult.memory.
+  // into the `# PLAYBOOK` section. This runs after the skills work above (which
+  // only touches workspace/skills/ and its scratch dirs) and never touches the
+  // console-authored prompts. index.ts reuses this instance — see
+  // BootstrapResult.memory.
   const memory = MemoryCheckpoint.fromEnv(env);
   await memory.restore();
   const playbook = await readFileOrNull(
@@ -166,6 +210,7 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
 
   log.info("bootstrap complete", {
     assignments: bundle?.assignments.length ?? 0,
+    skills_mode: skillsMode,
     skills_installed: installedSkills.length,
     charter_from_storage: blobs.base != null,
     identity_from_storage: blobs.identity != null,
@@ -174,7 +219,52 @@ export async function bootstrap(env: AgentEnv): Promise<BootstrapResult> {
     playbook: playbook != null,
   });
 
-  return { bundle, installedSkills, systemPrompt, memory };
+  return { bundle, installedSkills, skillsMode, systemPrompt, memory };
+}
+
+/** Validate the bundle's required env (fail loud), logging every missing key
+ *  BEFORE throwing so operators see the full picture even if the stack trace is
+ *  truncated by their log pipeline. Then log what got wired. */
+function validateAndLogBundleEnv(bundle: AgentBundle): void {
+  try {
+    validateBundleEnv(bundle);
+  } catch (err) {
+    if (err instanceof BundleEnvValidationError) {
+      for (const m of err.missing) {
+        log.error("bundle env missing", {
+          key: m.key,
+          label: m.label,
+          capability: m.capability,
+          listing: m.listing,
+          bound_on_console: m.bound,
+        });
+      }
+    }
+    throw err;
+  }
+  logResolvedEnv(bundle);
+}
+
+/** Every capability's skill ref (a ClawHub slug or a library skill id). */
+export function requiredSkillRefs(bundle: AgentBundle | null): string[] {
+  if (!bundle) return [];
+  const refs = new Set<string>();
+  for (const a of bundle.assignments) {
+    const ref = a.capability.skill?.ref;
+    if (ref) refs.add(ref);
+  }
+  return [...refs].sort();
+}
+
+/** The lock's skills as InstalledSkill records (boot summary + logging). */
+async function lockedSkills(stateDir: string, skillsDir: string): Promise<InstalledSkill[]> {
+  const { lock } = await readLock(stateDir);
+  return Object.entries(lock.skills).map(([slug, e]) => ({
+    ref: slug,
+    version: e.version ?? "",
+    path: join(skillsDir, slug),
+    source: e.source,
+  }));
 }
 
 async function readFileOrNull(path: string): Promise<string | null> {

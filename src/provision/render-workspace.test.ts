@@ -5,10 +5,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { AgentEnv } from "../env.js";
+import { sha256Hex } from "../skills/contract.js";
+import { writeLock } from "../skills/lock.js";
 import {
   buildOpenclawConfig,
   DELEGATED_CREDS_PLUGIN_ID,
   LOCAL_OLLAMA_BASE_URL,
+  NO_BUNDLED_SKILLS_SENTINEL,
   parseExtraMcpServers,
   parseToolsDeny,
   REPORT_OUTCOME_PLUGIN_ID,
@@ -16,6 +19,7 @@ import {
   USAGE_TELEMETRY_PLUGIN_ID,
   TOOL_TELEMETRY_PLUGIN_ID,
   parseToolList,
+  resolveAllowBundled,
   resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
@@ -267,7 +271,102 @@ describe("buildOpenclawConfig heartbeat (autonomous idle-inference cost)", () =>
   });
 });
 
+describe("buildOpenclawConfig gateway.reload + skills (restart-free skills)", () => {
+  function skills(config: Record<string, unknown>): {
+    allowBundled?: string[];
+    entries?: Record<string, unknown>;
+  } {
+    return (config.skills as { allowBundled?: string[]; entries?: Record<string, unknown> }) ?? {};
+  }
+
+  it("always hot-applies config edits (a skills rev bump must never restart the gateway)", () => {
+    const gateway = buildOpenclawConfig(makeEnv({}), "/ws").gateway as { reload?: unknown };
+    expect(gateway.reload).toEqual({ mode: "hot" });
+  });
+
+  it("allowBundled defaults to skill-creator only (env unset)", () => {
+    expect(skills(buildOpenclawConfig(makeEnv({}), "/ws")).allowBundled).toEqual(["skill-creator"]);
+    expect(skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "  " }), "/ws")).allowBundled).toEqual([
+      "skill-creator",
+    ]);
+  });
+
+  it("honors a custom bundled list", () => {
+    const s = skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "skill-creator, weather" }), "/ws"));
+    expect(s.allowBundled).toEqual(["skill-creator", "weather"]);
+  });
+
+  it("`none` emits a non-empty sentinel (openclaw treats [] as 'all bundled')", () => {
+    const s = skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "none" }), "/ws"));
+    expect(s.allowBundled).toEqual([NO_BUNDLED_SKILLS_SENTINEL]);
+    expect(s.allowBundled?.length).toBeGreaterThan(0);
+  });
+
+  it("`all` restores openclaw's default (no allowBundled key)", () => {
+    expect(resolveAllowBundled("all")).toBeUndefined();
+    expect(skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "ALL" }), "/ws")).allowBundled).toBeUndefined();
+  });
+
+  it("emits the lock's per-skill revs as skills.entries, keys sorted", () => {
+    const config = buildOpenclawConfig(makeEnv({}), "/ws", [], {
+      zeta: { config: { rev: "222222222222" } },
+      alpha: { config: { rev: "111111111111" } },
+    });
+    expect(skills(config).entries).toEqual({
+      alpha: { config: { rev: "111111111111" } },
+      zeta: { config: { rev: "222222222222" } },
+    });
+    expect(Object.keys(skills(config).entries ?? {})).toEqual(["alpha", "zeta"]);
+  });
+
+  it("emits no entries key without a lock (and stays byte-stable for the same lock)", () => {
+    expect(skills(buildOpenclawConfig(makeEnv({}), "/ws")).entries).toBeUndefined();
+    const entries = { a: { config: { rev: "abcabcabcabc" } } };
+    expect(JSON.stringify(buildOpenclawConfig(makeEnv({}), "/ws", [], entries))).toBe(
+      JSON.stringify(buildOpenclawConfig(makeEnv({}), "/ws", [], { ...entries })),
+    );
+  });
+
+  it("never sets agents.defaults.skills (hot-ignored on 2026.5.20: presence on disk is the control)", () => {
+    const defaults = (buildOpenclawConfig(makeEnv({}), "/ws").agents as { defaults: Record<string, unknown> })
+      .defaults;
+    expect(defaults.skills).toBeUndefined();
+  });
+});
+
 describe("writeOpenclawConfig", () => {
+  it("includes the SkillSync lock's revs in skills.entries", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "knox-openclaw-"));
+    try {
+      const sha = sha256Hex("v1");
+      await writeLock(dir, {
+        version: 1,
+        generation: 3,
+        skills: {
+          "hello-world": {
+            skill_id: "s",
+            version_id: "v",
+            version: "1.0.0",
+            content_sha256: sha,
+            skill_key: null,
+            managed_by: "operator",
+            required: false,
+            source: "library",
+            deps_hash: null,
+            installed_at: "2026-10-04T00:00:00.000Z",
+          },
+        },
+      });
+      await writeOpenclawConfig(makeEnv({ OPENCLAW_STATE_DIR: dir }));
+      const config = JSON.parse(await readFile(join(dir, "openclaw.json"), "utf8")) as Record<string, unknown>;
+      expect((config.skills as { entries: unknown }).entries).toEqual({
+        "hello-world": { config: { rev: sha.slice(0, 12) } },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("writes a valid openclaw.json to the state dir before skills install", async () => {
     const dir = await mkdtemp(join(tmpdir(), "knox-openclaw-"));
     try {

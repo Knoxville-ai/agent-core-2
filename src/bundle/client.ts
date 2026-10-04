@@ -22,7 +22,7 @@ interface JsonRpcResponse<T> {
   error?: { code: number; message: string };
 }
 
-interface ToolCallResult {
+export interface ToolCallResult {
   content?: Array<{ type: string; text?: string }>;
   isError?: boolean;
   structuredContent?: unknown;
@@ -181,6 +181,16 @@ export class BundleClient {
     if (result.isError) return null;
     const text = result.content?.find((c) => c.type === "text")?.text?.trim();
     return text && text.length > 0 ? text : null;
+  }
+
+  /**
+   * Raw `tools/call` for a platform tool, returning the MCP tool result as-is
+   * (including `isError` results — interpreting them is the caller's job).
+   * Throws on transport, auth, HTTP or JSON-RPC failure. Used by SkillSync for
+   * the broker tools (`get_skill_sync_plan`, `report_skill_sync`).
+   */
+  async callTool(name: string, args: unknown): Promise<ToolCallResult> {
+    return await this.call<ToolCallResult>("tools/call", { name, arguments: args });
   }
 
   private async call<T>(method: string, params: unknown): Promise<T> {

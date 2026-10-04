@@ -50,58 +50,211 @@ The console provisions an agent by:
 | `LLM_BASE_URL` | Provider endpoint override → `openclaw.json` `models.providers.<LLM_PROVIDER>.baseURL`. Set it to a cheap external OpenAI-compatible endpoint (Groq / DeepSeek / a self-hosted Ollama box) to cut the API bill. Leave **unset** for `LLM_PROVIDER=ollama` (in-container local model) — the image starts a loopback Ollama server, defaults the baseURL to it, and pulls `LLM_MODEL`'s weights on first boot (only for ollama agents). |
 | `PLATFORM_MCP_URL` | URL of the platform's MCP server. Set this to give the agent an outbound channel to discover and converse with other platform agents (drive-throughs) AND to fetch its own bundle at boot. |
 | `PLATFORM_API_TOKEN` | per-agent bearer (`knox_agent_*`) for the platform MCP. Required whenever `PLATFORM_MCP_URL` is set. |
+| `OPENCLAW_BUNDLED_SKILLS` | OpenClaw's own bundled skills the agent may see → `skills.allowBundled`. Default `skill-creator`. Comma/space list; `none` = no bundled skills (emitted as a non-empty sentinel, since openclaw treats `[]` as "all"); `all` = openclaw's default (every eligible bundled skill — 14–19 of them, ~4–6k chars — in every model call's prompt). Read at gateway start only. |
+| `SKILL_SYNC_POLL_MS` | SkillSync safety-poll interval. Default `300000` (5 min); `0` disables; values under 10s are raised to 10s. |
 
 When both are set, the shim's `renderWorkspace()` adds an entry to
 `mcp.servers.knoxville_platform` in `openclaw.json`, and at boot the
 agent calls `get_my_bundle` on the same MCP to discover which Drive
-Through capabilities route to it. Each capability's pinned clawhub
-skill is installed (or re-installed) into `workspace/skills/` via
-`openclaw skills install <ref> --version <version> --force` — the
-directory is wiped first so a capability removed from the bundle goes
-away. Each capability's `promptFragment` is appended to
-`workspace/SOUL.md`, and every `required: true` envVarSpec is validated
-against `process.env`. Boot fails loud on a clawhub install failure, a
-skill version conflict, or a missing required cred.
-
-Editing a Drive Through capability and restarting the agent is the
-only step needed to pick up new skills, new prompt fragments, or
-removed capabilities — the boot pipeline reconciles from scratch.
+Through capabilities route to it. Each capability's `promptFragment` is
+appended to `workspace/SOUL.md`, and every `required: true` envVarSpec is
+validated against `process.env` (boot fails loud on a missing required
+cred). Skills are brought to their desired state by **SkillSync** — see
+[Skills](#skills--skillsync-platform-skills-library) below — or, against a
+console that predates the skills library, by the legacy boot-time ClawHub
+install.
 
 When unset, the agent is purely inbound: no outbound A2A, no bundle, no
-capability-driven skill installs. The vessel still boots with whatever
-prompt blobs the console uploaded to Storage.
+platform skills (only the legacy `config/skills.json` boot list). The vessel
+still boots with whatever prompt blobs the console uploaded to Storage.
 
-### Skill boot list (`config/skills.json`)
+## Skills — SkillSync (platform skills library)
 
-Independent of the Drive Through bundle, the console's agent-skills UI
-manages a per-agent **boot list** at
-`agent-data/orgs/{org}/agents/{uid}/config/skills.json`
-(writer: console `src/lib/skills.ts#writeSkillBootList`). Shape:
+Skills are platform objects: an immutable, content-addressed **version** in the
+console's skills library, installed onto an agent as **desired state**. The
+vessel's `SkillSync` (`src/skills/sync.ts`) reconciles `workspace/skills/` to
+that state — at boot, when the console nudges it, and on a safety poll — and
+makes the running gateway see the result **without a restart**. Design:
+console `docs/skills-library-design.md` (§5 verified runtime behavior, §9 the
+vessel).
 
-```json
-{ "version": 1, "skills": [ { "slug": "web-search", "version": "0.2.0", "addedAt": "…" } ] }
+### Modes
+
+| Mode | When | `workspace/skills/` is owned by |
+| --- | --- | --- |
+| **library** | `PLATFORM_MCP_URL` + token set and the console answers `get_skill_sync_plan` | SkillSync (lock-driven, no wipe) |
+| **legacy** | the console answers `Unknown tool: get_skill_sync_plan`, or no platform MCP | the boot-time wipe + ClawHub install ([below](#legacy-mode--configskillsjson--bundle-clawhub-refs)) |
+
+The mode is decided by the boot reconcile. Legacy mode is sticky for the life of
+the process — except that a `POST /skills/sync` re-probes the console and
+switches to library mode if it now serves the plan.
+
+### Broker tools (vessel → console)
+
+Both ride the existing platform MCP transport (`tools/call`, agent token), like
+`get_delegated_credentials`, and are never advertised to the model. Wire types:
+console `src/lib/skills/contract.ts`, mirrored as vessel `src/skills/contract.ts`
+(the manifest digest and path rules must stay byte-identical).
+
+- **`get_skill_sync_plan`**, arguments `SyncPlanRequest`
+  `{ if_generation?: number, installed?: { <slug>: <content_sha256> } }` →
+  `structuredContent: SyncPlan`
+  `{ generation, unchanged?: true, skills?: SyncPlanSkill[], legacy?: SyncPlanLegacySkill[] }`.
+  `skills[]` = `{ slug, skill_id, version_id, version, content_sha256, managed_by, required, skill_key, requirements, files? }`;
+  `files` (`[{ path, sha256, size, executable, url }]`, `url` a short-lived
+  signed download) is present **only** for skills whose `content_sha256`
+  differs from what the vessel sent in `installed`. `if_generation` equal to
+  the agent's current generation → `{ generation, unchanged: true }`.
+  `legacy[]` = `{ slug, version|null, required }`: capability refs the library
+  can't resolve yet (transition only), installed from ClawHub.
+  An `isError` result whose text contains `Unknown tool` → legacy mode; any other
+  failure is transient (the vessel keeps its last-known-good set and retries).
+- **`report_skill_sync`**, arguments `SyncReport`
+  `{ generation, results: SyncResult[], unmanaged?: string[], lock_digest? }`,
+  `SyncResult` = `{ slug, skill_id?, version_id?, status: "installed" | "failed" | "ineligible" | "removed", detail?: { error?, missing_env?, missing_bins? } }`.
+  Best effort (logged and ignored on failure). `generation` is the generation
+  the vessel has fully applied. `results` covers every skill in the plan (not
+  only the ones that changed) plus this run's removals; a poll that gets
+  `unchanged` sends no report.
+
+The vessel sends `if_generation` only on a nudge/poll whose local state
+verified clean — never at boot, so every boot gets the full plan and reports.
+`installed` only lists library skills whose folder verified (a damaged copy is
+left out, so the plan re-sends its files).
+
+**Version identity** is `manifestDigest(files)`: sha256 over one line per file,
+sorted by path, `path \0 sha256 \0 size \0 (x|-)`, lines joined by `\n`. The
+vessel recomputes it before installing anything.
+
+### Reconcile
+
+Single-flight; a trigger that arrives mid-run schedules exactly one rerun
+(shared by everything that arrives meanwhile). Triggers: `boot` (before the
+gateway starts), `nudge` (`POST /skills/sync`), `poll` (`SKILL_SYNC_POLL_MS`).
+
+1. Verify the lock against disk: at boot every library skill is re-hashed
+   against its recorded manifest (catches a crash between swap and lock write,
+   or a hand edit — extra files like `__pycache__` are fine); later runs check
+   `SKILL.md` is still there. Anything off is reinstalled.
+2. Fetch the plan. For each skill whose digest differs from the lock: check
+   `manifestDigest(files) == content_sha256` and every path; fetch the missing
+   blobs into the cache (each sha256- and size-verified); write a **fresh**
+   staging folder (`O_EXCL` creates, 0755 for executables else 0644, parent
+   dirs created, no symlinks expressible); require `SKILL.md` whose frontmatter
+   `name` is the slug (frontmatter is parsed leniently, like OpenClaw: strict
+   YAML first, then line by line); install its `metadata.openclaw.install.uv`
+   deps **before** activation (skipped when the requirement hash — which
+   includes the venv's identity — matches the lock); then swap: live folder →
+   `.skills-trash`, staging → `skills/<slug>`, trash removed, lock updated.
+   Size limits and description length are the console's publishing policy and
+   are never a reason for the vessel to refuse a skill.
+3. Lock entries the plan dropped (and that aren't in `legacy`) are removed.
+4. `legacy` entries are installed with `openclaw skills install` (ClawHub) when
+   not already at that version, locked as `source: "clawhub"` with
+   `content_sha256 = "clawhub:<version|latest>"`, and removed when they leave
+   the plan.
+5. Any other folder under `skills/` (hand-written, or a pre-library ClawHub
+   install) is moved to `.skills-unmanaged/<name>-<ts>` and reported in
+   `unmanaged` — never deleted. On the **first** library run (no lock yet), a
+   pre-existing folder whose slug is in the plan is simply replaced by the
+   library copy; afterwards such a folder is quarantined before the library
+   copy goes in.
+6. If anything changed and the gateway is running: the hot refresh (below).
+7. Eligibility: `openclaw skills check --json` (same env as the gateway) →
+   unmet `requires.env` / `requires.bins` become `ineligible` with
+   `missing_env` / `missing_bins` (files stay live; OpenClaw hides the skill
+   until the requirement is met). Skipped when the command fails.
+8. `report_skill_sync`. `lock.generation` advances to the plan's generation
+   only when nothing failed transiently; blobs no lock/plan references are
+   garbage-collected after a clean run.
+
+| Failure | Behavior |
+| --- | --- |
+| Plan fetch fails (network, 5xx, malformed plan) | Nothing changes; retried next poll. At boot the last-known-good set runs — boot fails loud only if a capability skill (bundle `capability.skill.ref`, a slug or a library skill id) has nothing installed at all. |
+| Blob download fails / hash or size mismatch, other IO | Skill `failed` "(will retry)", old version stays live, generation **not** advanced → the next poll retries. |
+| Bad manifest (unsafe path, digest mismatch), no `SKILL.md`, `name` ≠ slug | Skill `failed`, old version stays live, not retried until the desired state changes. |
+| `uv` failure | Skill `failed` with the stderr tail; the new version is **not** activated (the old one stays live); retried on the next desired-state change or boot. |
+| Missing env/bin after install | `ineligible` with what's missing. |
+
+At every boot the Python deps of all installed skills are re-provisioned when
+needed: the venv (`/opt/skills-venv`) lives in the image, not on the volume, so
+a new container starts without them (a marker file in the venv gives each venv
+instance an id that is folded into `deps_hash`).
+
+### Hot refresh (no restarts)
+
+On the pinned openclaw (2026.5.20) the OpenAI-compatible path the shim uses
+never starts the skills file watcher, and hot changes to
+`agents.defaults.skills` / `skills.entries.<k>.enabled` are ignored — **presence
+under `workspace/skills/` is the only live visibility control**. Sessions
+rebuild their skills list after any config change under `skills.*`, so
+SkillSync writes `openclaw.json` (tmp + rename) with
+`skills.entries[<skill_key or slug>].config.rev = <first 12 hex of content_sha256>`
+for each installed/updated skill, and deletes the entry of a removed skill when
+it holds nothing but that rev (otherwise only the rev is dropped). Every other
+key is preserved. `gateway.reload.mode: "hot"` guarantees the edit is applied
+in-process, never by restarting. The gateway applies it ~0.6s after the write
+(chokidar + 300ms debounce, measured); a run waits 1s after a live refresh
+before it completes, so `POST /skills/sync` → `200 applied` means the agent's
+**next turn** — in an existing session too — lists the change.
+
+The boot-time `openclaw.json` carries the same entries, derived from the lock,
+plus `skills.allowBundled` (`OPENCLAW_BUNDLED_SKILLS`):
+
+```json5
+gateway: { reload: { mode: "hot" }, … },
+skills:  { allowBundled: ["skill-creator"],
+           entries: { "<key>": { config: { rev: "<sha12>" } } } }
 ```
 
-On **every boot** the vessel reads this file and runs
-`openclaw skills install <slug>` for each entry (adding
-`--version <version>` when the entry pins one) into `workspace/skills/`.
-This is what makes a console-added skill **survive container restarts** —
-the same wipe-and-reconcile that rebuilds bundle skills would otherwise
-drop it. Semantics:
+### On disk
 
-- **Additive** to the bundle, sharing the single boot-time wipe. A slug
-  already installed by the bundle is skipped (the bundle's pinned version
-  wins).
-- **Soft-fail per skill:** a bad/typo'd slug is logged and skipped, not
-  fatal — unlike bundle skills (provisioning-critical, fail-loud), the
-  boot list is user-curated and one bad entry must not brick the agent.
-- Read via the service-role Storage client, so it works even for a
-  vanilla vessel with no `PLATFORM_MCP_URL` / bundle.
+```
+$OPENCLAW_STATE_DIR/
+├── platform-skills.lock.json        the lock (below); written after each swap, tmp + rename
+├── skill-blobs/<aa>/<sha256>        content-addressed blob cache
+└── workspace/
+    ├── skills/<slug>/               live — the only place openclaw looks
+    ├── .skills-staging/<slug>-<sha8>/   a version being written + checked
+    ├── .skills-trash/               the version just replaced/removed (deleted at once)
+    └── .skills-unmanaged/<slug>-<ts>/   folders no plan put there (kept, reported)
+```
 
-A skill that is in neither the bundle nor `config/skills.json` is **not**
-persisted — installing one ad-hoc at runtime (or having the agent install
-it mid-conversation) will not survive the next restart. Add it to the
-console boot list to make it stick.
+```json
+{ "version": 1, "generation": 12,
+  "skills": { "drivethru-odoo": {
+    "skill_id": "…", "version_id": "…", "version": "1.4.2",
+    "content_sha256": "…", "skill_key": null, "managed_by": "capability",
+    "required": true, "source": "library", "deps_hash": "…",
+    "installed_at": "…", "files": [ { "path": "SKILL.md", "sha256": "…", "size": 812, "executable": false } ] } } }
+```
+
+`lock_digest` = sha256 over the lock's `slug@content_sha256` lines, sorted
+byte-wise, joined by `\n` (every entry, library and legacy).
+
+### Routes
+
+Gateway-token auth (`Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>`), like
+`/files/*`. Nothing here restarts the gateway.
+
+| Route | Behavior |
+| --- | --- |
+| `POST /skills/sync` | Body `{ generation? }`. Runs or joins a reconcile and waits up to 25s for a completed run whose applied generation ≥ `generation` → `200 { status: "applied", applied_generation, results }` (`results` as in `report_skill_sync`; for a run that found nothing new, the latest known per-skill results). Otherwise (deps still installing, or a transient failure the poll will retry) → `202 { status: "in_progress", generation }`. Console without the library, or no platform MCP → `409 { status: "legacy" }`. |
+| `GET /skills` | Library mode: `{ mode: "library", generation, lock_digest, skills: [{ slug, version, content_sha256, managed_by, source, required, status }] }`. Legacy mode: `{ mode, generation: null, lock_digest: null, skills: [{ slug, version: null, source: "clawhub" }] }` (the folders). |
+| `POST /skills/install`, `DELETE /skills/{slug}` | **Deprecated** — the ClawHub path for older consoles. Legacy mode only: they install/remove, provision deps, then bump the skill's `config.rev` (no restart; P0). In library mode they answer `409 { status: "library" }` — SkillSync would quarantine a hand-installed folder or put a removed library skill back. |
+| `GET /skills/search` | `501` (search lives on the platform: `search_skills`). |
+
+### Legacy mode — `config/skills.json` + bundle ClawHub refs
+
+Against a console without `get_skill_sync_plan` (or with no platform MCP), boot
+does what it always did, minus any restart: wipe `workspace/skills/`, install
+each bundle capability's ClawHub skill (`openclaw skills install <ref> --version
+<v> --force`; fail loud, and two capabilities pinning one skill differently is
+`SkillVersionConflictError`), then the console boot list at
+`agent-data/orgs/{org}/agents/{uid}/config/skills.json`
+(`{ "version": 1, "skills": [ { "slug", "version", "addedAt" } ] }`; additive,
+the bundle's pin wins, soft-fail per skill), then their Python deps. The lock is
+cleared. A skill in neither source is not persisted across restarts.
 
 ## Bring your own agent (BYOA)
 
@@ -209,7 +362,7 @@ agent-data/orgs/{org}/agents/{uid}/
 │   ├── identity.md        ← shim → workspace/AGENTS.md  (CONSOLE-authored, never written back)
 │   ├── boot.md            ← shim → workspace/TOOLS.md   (CONSOLE-authored, never written back)
 │   └── playbook.md        ↔ workspace/playbook.md       (AGENT-owned: written back, volume wins on boot)
-├── config/                ← reserved for future skill-level policies
+├── config/                ← config/skills.json: legacy skill boot list (read in legacy mode only)
 ├── state/
 │   └── notes/*.md         ↔ workspace/notes/*.md        (AGENT-authored memory; written back — M2)
 └── logs/                  ← agent-owned; shim does not touch
@@ -264,17 +417,21 @@ workspace, and Railway allows only one volume (one mount path) per service:
 ├── workspace/AGENTS.md     ← shim ← Storage memory/identity.md            [re-derived]
 ├── workspace/TOOLS.md      ← shim ← Storage memory/boot.md                [re-derived]
 ├── workspace/playbook.md   ← shim ← Storage memory/playbook.md            [re-derived]
-├── workspace/skills/       ← bundle: wiped + force-reinstalled every boot [re-derived]
+├── workspace/skills/       ← SkillSync: reconciled against the lock        [re-derived]
+├── platform-skills.lock.json ← SkillSync lock (what is installed)          [DURABLE]
+├── skill-blobs/            ← SkillSync blob cache (content-addressed)      [cache]
 └── tmp/                    ← private TMPDIR, recreated                     [re-derived]
 ```
 
 **Source-of-truth precedence is unchanged.** Even though `workspace/*.md` and
 `workspace/skills/` now physically live on the volume, the boot pipeline still
-re-renders the markdown from Supabase Storage and wipes + force-reinstalls
-skills from the bundle on **every** boot, unconditionally. So Storage stays
-authoritative for console-authored prompts and the bundle stays authoritative
-for skills — the volume cannot make them stale. The volume's job is purely to
-persist openclaw's own `agents/*/sessions/` + `memory/*.sqlite`.
+re-renders the markdown from Supabase Storage on **every** boot, and skills are
+reconciled to the platform's desired state on every boot (library mode: against
+the lock, re-hashing what's installed; legacy mode: wipe + reinstall). So
+Storage stays authoritative for console-authored prompts and the platform stays
+authoritative for skills — the volume cannot make them stale. The lock and blob
+cache only make a boot cheaper (unchanged skills cost nothing) and let the
+last-known-good set run when the platform is briefly unreachable.
 
 > **M1 scope:** agent edits to `playbook.md` / `workspace/*.md` are still
 > overwritten by the boot re-render in M1 — the volume does not preserve them.
@@ -345,10 +502,11 @@ Identical to v0.2 for the endpoints the console actually calls:
 | `GET  /healthz` / `/readyz` | Liveness / readiness. `/readyz` returns 503 until the openclaw gateway WebSocket is connected. |
 | `GET  /files/list?path=…` | Operator filesystem inspection for the console Files tab. Auth: `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>` (the gateway token, **not** a user JWT — only the console server holds it). Returns `{ path, entries: [{ name, type, size, mtime }] }`. `path` defaults to the first allowed root. |
 | `GET  /files/read?path=…` | Reads one file. Same auth. Returns `{ path, size, encoding: "utf-8" \| "base64", truncated, content }`; content is capped at 1 MiB and base64-encoded when binary. |
-| `GET    /skills` | Live skill list. Gateway-token auth. Returns `{ skills: [{ slug, version, source }] }` (the dirs under `workspace/skills/`; `version` is null — pair with the `config/skills.json` boot list for pins). |
-| `POST   /skills/install` | Body `{ slug, version? }`. Installs the skill into the running agent (`openclaw skills install <slug> [--version …] --force`) and reloads the gateway. Returns `{ ok: true, skill }`. Gateway-token auth. |
-| `DELETE /skills/{slug}` | Removes `workspace/skills/{slug}` and reloads the gateway. Returns `{ ok: true }`. Slug is path-traversal-guarded. Gateway-token auth. |
-| `GET    /skills/search?q=…` | Returns **501** (registry search not wired); the console treats 501 as "search unavailable," not an error. |
+| `POST   /skills/sync` | The console's skills nudge (SkillSync). Body `{ generation? }` → `200 applied` / `202 in_progress` / `409 legacy`. Gateway-token auth. See [Skills](#skills--skillsync-platform-skills-library). |
+| `GET    /skills` | Installed skills. Gateway-token auth. Library mode: the lock (`{ mode, generation, lock_digest, skills: [{ slug, version, content_sha256, managed_by, source, required, status }] }`); legacy mode: the dirs under `workspace/skills/` (`version` null). |
+| `POST   /skills/install` | **Deprecated** (legacy mode only; `409` in library mode). Body `{ slug, version? }`. `openclaw skills install <slug> [--version …] --force`, deps, then a `skills.entries.<slug>.config.rev` bump — **no gateway restart**; sessions see it on their next turn. Returns `{ ok: true, skill }`. Gateway-token auth. |
+| `DELETE /skills/{slug}` | **Deprecated** (legacy mode only; `409` in library mode). Removes `workspace/skills/{slug}` and bumps the rev — no restart. Returns `{ ok: true }`. Slug is path-traversal-guarded. Gateway-token auth. |
+| `GET    /skills/search?q=…` | Returns **501** (search lives on the platform, `search_skills`); the console treats 501 as "search unavailable," not an error. |
 | `*    /api/v1/agents/:uid/files/...` | Legacy conversation-attachment surface. Still returns 501 for vessel agents; the console treats 501 the same as "not supported on this agent." |
 | `POST /api/v1/tasks` | Start a long-running task. Body: `{ task_id, instructions, title, conversation_id, callback_url, callback_token, deadline_at, delegated }`. **Returns 202 immediately** and runs the work detached — the console treats any other status as a failed start. Same bearer gate as the messaging routes. |
 | `POST /api/v1/tasks/:id/cancel` | Advisory cancel poke. Returns `{ ok: true, cancelling }`. The platform's `cancel_requested` flag is authoritative; this only shortens reaction time from one heartbeat to immediate. |

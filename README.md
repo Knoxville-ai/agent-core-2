@@ -33,7 +33,8 @@ console ──HTTPS─▶ shim :8080 ──WS──▶ openclaw gateway :18789
 
 - **Not role-coupled.** No `roles/`, no `app/odoo`, no `app/ebay`. Domain
   logic lives in openclaw skills installed into `~/.openclaw/workspace/skills/`,
-  shipped per-agent rather than baked into the image.
+  shipped per-agent from the platform's skills library rather than baked into
+  the image (see *Skills* below).
 - **Not a native messaging endpoint.** openclaw's Telegram / Slack /
   Discord / WhatsApp adapters are not configured. All conversation flow
   routes through the platform — either the console's chat UI or external
@@ -52,7 +53,9 @@ list):
 | `OPENCLAW_GATEWAY_TOKEN` | shared secret between shim and local openclaw gateway |
 | `LLM_PROVIDER` / `LLM_MODEL` / `LLM_API_KEY` | written into `openclaw.json` as the primary model |
 | `LLM_BASE_URL` | optional provider endpoint override (`models.providers.<provider>.baseURL`). Point at a cheap external OpenAI-compatible endpoint (Groq/DeepSeek/self-hosted Ollama box), or leave unset for `LLM_PROVIDER=ollama` to run a small model in-container (weights pulled on first boot, ollama agents only) |
-| `PLATFORM_MCP_URL` / `PLATFORM_API_TOKEN` | optional; attaches the platform MCP server for A2A discovery and is used at boot to call `get_my_bundle` for capability assignments |
+| `PLATFORM_MCP_URL` / `PLATFORM_API_TOKEN` | optional; attaches the platform MCP server for A2A discovery and is used at boot to call `get_my_bundle` for capability assignments, and by SkillSync for the skill plan |
+| `OPENCLAW_BUNDLED_SKILLS` | optional; openclaw bundled skills the agent may see (`skills.allowBundled`). Default `skill-creator`; `none` = no bundled skills; `all` = openclaw's default (every eligible bundled skill in every prompt). Gateway start only |
+| `SKILL_SYNC_POLL_MS` | optional; SkillSync safety-poll interval, default `300000` (5 min); `0` disables |
 
 Workspace blobs (pulled from Supabase Storage at boot, all optional):
 
@@ -62,6 +65,29 @@ Workspace blobs (pulled from Supabase Storage at boot, all optional):
 | `memory/identity.md` | `workspace/AGENTS.md` |
 | `memory/boot.md` | `workspace/TOOLS.md` |
 | `memory/playbook.md` | `workspace/playbook.md` |
+
+## Skills
+
+Skills are reconciled, not reinstalled. When the platform MCP is configured and
+the console serves the skills library, **SkillSync** (`src/skills/sync.ts`)
+makes `workspace/skills/` match the agent's desired skills: it asks the console
+for a plan (`get_skill_sync_plan`), downloads only the file blobs it doesn't
+have (each sha256-verified), writes each version into a staging folder,
+installs its Python deps (`install.uv`), swaps it in with a rename, and records
+it in `$OPENCLAW_STATE_DIR/platform-skills.lock.json`. It runs at boot (no wipe;
+the lock means only changes are fetched), on a `POST /skills/sync` nudge from the
+console, and on a 5-minute poll.
+
+The running gateway is **never restarted** for a skill change: SkillSync bumps
+`skills.entries.<key>.config.rev` in `openclaw.json`, which openclaw
+(`gateway.reload.mode: "hot"`) hot-reloads, and every session — existing ones
+included — lists the change from its next turn. Folders the platform didn't put
+under `skills/` are moved to `workspace/.skills-unmanaged/` and reported.
+
+An older console (no `get_skill_sync_plan`) or a vessel without the platform MCP
+uses the legacy path: wipe, then install the bundle's ClawHub skills and the
+console boot list (`config/skills.json`) at boot. See `CONSOLE_INTEGRATION.md`
+*Skills* for the full contract.
 
 ## HTTP surface (port 8080)
 
@@ -74,6 +100,8 @@ session.access_token>`, verified against `SUPABASE_JWT_SECRET`.
 | `GET  /readyz` | gateway readiness (200 once openclaw is connected) |
 | `POST /api/v1/conversations/:id/messages` | send a user turn; response is SSE (`delta` / `tool_call` / `tool_result` / `done` / `error`) |
 | `POST /api/v1/conversations/:id/interrupt` | abort an in-flight turn |
+| `POST /skills/sync` | gateway-token auth; the console's skills nudge — `200 applied` / `202 in_progress` / `409 legacy` |
+| `GET  /skills` | gateway-token auth; installed skills (the SkillSync lock, or the folders in legacy mode) |
 | `*    /api/v1/agents/:uid/files/...` | placeholder (501) — file attachments TBD |
 
 ## Local development

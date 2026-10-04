@@ -9,6 +9,8 @@ import { assertStateDirWritable } from "./provision/state-dir.js";
 import { startCostProxy, costTrackingEnabled } from "./shim/cost-proxy.js";
 import { startShim } from "./shim/server.js";
 import { UsageAccumulator } from "./shim/usage-telemetry.js";
+import { bumpSkillRevs, RefreshGate } from "./skills/refresh.js";
+import { skillSyncFromEnv } from "./skills/sync.js";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -42,14 +44,23 @@ async function main(): Promise<void> {
     env.OPENROUTER_COST_TRACKING = false;
   }
 
-  // 1. Bundle-driven bootstrap: fetch capabilities, install skills, validate
+  // 1. Bundle-driven bootstrap: fetch capabilities, reconcile skills, validate
   //    env, restore agent-owned memory (playbook.md + notes/, volume-wins),
   //    assemble SOUL.md (constitution + identity + capabilities + delegation +
   //    memory digest + playbook), and render the openclaw workspace. Throws on
-  //    missing required creds or skill version conflicts. The returned `memory`
-  //    checkpoint is the one restored during boot — reuse it (do not construct a
-  //    second, which would double-restore).
-  const { memory } = await bootstrap(env);
+  //    missing required creds, a capability skill with nothing to run, or (legacy
+  //    path) skill version conflicts. The returned `memory` checkpoint is the one
+  //    restored during boot — reuse it (do not construct a second, which would
+  //    double-restore).
+  //
+  //    ONE SkillSync serves the whole process: the boot reconcile, the shim's
+  //    POST /skills/sync nudge and the background poll all go through its
+  //    single-flight reconciler. null when the platform MCP isn't configured.
+  //    Every skills change reaches the gateway through ONE RefreshGate, which
+  //    holds rev bumps until the gateway is watching openclaw.json (step 4c).
+  const refreshGate = new RefreshGate((changes) => bumpSkillRevs(env.OPENCLAW_STATE_DIR, changes));
+  const skillSync = skillSyncFromEnv(env, refreshGate);
+  const { memory } = await bootstrap(env, { skillSync });
 
   // 2. Refresh the agent's manifest so the console sees the boot.
   //    Don't fail boot if Storage is briefly unavailable — log and move on.
@@ -86,11 +97,31 @@ async function main(): Promise<void> {
   // 4. Start the HTTP shim. /readyz won't return 200 until the gateway
   //    finishes its startup sidecars; Railway's healthcheck handles the
   //    wait. The shim shares the UsageAccumulator the cost proxy feeds.
-  const shim = await startShim(env, proc, memory, usage);
+  const shim = await startShim(env, proc, memory, usage, skillSync, refreshGate);
+
+  // 4b. SkillSync safety poll: catches desired-state changes whose nudge was
+  //     missed (vessel down or unreachable). A no-op round trip when nothing
+  //     changed; SKILL_SYNC_POLL_MS=0 disables it.
+  skillSync?.startPolling(env.SKILL_SYNC_POLL_MS);
+
+  // 4c. Open the skills refresh gate once the gateway reports ready — it only
+  //     starts watching openclaw.json then; a rev bump written earlier is
+  //     missed (verified). Opening flushes whatever queued up (a nudge during
+  //     startup) as one guaranteed skills.* change, forced even when nothing
+  //     did, so a session resumed from the volume can't keep a skills snapshot
+  //     from before the restart (see RefreshGate). From here on every skills
+  //     change is a hot-reloaded rev bump — never a restart.
+  void proc.waitUntilReady().then(async (ready) => {
+    if (!ready) log.warn("gateway not ready yet; opening the skills refresh gate anyway");
+    await refreshGate.open({ force: true }).catch((err) => {
+      log.error("skills refresh after gateway start failed", { err: String(err) });
+    });
+  });
 
   // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     log.info("shutdown requested", { signal });
+    skillSync?.stopPolling();
     try {
       await shim.close();
     } catch (err) {

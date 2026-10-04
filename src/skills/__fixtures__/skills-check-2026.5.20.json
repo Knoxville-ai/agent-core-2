@@ -1,0 +1,85 @@
+{
+  "agentId": "main",
+  "workspaceDir": "/home/agent/.openclaw/workspace",
+  "managedSkillsDir": "/home/agent/.openclaw/skills",
+  "summary": {
+    "total": 62,
+    "eligible": 3,
+    "modelVisible": 3,
+    "commandVisible": 2,
+    "disabled": 0,
+    "blocked": 56,
+    "agentFiltered": 0,
+    "notInjected": 0,
+    "missingRequirements": 3
+  },
+  "eligible": [
+    "browser-automation",
+    "ok-skill",
+    "skill-creator"
+  ],
+  "modelVisible": [
+    "browser-automation",
+    "ok-skill",
+    "skill-creator"
+  ],
+  "commandVisible": [
+    "ok-skill",
+    "skill-creator"
+  ],
+  "disabled": [],
+  "blocked": [
+    "1password",
+    "apple-notes",
+    "apple-reminders",
+    "bear-notes",
+    "blogwatcher"
+  ],
+  "agentFiltered": [],
+  "notInjected": [],
+  "missingRequirements": [
+    {
+      "name": "keyed-skill",
+      "missing": {
+        "bins": [],
+        "anyBins": [],
+        "env": [
+          "KEYED_TOKEN"
+        ],
+        "config": [],
+        "os": []
+      },
+      "install": []
+    },
+    {
+      "name": "needs-bin",
+      "missing": {
+        "bins": [
+          "definitely-not-a-bin-xyz"
+        ],
+        "anyBins": [
+          "nope-a",
+          "nope-b"
+        ],
+        "env": [],
+        "config": [],
+        "os": []
+      },
+      "install": []
+    },
+    {
+      "name": "needs-env",
+      "missing": {
+        "bins": [],
+        "anyBins": [],
+        "env": [
+          "ODOO_MCP_TOKEN",
+          "OTHER_TOKEN"
+        ],
+        "config": [],
+        "os": []
+      },
+      "install": []
+    }
+  ]
+}
