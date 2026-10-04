@@ -50,7 +50,7 @@ The console provisions an agent by:
 | `LLM_BASE_URL` | Provider endpoint override → `openclaw.json` `models.providers.<LLM_PROVIDER>.baseURL`. Set it to a cheap external OpenAI-compatible endpoint (Groq / DeepSeek / a self-hosted Ollama box) to cut the API bill. Leave **unset** for `LLM_PROVIDER=ollama` (in-container local model) — the image starts a loopback Ollama server, defaults the baseURL to it, and pulls `LLM_MODEL`'s weights on first boot (only for ollama agents). |
 | `PLATFORM_MCP_URL` | URL of the platform's MCP server. Set this to give the agent an outbound channel to discover and converse with other platform agents (drive-throughs) AND to fetch its own bundle at boot. |
 | `PLATFORM_API_TOKEN` | per-agent bearer (`knox_agent_*`) for the platform MCP. Required whenever `PLATFORM_MCP_URL` is set. |
-| `OPENCLAW_BUNDLED_SKILLS` | OpenClaw's own bundled skills the agent may see → `skills.allowBundled`. Default `skill-creator`. Comma/space list; `none` = no bundled skills (emitted as a non-empty sentinel, since openclaw treats `[]` as "all"); `all` = openclaw's default (every eligible bundled skill — 14–19 of them, ~4–6k chars — in every model call's prompt). Read at gateway start only. |
+| `OPENCLAW_BUNDLED_SKILLS` | OpenClaw's own bundled skills the agent may see → `skills.allowBundled`. Default (unset, empty or `none`): **no bundled skills** — emitted as the non-empty sentinel `["__none__"]`, since openclaw treats `[]` as "all". An agent's skills come from the platform library; the bundled `skill-creator` would teach it to write skill folders itself, which SkillSync quarantines. A comma/space list (e.g. `skill-creator`) allows just those; `all` = openclaw's default (every eligible bundled skill — 14–19 of them, ~4–6k chars — in every model call's prompt). Read at gateway start only. |
 | `SKILL_SYNC_POLL_MS` | SkillSync safety-poll interval. Default `300000` (5 min); `0` disables; values under 10s are raised to 10s. |
 
 When both are set, the shim's `renderWorkspace()` adds an entry to
@@ -194,16 +194,34 @@ for each installed/updated skill, and deletes the entry of a removed skill when
 it holds nothing but that rev (otherwise only the rev is dropped). Every other
 key is preserved. `gateway.reload.mode: "hot"` guarantees the edit is applied
 in-process, never by restarting. The gateway applies it ~0.6s after the write
-(chokidar + 300ms debounce, measured); a run waits 1s after a live refresh
-before it completes, so `POST /skills/sync` → `200 applied` means the agent's
-**next turn** — in an existing session too — lists the change.
+(chokidar write-stability + 300ms debounce, measured); a run waits 1s after a
+live refresh before it completes, so `POST /skills/sync` → `200 applied` means
+the agent's **next turn** — in an existing session too — lists the change.
+
+A change that touches no skill's own entry (a quarantined hand-made folder, a
+removed skill that never had an entry, the post-start refresh) bumps the rev of
+one dedicated entry, `skills.entries["knox-skillsync"]`, instead — no skill has
+that key.
+
+**Startup and restarts.** The gateway attaches its `openclaw.json` watcher only
+after it reports ready; a write that lands earlier is not noticed (verified: a
+bump written while `/readyz` was still 503 was missed every time, and the
+watcher went live 0–700ms after `/readyz` turned 200). So every rev bump goes
+through one process-wide **refresh gate**: closed until the gateway's
+`/readyz` is 200 plus a 3s settle, it queues changes (the boot reconcile's, a
+nudge during startup, a deprecated-route call) and then flushes them as one
+write that always changes a `skills.*` path. The flush is forced even when
+nothing queued, so a session resumed from the volume can't keep a skills
+snapshot from before the restart (openclaw persists the snapshot with the
+session and reuses one built at snapshot version 0). The OAuth flow's
+in-process gateway restart closes the gate first and reopens it the same way.
 
 The boot-time `openclaw.json` carries the same entries, derived from the lock,
-plus `skills.allowBundled` (`OPENCLAW_BUNDLED_SKILLS`):
+plus `skills.allowBundled` (`OPENCLAW_BUNDLED_SKILLS`, default none):
 
 ```json5
 gateway: { reload: { mode: "hot" }, … },
-skills:  { allowBundled: ["skill-creator"],
+skills:  { allowBundled: ["__none__"],          // = no bundled skills; [] would mean "all"
            entries: { "<key>": { config: { rev: "<sha12>" } } } }
 ```
 
@@ -241,7 +259,7 @@ Gateway-token auth (`Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>`), like
 | --- | --- |
 | `POST /skills/sync` | Body `{ generation? }`. Runs or joins a reconcile and waits up to 25s for a completed run whose applied generation ≥ `generation` → `200 { status: "applied", applied_generation, results }` (`results` as in `report_skill_sync`; for a run that found nothing new, the latest known per-skill results). Otherwise (deps still installing, or a transient failure the poll will retry) → `202 { status: "in_progress", generation }`. Console without the library, or no platform MCP → `409 { status: "legacy" }`. |
 | `GET /skills` | Library mode: `{ mode: "library", generation, lock_digest, skills: [{ slug, version, content_sha256, managed_by, source, required, status }] }`. Legacy mode: `{ mode, generation: null, lock_digest: null, skills: [{ slug, version: null, source: "clawhub" }] }` (the folders). |
-| `POST /skills/install`, `DELETE /skills/{slug}` | **Deprecated** — the ClawHub path for older consoles. Legacy mode only: they install/remove, provision deps, then bump the skill's `config.rev` (no restart; P0). In library mode they answer `409 { status: "library" }` — SkillSync would quarantine a hand-installed folder or put a removed library skill back. |
+| `POST /skills/install`, `DELETE /skills/{slug}` | **Deprecated** — the ClawHub path for older consoles. Legacy mode only: they install/remove, provision deps, then bump the skill's `config.rev` through the refresh gate (no restart; P0). In library mode they answer `409 { status: "library" }` — SkillSync would quarantine a hand-installed folder or put a removed library skill back. |
 | `GET /skills/search` | `501` (search lives on the platform: `search_skills`). |
 
 ### Legacy mode — `config/skills.json` + bundle ClawHub refs

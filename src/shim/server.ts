@@ -100,6 +100,7 @@ export function startShim(
     db,
     sessions: new OAuthSessionManager(env),
     gateway,
+    ...(refreshGate ? { refreshGate } : {}),
   };
   const skills: SkillsRouteDeps = {
     env,

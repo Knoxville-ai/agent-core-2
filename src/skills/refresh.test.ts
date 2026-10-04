@@ -9,6 +9,7 @@ import {
   bumpSkillRevs,
   freshRev,
   isRevOnlyEntry,
+  openWhenGatewayReady,
   REFRESH_SENTINEL_KEY,
   RefreshGate,
   type RevChange,
@@ -19,7 +20,7 @@ function baseConfig(): Record<string, unknown> {
     agents: { defaults: { workspace: "/ws" } },
     gateway: { port: 18789, reload: { mode: "hot" } },
     skills: {
-      allowBundled: ["skill-creator"],
+      allowBundled: ["__none__"],
       entries: {
         alpha: { config: { rev: "aaaaaaaaaaaa" } },
         // An entry someone else configured: never deleted, only our rev changes.
@@ -41,7 +42,7 @@ describe("applyRevChanges", () => {
     ]);
     expect(changed).toBe(true);
     const skills = cfg.skills as { allowBundled: string[]; entries: Record<string, unknown> };
-    expect(skills.allowBundled).toEqual(["skill-creator"]);
+    expect(skills.allowBundled).toEqual(["__none__"]);
     expect(skills.entries.alpha).toEqual({ config: { rev: "111111111111" } });
     expect(skills.entries.newbie).toEqual({ config: { rev: "222222222222" } });
     expect(skills.entries.mixed).toEqual({ env: { TOKEN: "x" }, config: { rev: "333333333333", other: 1 } });
@@ -187,6 +188,27 @@ describe("RefreshGate", () => {
     expect(writes).toEqual([[{ key: "a", rev: "222222222222" }]]);
   });
 
+  it("close() makes pushes queue again until the next open()", async () => {
+    const { gate, writes } = recordingGate();
+    await gate.open();
+    const epoch = gate.close();
+    expect(gate.isOpen).toBe(false);
+    expect(await gate.push([{ key: "a", rev: "333333333333" }])).toEqual({ live: false });
+    expect(writes).toEqual([]);
+    expect(await gate.open({ epoch })).toBe(true);
+    expect(writes).toEqual([[{ key: "a", rev: "333333333333" }]]);
+  });
+
+  it("an open() from an earlier close is ignored once a newer close happened", async () => {
+    const { gate, writes } = recordingGate();
+    const first = gate.close();
+    const second = gate.close(); // a second restart began before the first open
+    expect(await gate.open({ force: true, epoch: first })).toBe(false);
+    expect(gate.isOpen).toBe(false);
+    expect(await gate.open({ force: true, epoch: second })).toBe(true);
+    expect(writes).toHaveLength(1);
+  });
+
   it("open() with nothing queued writes nothing — unless forced (post-restart refresh)", async () => {
     const quiet = recordingGate();
     expect(await quiet.gate.open()).toBe(false);
@@ -195,5 +217,32 @@ describe("RefreshGate", () => {
     const forced = recordingGate();
     expect(await forced.gate.open({ force: true })).toBe(true);
     expect(forced.writes).toEqual([[{ key: REFRESH_SENTINEL_KEY, rev: expect.stringMatching(/^[0-9a-f]{12}$/) }]]);
+  });
+});
+
+describe("openWhenGatewayReady", () => {
+  it("waits for readiness, then opens the gate with a forced refresh", async () => {
+    const writes: RevChange[][] = [];
+    const gate = new RefreshGate(async (c) => {
+      writes.push(c);
+    });
+    let ready!: (v: boolean) => void;
+    const done = openWhenGatewayReady(gate, { waitUntilReady: () => new Promise((r) => (ready = r)) }, { settleMs: 0 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(gate.isOpen).toBe(false);
+    ready(true);
+    await done;
+    expect(gate.isOpen).toBe(true);
+    expect(writes).toEqual([[{ key: REFRESH_SENTINEL_KEY, rev: expect.stringMatching(/^[0-9a-f]{12}$/) }]]);
+  });
+
+  it("opens anyway when the gateway never reports ready (queued changes still land)", async () => {
+    const writes: RevChange[][] = [];
+    const gate = new RefreshGate(async (c) => {
+      writes.push(c);
+    });
+    await gate.push([{ key: "a", rev: "444444444444" }]);
+    await openWhenGatewayReady(gate, { waitUntilReady: async () => false }, { settleMs: 0 });
+    expect(writes).toEqual([[{ key: "a", rev: "444444444444" }]]);
   });
 });

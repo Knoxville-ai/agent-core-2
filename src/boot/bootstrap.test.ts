@@ -179,7 +179,7 @@ describe("bootstrap skills integration", () => {
     const config = JSON.parse(await readFile(join(stateDir, "openclaw.json"), "utf8"));
     expect(config.gateway.reload).toEqual({ mode: "hot" });
     expect(config.skills).toEqual({
-      allowBundled: ["skill-creator"],
+      allowBundled: ["__none__"],
       entries: { "hello-world": { config: { rev: helloVersion().content_sha256.slice(0, 12) } } },
     });
     expect(result.installedSkills.map((s) => s.ref)).toEqual(["hello-world"]);

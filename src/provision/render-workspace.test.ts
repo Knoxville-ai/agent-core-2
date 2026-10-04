@@ -284,22 +284,22 @@ describe("buildOpenclawConfig gateway.reload + skills (restart-free skills)", ()
     expect(gateway.reload).toEqual({ mode: "hot" });
   });
 
-  it("allowBundled defaults to skill-creator only (env unset)", () => {
-    expect(skills(buildOpenclawConfig(makeEnv({}), "/ws")).allowBundled).toEqual(["skill-creator"]);
-    expect(skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "  " }), "/ws")).allowBundled).toEqual([
+  it("allowBundled defaults to NO bundled skills (env unset/empty) — a non-empty sentinel, never []", () => {
+    // openclaw treats `allowBundled: []` as unset (every bundled skill stays),
+    // so "none" must be a non-empty list that matches no skill.
+    for (const value of [undefined, "", "  ", "none", "NONE"]) {
+      const s = skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: value }), "/ws"));
+      expect(s.allowBundled, String(value)).toEqual([NO_BUNDLED_SKILLS_SENTINEL]);
+    }
+    expect(NO_BUNDLED_SKILLS_SENTINEL).toBe("__none__");
+  });
+
+  it("honors an explicit bundled list", () => {
+    expect(skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "skill-creator" }), "/ws")).allowBundled).toEqual([
       "skill-creator",
     ]);
-  });
-
-  it("honors a custom bundled list", () => {
     const s = skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "skill-creator, weather" }), "/ws"));
     expect(s.allowBundled).toEqual(["skill-creator", "weather"]);
-  });
-
-  it("`none` emits a non-empty sentinel (openclaw treats [] as 'all bundled')", () => {
-    const s = skills(buildOpenclawConfig(makeEnv({ OPENCLAW_BUNDLED_SKILLS: "none" }), "/ws"));
-    expect(s.allowBundled).toEqual([NO_BUNDLED_SKILLS_SENTINEL]);
-    expect(s.allowBundled?.length).toBeGreaterThan(0);
   });
 
   it("`all` restores openclaw's default (no allowBundled key)", () => {

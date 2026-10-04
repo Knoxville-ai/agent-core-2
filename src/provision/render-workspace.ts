@@ -356,18 +356,20 @@ export const NO_BUNDLED_SKILLS_SENTINEL = "__none__";
  *
  * Without an allowlist the gateway advertises every eligible OpenClaw bundled
  * skill (notion, weather, taskflow, canvas, … — 14–19 of them, ~4–6k chars) in
- * EVERY model call's system prompt, though nobody installed them. Default is
- * `skill-creator` only. Comma/space-separated names; `none` blocks every
- * bundled skill (a non-empty sentinel, since `[]` means "all"); `all` restores
- * OpenClaw's default (no allowlist). Only applied at gateway start — a change
- * needs a redeploy. Exported for unit tests.
+ * EVERY model call's system prompt, though nobody installed them. Default
+ * (unset, empty or `none`): no bundled skills — emitted as a non-empty
+ * sentinel, since openclaw treats `[]` as "all". An agent's skills come from
+ * the platform library; the bundled `skill-creator` would teach it to write
+ * skill folders itself, which SkillSync quarantines. Comma/space-separated
+ * names allow exactly those; `all` restores OpenClaw's default (no allowlist).
+ * Only applied at gateway start — a change needs a redeploy. Exported for unit
+ * tests.
  */
 export function resolveAllowBundled(raw: string | undefined): string[] | undefined {
   const list = parseToolList(raw);
-  if (list.length === 0) return ["skill-creator"];
   const lower = list.map((s) => s.toLowerCase());
   if (lower.length === 1 && lower[0] === "all") return undefined;
-  if (lower.includes("none")) return [NO_BUNDLED_SKILLS_SENTINEL];
+  if (list.length === 0 || lower.includes("none")) return [NO_BUNDLED_SKILLS_SENTINEL];
   return list;
 }
 
@@ -483,7 +485,8 @@ export function buildOpenclawConfig(
     toolsAllow.length > 0 ? [] : parseToolList(env.OPENCLAW_TOOLS_ALSO_ALLOW);
   // Root-level tools.toolSearch (deferred discovery); undefined => not emitted.
   const toolSearch = resolveToolSearchConfig(env.OPENCLAW_TOOL_SEARCH);
-  // Bundled-skill allowlist; undefined => not emitted (OPENCLAW_BUNDLED_SKILLS=all).
+  // Bundled-skill allowlist (default: none); undefined => not emitted
+  // (OPENCLAW_BUNDLED_SKILLS=all).
   const allowBundled = resolveAllowBundled(env.OPENCLAW_BUNDLED_SKILLS);
   // Lock-derived per-skill revs, keys sorted (byte-stable for the same lock).
   const entryKeys = Object.keys(skillEntries).sort();
@@ -606,7 +609,8 @@ export function buildOpenclawConfig(
     },
     // Skills. `allowBundled` trims OpenClaw's bundled skills (14–19 of them,
     // advertised in every model call's prompt by default) to the ones we want —
-    // read at gateway start only. `entries` carries one `config.rev` per
+    // none unless OPENCLAW_BUNDLED_SKILLS says otherwise; read at gateway start
+    // only. `entries` carries one `config.rev` per
     // platform-managed skill from the SkillSync lock: the same value the live
     // refresh writes (../skills/refresh.ts), so the gateway starts with the
     // current revs. `config` is a free-form bag in the schema; nothing else

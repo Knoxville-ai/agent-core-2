@@ -67,6 +67,8 @@ import type { InstalledSkill } from "./resolver.js";
  *   quarantine = folders under skills/ no plan put there (kept, reported)
  *   refresh = bump skills.entries.<key>.config.rev in openclaw.json so every
  *             session rebuilds its skills list on its next turn — no restart
+ *             (through the RefreshGate, which holds bumps until the gateway
+ *             is watching the file: see ./refresh.ts)
  *   check   = `openclaw skills check --json` → ineligible + what's missing
  *   report  = report_skill_sync
  *

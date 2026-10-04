@@ -114,12 +114,15 @@ describe("tool-block env levers (step 4)", () => {
 });
 
 describe("skills env", () => {
-  it("defaults the bundled-skill allowlist to skill-creator", () => {
-    expect(withEnv({}, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe("skill-creator");
+  it("defaults to no bundled skills (skills come from the platform library)", () => {
+    expect(withEnv({}, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe("none");
   });
 
   it("passes an explicit bundled list through (render-workspace parses it)", () => {
-    expect(withEnv({ OPENCLAW_BUNDLED_SKILLS: "none" }, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe("none");
+    expect(withEnv({ OPENCLAW_BUNDLED_SKILLS: "skill-creator" }, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe(
+      "skill-creator",
+    );
+    expect(withEnv({ OPENCLAW_BUNDLED_SKILLS: "all" }, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe("all");
   });
 
   it("polls every 5 minutes by default", () => {

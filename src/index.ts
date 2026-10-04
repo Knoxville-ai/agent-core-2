@@ -9,7 +9,7 @@ import { assertStateDirWritable } from "./provision/state-dir.js";
 import { startCostProxy, costTrackingEnabled } from "./shim/cost-proxy.js";
 import { startShim } from "./shim/server.js";
 import { UsageAccumulator } from "./shim/usage-telemetry.js";
-import { bumpSkillRevs, RefreshGate } from "./skills/refresh.js";
+import { bumpSkillRevs, openWhenGatewayReady, RefreshGate } from "./skills/refresh.js";
 import { skillSyncFromEnv } from "./skills/sync.js";
 
 async function main(): Promise<void> {
@@ -104,19 +104,15 @@ async function main(): Promise<void> {
   //     changed; SKILL_SYNC_POLL_MS=0 disables it.
   skillSync?.startPolling(env.SKILL_SYNC_POLL_MS);
 
-  // 4c. Open the skills refresh gate once the gateway reports ready — it only
-  //     starts watching openclaw.json then; a rev bump written earlier is
-  //     missed (verified). Opening flushes whatever queued up (a nudge during
-  //     startup) as one guaranteed skills.* change, forced even when nothing
-  //     did, so a session resumed from the volume can't keep a skills snapshot
-  //     from before the restart (see RefreshGate). From here on every skills
-  //     change is a hot-reloaded rev bump — never a restart.
-  void proc.waitUntilReady().then(async (ready) => {
-    if (!ready) log.warn("gateway not ready yet; opening the skills refresh gate anyway");
-    await refreshGate.open({ force: true }).catch((err) => {
-      log.error("skills refresh after gateway start failed", { err: String(err) });
-    });
-  });
+  // 4c. Open the skills refresh gate once the gateway reports ready (plus a
+  //     settle for its config watcher to attach) — a rev bump written earlier
+  //     is missed (verified). Opening flushes whatever queued up (a nudge
+  //     during startup) as one guaranteed skills.* change, forced even when
+  //     nothing did, so a session resumed from the volume can't keep a skills
+  //     snapshot from before the restart (see RefreshGate). From here on every
+  //     skills change is a hot-reloaded rev bump — never a restart. The OAuth
+  //     route closes and reopens the same gate around its in-process restart.
+  void openWhenGatewayReady(refreshGate, proc);
 
   // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {

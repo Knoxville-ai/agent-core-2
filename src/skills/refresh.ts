@@ -121,8 +121,17 @@ export function openclawConfigPath(stateDir: string): string {
   return join(stateDir, "openclaw.json");
 }
 
-/** Serializes config writes within this process (refresh vs. legacy routes). */
+/** Serializes openclaw.json read-modify-writes within this process (skills
+ *  refreshes, the deprecated routes, the OAuth config flip). */
 let chain: Promise<unknown> = Promise.resolve();
+
+/** Run `fn` (an openclaw.json read-modify-write) after every write queued
+ *  before it, so two writers never lose each other's change. */
+export function serializeConfigWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const next = chain.then(fn, fn);
+  chain = next.catch(() => {});
+  return next;
+}
 
 /**
  * Read openclaw.json, apply `changes`, and write it back (tmp + rename), with
@@ -136,7 +145,7 @@ export function bumpSkillRevs(
   changes: RevChange[],
   opts: { ensureChange?: boolean } = {},
 ): Promise<{ changed: boolean }> {
-  const run = async (): Promise<{ changed: boolean }> => {
+  return serializeConfigWrite(async (): Promise<{ changed: boolean }> => {
     if (changes.length === 0) return { changed: false };
     const path = openclawConfigPath(stateDir);
     const config = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
@@ -148,32 +157,40 @@ export function bumpSkillRevs(
       changes: changes.map((c) => ("rev" in c ? `${c.key}=${c.rev}` : `-${c.key}`)),
     });
     return { changed: true };
-  };
-  const next = chain.then(run, run);
-  chain = next.catch(() => {});
-  return next;
+  });
 }
 
 /**
- * Gate between "change a skill" and "tell the gateway". The gateway attaches
- * its openclaw.json watcher only once it reports ready (`/readyz` → 200); a rev
- * bump written before that is missed (verified on 2026.5.20). So until `open()`
- * changes are queued, and `open()` flushes them as ONE write that is
- * guaranteed to change a `skills.*` path.
+ * How long to wait after the gateway's `/readyz` turns 200 before writing to
+ * openclaw.json: the gateway attaches its config watcher only after it reports
+ * ready, and a write that lands first is not noticed until some later write
+ * (measured on 2026.5.20: the watcher was live between 0 and ~700ms after
+ * readiness). Waiting is cheap — queued changes are never dropped, and sessions
+ * started meanwhile read skills/ fresh anyway.
+ */
+export const GATEWAY_WATCH_SETTLE_MS = 3_000;
+
+/**
+ * Gate between "change a skill" and "tell the gateway". Until `open()`,
+ * changes are queued; `open()` flushes them as ONE write that is guaranteed to
+ * change a `skills.*` path. `close()` (around an in-process gateway restart)
+ * makes pushes queue again until the new gateway is watching.
  *
- * Opening with `force` also bumps when nothing is queued. index.ts does that on
- * every start as a cheap guarantee for sessions resumed from the volume: a
- * session's skills snapshot is persisted with it, a fresh gateway starts at
- * snapshot version 0, and openclaw reuses a snapshot that was built at version
- * 0 (`shouldRefreshSnapshotForVersion(0, 0)` is false). On 2026.5.20 the shim's
- * `webchat:<id>` sessions happen to be re-keyed at gateway start and rebuild
- * anyway (observed); the forced bump keeps that true if the re-keying changes.
+ * Opening with `force` also bumps when nothing is queued. The gate is opened
+ * that way after every gateway start as a cheap guarantee for sessions resumed
+ * from the volume: a session's skills snapshot is persisted with it, a fresh
+ * gateway starts at snapshot version 0, and openclaw reuses a snapshot that was
+ * built at version 0 (`shouldRefreshSnapshotForVersion(0, 0)` is false). On
+ * 2026.5.20 the shim's `webchat:<id>` sessions happen to be re-keyed at gateway
+ * start and rebuild anyway (observed); the forced bump keeps that true if the
+ * re-keying changes.
  *
- * One gate per process, shared by SkillSync and the deprecated
- * `/skills/install` + `DELETE /skills/:slug` routes.
+ * One gate per process, shared by SkillSync, the deprecated `/skills/install`
+ * + `DELETE /skills/:slug` routes, and the OAuth gateway restart.
  */
 export class RefreshGate {
   private opened = false;
+  private epoch = 0;
   private queued: RevChange[] = [];
 
   constructor(private readonly write: (changes: RevChange[]) => Promise<unknown>) {}
@@ -194,14 +211,49 @@ export class RefreshGate {
     return { live: true };
   }
 
-  /** The gateway is up and watching: flush what queued up (or, with `force`,
-   *  bump the sentinel even when nothing did). Returns whether it wrote. */
-  async open(opts: { force?: boolean } = {}): Promise<boolean> {
+  /** The gateway is going away (in-process restart): queue from now on.
+   *  Returns the epoch to hand to the `open()` that follows the restart. */
+  close(): number {
+    this.opened = false;
+    this.epoch += 1;
+    return this.epoch;
+  }
+
+  /**
+   * The gateway is up and watching: flush what queued up (or, with `force`,
+   * bump the sentinel even when nothing did). With `epoch`, an open that
+   * belongs to an earlier close is ignored (a second restart began since).
+   * Returns whether it wrote.
+   */
+  async open(opts: { force?: boolean; epoch?: number } = {}): Promise<boolean> {
+    if (opts.epoch !== undefined && opts.epoch !== this.epoch) return false;
     this.opened = true;
     const queued = this.queued;
     this.queued = [];
     if (queued.length === 0 && !opts.force) return false;
     await this.write(queued.length > 0 ? queued : [{ key: REFRESH_SENTINEL_KEY, rev: freshRev() }]);
     return true;
+  }
+}
+
+/**
+ * After a gateway (re)start: wait for its `/readyz`, give it
+ * GATEWAY_WATCH_SETTLE_MS to attach its config watcher, then open the gate
+ * (forced — see RefreshGate). Opens even when the gateway never reports ready,
+ * so queued changes still land on disk. Never throws.
+ */
+export async function openWhenGatewayReady(
+  gate: RefreshGate,
+  gateway: { waitUntilReady(): Promise<boolean> },
+  opts: { epoch?: number; settleMs?: number } = {},
+): Promise<void> {
+  const ready = await gateway.waitUntilReady().catch(() => false);
+  if (!ready) log.warn("gateway not ready; opening the skills refresh gate anyway");
+  await new Promise((r) => setTimeout(r, opts.settleMs ?? GATEWAY_WATCH_SETTLE_MS));
+  try {
+    const wrote = await gate.open({ force: true, ...(opts.epoch !== undefined ? { epoch: opts.epoch } : {}) });
+    if (wrote) log.info("skills refresh gate open (post-start refresh written)");
+  } catch (err) {
+    log.error("skills refresh after gateway start failed", { err: String(err) });
   }
 }

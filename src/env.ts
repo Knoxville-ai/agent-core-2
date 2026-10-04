@@ -226,13 +226,18 @@ const Schema = z.object({
   // eligible bundled skill (notion, weather, taskflow, canvas, meme-maker, … —
   // 14–19 nobody installed, ~4–6k chars) in the system prompt of every model
   // call. Comma/space-separated skill names:
-  //   unset / ""    → "skill-creator" (the default)
-  //   "none"        → no bundled skills at all (emitted as a non-empty sentinel:
-  //                   openclaw treats `allowBundled: []` as "all")
-  //   "all"         → openclaw's default, no allowlist
-  // Read at gateway start only; a change needs a redeploy. Platform-library
-  // skills are not affected — they live in workspace/skills/.
-  OPENCLAW_BUNDLED_SKILLS: z.string().optional().default("skill-creator"),
+  //   unset / "" / "none" → no bundled skills at all (the default; emitted as a
+  //                         non-empty sentinel because openclaw treats
+  //                         `allowBundled: []` as "all")
+  //   "skill-creator, …"  → just those
+  //   "all"               → openclaw's default, no allowlist
+  // None by default: an agent's skills come from the platform library, and the
+  // bundled `skill-creator` teaches an agent to write skill folders itself —
+  // which SkillSync quarantines and the constitution forbids (platform skill
+  // authoring is a later phase). Read at gateway start only; a change needs a
+  // redeploy. Platform-library skills are not affected — they live in
+  // workspace/skills/.
+  OPENCLAW_BUNDLED_SKILLS: z.string().optional().default("none"),
 
   // SkillSync safety poll: how often (ms) the vessel asks the platform for its
   // skill plan (`get_skill_sync_plan` with `if_generation` — a one-row no-op
