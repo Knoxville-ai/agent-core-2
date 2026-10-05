@@ -319,3 +319,15 @@ describe("isCreateReminderTool", () => {
     expect(conversationIdParamFor("resolve_reminder")).toBe(null);
   });
 });
+
+describe("publish_artifact stamping (0138)", () => {
+  it("stamps conversation_id outside a task session — it decides whose page it is", () => {
+    expect(conversationIdParamFor("publish_artifact")).toBe("conversation_id");
+    expect(conversationIdParamFor("knoxville_platform__publish_artifact")).toBe("conversation_id");
+  });
+
+  it("leaves the read-only artifact tools alone", () => {
+    expect(conversationIdParamFor("get_artifact")).toBe(null);
+    expect(conversationIdParamFor("list_my_artifacts")).toBe(null);
+  });
+});

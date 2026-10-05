@@ -641,6 +641,35 @@ and make the route a no-op). If the running openclaw never fires
 `after_tool_call`, rows simply stay `status='called'` — a complete audit + billing
 signal on their own.
 
+## Artifacts (console migration 0138)
+
+When someone asks the agent to build a page — a report, dashboard, calculator,
+one-pager — the agent writes one self-contained HTML document and publishes it
+with the platform MCP tool **`publish_artifact`**. The console stores it in its
+own Supabase (`public.agent_artifacts` + the private `agent-artifacts` bucket) and returns a
+link on the **console**, `/a/<id>` — never on this container — with private /
+org / public visibility. `get_artifact` and `list_my_artifacts` read back what
+the agent has published. The console's CONTRACT.md (“Artifacts”) owns the
+storage layout, visibility rules and the sandbox the page is served in.
+
+The vessel's part lives in the `knox-report-outcome` plugin:
+
+- **Whose page it is.** `publish_artifact` is stamped with `conversation_id`
+  (`task_id` in a task session) like `create_reminder`; the console makes the
+  person behind that session the artifact's owner, who can see it while it is
+  private and change who else can.
+- **`file_path`.** The agent can write the page to its workspace and pass
+  `file_path` instead of `html` — cheaper on every revision than re-emitting the
+  document as a tool argument. The plugin resolves the path inside
+  `$OPENCLAW_STATE_DIR/workspace` (relative, or absolute inside it; symlinks out
+  of it are refused), checks it against the console's 3.5 MB limit, and swaps
+  it for `html` before the call leaves the container. A bad path **blocks** the
+  call with a reason the model can act on (`blockReason`), so the console never
+  receives a path. See `openclaw-plugins/report-outcome/artifact.js`.
+
+The constitution's *Artifacts* section teaches the agent when to publish and
+how to build a page that works in the sandbox.
+
 ## Migration strategy
 
 The v0.3 image deploys side-by-side with v0.2:

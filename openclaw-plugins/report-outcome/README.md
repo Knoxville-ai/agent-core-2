@@ -88,3 +88,20 @@ which has no OpenClaw runtime):** boot an agent-core container with
 `PLATFORM_MCP_URL` set, send a turn, have the model call `report_outcome` with a
 status + summary (no conversation id), and assert the platform recorded the
 outcome against the turn's conversation.
+
+## publish_artifact (console migration 0138)
+
+Two things happen on a `publish_artifact` call:
+
+1. **Session stamping**, the same as `create_reminder`: `conversation_id` (or
+   `task_id` in a task session), which the console uses to decide whose page it
+   is.
+2. **`file_path` → `html`** (`artifact.js`). The agent may write the page to a
+   file in its workspace and pass `file_path` instead of the HTML. This plugin
+   reads the file (relative to `$OPENCLAW_STATE_DIR/workspace`, or absolute
+   inside it; a symlink that leaves the workspace is refused; at most 3.5 MB,
+   matching the console) and sends its contents as `html`. If the path can't be
+   used, the call is **blocked** with a `blockReason` saying why, so the model
+   can fix it — the platform never receives a path. When both `html` and
+   `file_path` are given, `html` wins and the path is dropped.
+

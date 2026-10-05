@@ -78,9 +78,17 @@ const LEARNING_LINK_SUFFIX = /(^|[.:/]|__)(ask_question|submit_for_review)$/;
  *  reminder still works and reports to the org's owner. */
 const CREATE_REMINDER_SUFFIX = /(^|[.:/]|__)create_reminder$/;
 
+/** The platform's artifact publisher (console migration 0138). The session
+ *  decides whose page it is — the person the agent was asked by, who can then
+ *  see it while it's private and change who else can — so the model must not
+ *  choose it. Same stamping rule as create_reminder. Absent, the page still
+ *  publishes and belongs to the org's owner. */
+const PUBLISH_ARTIFACT_SUFFIX = /(^|[.:/]|__)publish_artifact$/;
+
 const CONVERSATION_ID_TOOLS = [
   { suffix: LEARNING_LINK_SUFFIX, param: "conversation_id" },
   { suffix: CREATE_REMINDER_SUFFIX, param: "conversation_id" },
+  { suffix: PUBLISH_ARTIFACT_SUFFIX, param: "conversation_id" },
   { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
   { suffix: START_TASK_SUFFIX, param: "conversation_id" },
   { suffix: ESCALATE_TO_HUMAN_SUFFIX, param: "conversation_id" },
