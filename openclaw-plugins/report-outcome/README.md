@@ -95,7 +95,8 @@ Two things happen on a `publish_artifact` call:
 
 1. **Session stamping**, the same as `create_reminder`: `conversation_id` (or
    `task_id` in a task session), which the console uses to decide whose page it
-   is.
+   is. `get_artifact` and `list_my_artifacts` are stamped too: the console only
+   returns pages the session's person could open themselves.
 2. **`file_path` → `html`** (`artifact.js`). The agent may write the page to a
    file in its workspace and pass `file_path` instead of the HTML. This plugin
    reads the file (relative to `$OPENCLAW_STATE_DIR/workspace`, or absolute

@@ -78,17 +78,19 @@ const LEARNING_LINK_SUFFIX = /(^|[.:/]|__)(ask_question|submit_for_review)$/;
  *  reminder still works and reports to the org's owner. */
 const CREATE_REMINDER_SUFFIX = /(^|[.:/]|__)create_reminder$/;
 
-/** The platform's artifact publisher (console migration 0138). The session
- *  decides whose page it is — the person the agent was asked by, who can then
- *  see it while it's private and change who else can — so the model must not
- *  choose it. Same stamping rule as create_reminder. Absent, the page still
- *  publishes and belongs to the org's owner. */
-const PUBLISH_ARTIFACT_SUFFIX = /(^|[.:/]|__)publish_artifact$/;
+/** The platform's artifact tools (console migration 0138). The session decides
+ *  whose page a new one is — the person the agent was asked by, who can then
+ *  see it while it's private and change who else can — and which pages the
+ *  agent may read back or revise: only ones that person could open themselves,
+ *  because whatever the tool returns is shown to them. So the model must not
+ *  choose it. Same stamping rule as create_reminder. Absent, the platform
+ *  treats the call as a run with no person: org and public pages only. */
+const ARTIFACT_SESSION_SUFFIX = /(^|[.:/]|__)(publish_artifact|get_artifact|list_my_artifacts)$/;
 
 const CONVERSATION_ID_TOOLS = [
   { suffix: LEARNING_LINK_SUFFIX, param: "conversation_id" },
   { suffix: CREATE_REMINDER_SUFFIX, param: "conversation_id" },
-  { suffix: PUBLISH_ARTIFACT_SUFFIX, param: "conversation_id" },
+  { suffix: ARTIFACT_SESSION_SUFFIX, param: "conversation_id" },
   { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
   { suffix: START_TASK_SUFFIX, param: "conversation_id" },
   { suffix: ESCALATE_TO_HUMAN_SUFFIX, param: "conversation_id" },
@@ -129,6 +131,11 @@ export function isSendCustomerEmailTool(toolName) {
 /** True when `toolName` is ask_question or submit_for_review (0125). */
 export function isLearningLinkTool(toolName) {
   return typeof toolName === "string" && LEARNING_LINK_SUFFIX.test(toolName);
+}
+
+/** True for the artifact tools that take the session (0138). */
+export function isArtifactSessionTool(toolName) {
+  return typeof toolName === "string" && ARTIFACT_SESSION_SUFFIX.test(toolName);
 }
 
 /** True when `toolName` is create_reminder (0137). */

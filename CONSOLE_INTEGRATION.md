@@ -654,10 +654,13 @@ storage layout, visibility rules and the sandbox the page is served in.
 
 The vessel's part lives in the `knox-report-outcome` plugin:
 
-- **Whose page it is.** `publish_artifact` is stamped with `conversation_id`
-  (`task_id` in a task session) like `create_reminder`; the console makes the
-  person behind that session the artifact's owner, who can see it while it is
-  private and change who else can.
+- **Whose page it is, and what may be read back.** `publish_artifact`,
+  `get_artifact` and `list_my_artifacts` are stamped with `conversation_id`
+  (`task_id` in a task session) like `create_reminder`. The console makes the
+  person behind that session a new artifact's owner, who can see it while it
+  is private and change who else can, and only returns or revises pages that
+  person could open themselves: an outside caller gets public pages, a routine
+  run (no person) org and public pages.
 - **`file_path`.** The agent can write the page to its workspace and pass
   `file_path` instead of `html` — cheaper on every revision than re-emitting the
   document as a tool argument. The plugin resolves the path inside

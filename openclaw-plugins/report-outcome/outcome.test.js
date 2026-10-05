@@ -9,6 +9,7 @@ import {
   isSendCustomerEmailTool,
   isLearningLinkTool,
   isCreateReminderTool,
+  isArtifactSessionTool,
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
@@ -326,8 +327,15 @@ describe("publish_artifact stamping (0138)", () => {
     expect(conversationIdParamFor("knoxville_platform__publish_artifact")).toBe("conversation_id");
   });
 
-  it("leaves the read-only artifact tools alone", () => {
-    expect(conversationIdParamFor("get_artifact")).toBe(null);
-    expect(conversationIdParamFor("list_my_artifacts")).toBe(null);
+  it("stamps the read tools too — they may only return pages the session's person could open", () => {
+    expect(conversationIdParamFor("get_artifact")).toBe("conversation_id");
+    expect(conversationIdParamFor("knoxville_platform__list_my_artifacts")).toBe("conversation_id");
+    expect(isArtifactSessionTool("knoxville_platform.get_artifact")).toBe(true);
+  });
+
+  it("does not match neighbouring names", () => {
+    for (const name of ["get_artifacts", "list_artifacts", "publish_knowledge", "my_get_artifact_x", null]) {
+      expect(isArtifactSessionTool(name), String(name)).toBe(false);
+    }
   });
 });
