@@ -102,6 +102,29 @@ export class GatewayProcess {
   }
 
   /**
+   * Resolve true once the gateway reports ready on its own loopback probe
+   * (`GET /readyz` → 200), or false after `timeoutMs` (or if it was stopped).
+   * The gateway attaches its openclaw.json watcher only at that point, so a
+   * config edit meant for it — a skills rev bump — must wait for this.
+   */
+  async waitUntilReady(timeoutMs = 180_000, intervalMs = 500): Promise<boolean> {
+    const url = `http://127.0.0.1:${this.env.OPENCLAW_GATEWAY_PORT}/readyz`;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!this.child) return false;
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+        await res.body?.cancel().catch(() => {});
+        if (res.ok) return true;
+      } catch {
+        // not listening yet
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return false;
+  }
+
+  /**
    * Restart the gateway child in place — used after the model auth config
    * changes (e.g. an OAuth profile was just minted) so OpenClaw re-reads
    * openclaw.json + the auth-profile store WITHOUT a full Railway redeploy.

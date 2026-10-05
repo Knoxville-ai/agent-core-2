@@ -219,6 +219,41 @@ const Schema = z.object({
   // parses to null and stays safely disabled rather than failing boot.
   OPENCLAW_HEARTBEAT_EVERY: z.string().optional(),
 
+  // ── Skills ────────────────────────────────────────────────────────────────
+  //
+  // OpenClaw's own bundled skills the agent may see → openclaw.json
+  // skills.allowBundled. Without an allowlist the gateway advertises EVERY
+  // eligible bundled skill (notion, weather, taskflow, canvas, meme-maker, … —
+  // 14–19 nobody installed, ~4–6k chars) in the system prompt of every model
+  // call. Comma/space-separated skill names:
+  //   unset / "" / "none" → no bundled skills at all (the default; emitted as a
+  //                         non-empty sentinel because openclaw treats
+  //                         `allowBundled: []` as "all")
+  //   "skill-creator, …"  → just those
+  //   "all"               → openclaw's default, no allowlist
+  // None by default: an agent's skills come from the platform library, and the
+  // bundled `skill-creator` teaches an agent to write skill folders itself —
+  // which SkillSync quarantines and the constitution forbids (agents write
+  // skills through the platform's create_skill / edit_skill / publish_skill
+  // tools instead). Read at gateway start only; a change needs a redeploy. Platform-library skills are not affected — they live in
+  // workspace/skills/.
+  OPENCLAW_BUNDLED_SKILLS: z.string().optional().default("none"),
+
+  // SkillSync safety poll: how often (ms) the vessel asks the platform for its
+  // skill plan (`get_skill_sync_plan` with `if_generation` — a one-row no-op
+  // when nothing changed). Covers nudges missed while the vessel was down or
+  // unreachable; normal changes arrive at once through POST /skills/sync.
+  // 0 disables the poll; other values below 10s are raised to 10s.
+  SKILL_SYNC_POLL_MS: z
+    .string()
+    .optional()
+    .default("300000")
+    .transform((v) => {
+      const n = Number.parseInt(v, 10);
+      if (!Number.isFinite(n) || n < 0) return 300_000;
+      return n === 0 ? 0 : Math.max(10_000, n);
+    }),
+
   // ── Long-running tasks (console migration 0047) ──────────────────────────
   //
   // How many tasks this vessel executes at once. Tasks run detached from any

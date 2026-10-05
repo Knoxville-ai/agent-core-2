@@ -34,8 +34,8 @@ else
   chown agent:agent "${OPENCLAW_STATE_DIR}"
 fi
 
-# Workspace skills dir is wiped + reinstalled from the bundle every boot, but
-# create it up front so the path exists.
+# Workspace skills dir is reconciled every boot (SkillSync, or the legacy
+# bundle + boot-list install), but create it up front so the path exists.
 mkdir -p "${OPENCLAW_STATE_DIR}/workspace/skills"
 
 # Ollama weights dir (LOCAL models only). Lives on the volume so a model pulled

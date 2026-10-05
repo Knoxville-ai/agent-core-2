@@ -112,3 +112,31 @@ describe("tool-block env levers (step 4)", () => {
     expect(env.OPENCLAW_TOOLS_ALSO_ALLOW).toBe("odoo_production__x");
   });
 });
+
+describe("skills env", () => {
+  it("defaults to no bundled skills (skills come from the platform library)", () => {
+    expect(withEnv({}, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe("none");
+  });
+
+  it("passes an explicit bundled list through (render-workspace parses it)", () => {
+    expect(withEnv({ OPENCLAW_BUNDLED_SKILLS: "skill-creator" }, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe(
+      "skill-creator",
+    );
+    expect(withEnv({ OPENCLAW_BUNDLED_SKILLS: "all" }, loadEnv).OPENCLAW_BUNDLED_SKILLS).toBe("all");
+  });
+
+  it("polls every 5 minutes by default", () => {
+    expect(withEnv({}, loadEnv).SKILL_SYNC_POLL_MS).toBe(300_000);
+  });
+
+  it("0 disables the poll", () => {
+    expect(withEnv({ SKILL_SYNC_POLL_MS: "0" }, loadEnv).SKILL_SYNC_POLL_MS).toBe(0);
+  });
+
+  it("raises tiny intervals to 10s and ignores garbage", () => {
+    expect(withEnv({ SKILL_SYNC_POLL_MS: "500" }, loadEnv).SKILL_SYNC_POLL_MS).toBe(10_000);
+    expect(withEnv({ SKILL_SYNC_POLL_MS: "60000" }, loadEnv).SKILL_SYNC_POLL_MS).toBe(60_000);
+    expect(withEnv({ SKILL_SYNC_POLL_MS: "soon" }, loadEnv).SKILL_SYNC_POLL_MS).toBe(300_000);
+    expect(withEnv({ SKILL_SYNC_POLL_MS: "-5" }, loadEnv).SKILL_SYNC_POLL_MS).toBe(300_000);
+  });
+});

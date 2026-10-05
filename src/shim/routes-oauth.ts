@@ -5,6 +5,7 @@ import type { AgentEnv } from "../env.js";
 import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import { persistOAuthStore } from "../provision/oauth-store.js";
 import { switchConfigFileToOAuth } from "../provision/render-workspace.js";
+import { openWhenGatewayReady, serializeConfigWrite, type RefreshGate } from "../skills/refresh.js";
 import { HttpError, type Principal } from "./auth.js";
 import type { OAuthSessionManager } from "./oauth-session.js";
 import type { MessagingDB } from "./supabase-db.js";
@@ -29,7 +30,12 @@ export interface OAuthDeps {
   env: AgentEnv;
   db: MessagingDB;
   sessions: OAuthSessionManager;
-  gateway: GatewayProcess;
+  gateway: Pick<GatewayProcess, "restart" | "waitUntilReady">;
+  /** The process-wide skills refresh gate (../skills/refresh.ts), held closed
+   *  while the gateway restarts. Absent in standalone callers. */
+  refreshGate?: RefreshGate;
+  /** Override for the post-restart watcher settle (tests). */
+  refreshGateSettleMs?: number;
 }
 
 async function requireOrgUser(
@@ -89,7 +95,7 @@ export async function handleOAuthComplete(
   res: ServerResponse,
   deps: OAuthDeps,
 ): Promise<void> {
-  const { env, db, sessions, gateway } = deps;
+  const { env, db, sessions, gateway, refreshGate } = deps;
   await requireOrgUser(principal, env, db);
   const body =
     (await readJsonBody<{ provider?: unknown; callbackUrl?: unknown }>(req)) ??
@@ -101,23 +107,39 @@ export async function handleOAuthComplete(
 
   await sessions.complete(provider, callbackUrl);
 
-  // Flip the on-disk openclaw.json from API-key to OAuth so the gateway
-  // restart below actually uses the new profile (boot rendered it in
-  // API-key mode; future cold boots reproduce OAuth from LLM_AUTH_MODE).
-  await switchConfigFileToOAuth(env.OPENCLAW_STATE_DIR);
+  // Hold skills refreshes until the restarted gateway is watching
+  // openclaw.json again: a rev bump written while the new child starts would
+  // be missed (it attaches its watcher only after it reports ready), so
+  // SkillSync and the deprecated routes queue meanwhile. Reopened — flushing
+  // the queue as one forced skills.* change — whatever happens below.
+  const epoch = refreshGate?.close();
+  try {
+    // Flip the on-disk openclaw.json from API-key to OAuth so the gateway
+    // restart below actually uses the new profile (boot rendered it in
+    // API-key mode; future cold boots reproduce OAuth from LLM_AUTH_MODE).
+    // Serialized with skills rev bumps so neither write loses the other.
+    await serializeConfigWrite(() => switchConfigFileToOAuth(env.OPENCLAW_STATE_DIR));
 
-  // Back up the freshly-minted (encrypted) store so it survives redeploys.
-  // Non-fatal: the token is already live in-container; a failed backup just
-  // means a future redeploy would need re-auth, which we surface in logs.
-  await persistOAuthStore(env).catch((err) => {
-    log.warn("oauth store persist failed (token is live but not backed up)", {
-      err: String(err),
+    // Back up the freshly-minted (encrypted) store so it survives redeploys.
+    // Non-fatal: the token is already live in-container; a failed backup just
+    // means a future redeploy would need re-auth, which we surface in logs.
+    await persistOAuthStore(env).catch((err) => {
+      log.warn("oauth store persist failed (token is live but not backed up)", {
+        err: String(err),
+      });
     });
-  });
 
-  // Restart the gateway so it re-reads openclaw.json + the new auth profile.
-  // No Railway redeploy — just the openclaw child.
-  await gateway.restart();
+    // Restart the gateway so it re-reads openclaw.json + the new auth profile.
+    // No Railway redeploy — just the openclaw child.
+    await gateway.restart();
+  } finally {
+    if (refreshGate) {
+      void openWhenGatewayReady(refreshGate, gateway, {
+        epoch,
+        ...(deps.refreshGateSettleMs !== undefined ? { settleMs: deps.refreshGateSettleMs } : {}),
+      });
+    }
+  }
 
   log.info("oauth flow completed", { provider, agent: env.AGENT_UID });
   sendJson(res, 200, { ok: true });

@@ -13,7 +13,7 @@ export interface InstalledSkill {
   version: string;
   /** Absolute path inside `workspace/skills/` where the skill ended up. */
   path: string;
-  source: "local" | "clawhub" | "stub";
+  source: "local" | "clawhub" | "stub" | "library";
 }
 
 export interface SkillResolver {

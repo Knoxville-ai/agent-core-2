@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { costProxyBaseUrl, costTrackingEnabled } from "../shim/cost-proxy.js";
+import { readLockSkillEntries, type SkillEntries } from "../skills/lock.js";
 import { AgentStorage } from "./supabase-storage.js";
 
 /** Id + on-disk directory of the delegated-credentials OpenClaw plugin shipped in
@@ -159,7 +160,8 @@ const BOOTSTRAP_TOTAL_MAX_CHARS = 120000;
  *       AGENTS.md       ← from Storage memory/identity.md (the identity block)
  *       SOUL.md         ← assembled prompt (base + identity + capability fragments)
  *       TOOLS.md        ← from Storage memory/boot.md (operational guidance)
- *       skills/         ← populated by skill installs (see ../skills/install.ts)
+ *       skills/         ← reconciled by SkillSync (../skills/sync.ts), or by the
+ *                         legacy bundle + boot-list install (../skills/install.ts)
  *
  * NOTE: playbook.md (and the agent-authored notes/ area) are NOT rendered here.
  * They are agent-owned: restored with volume-wins precedence and mirrored back
@@ -313,14 +315,19 @@ export function parseExtraMcpServers(
 /**
  * Write just `openclaw.json` (not SOUL/AGENTS/TOOLS) into the state dir.
  *
- * Called at TWO points in a boot: early in bootstrap — before any
- * `openclaw skills install`, whose CLI loads + validates the config and
- * refuses to run against an invalid one — and again from renderWorkspace at
+ * Called at TWO points in a boot: early in bootstrap — before any openclaw CLI
+ * call (`openclaw skills install` / `skills check` load + validate the config
+ * and refuse to run against an invalid one) — and again from renderWorkspace at
  * the end. The early write matters because the on-disk openclaw.json may be a
  * stale, invalid config left by a previous failed boot (e.g. a since-fixed bad
- * provider block); without a fresh valid file first, every boot-list skill
- * install fails and the agent boots without its skills. buildOpenclawConfig is
- * a pure function of env, so both writes produce identical bytes.
+ * provider block); without a fresh valid file first, every skill install fails
+ * and the agent boots without its skills.
+ *
+ * `skills.entries` comes from the SkillSync lock as it stands at the time of
+ * the write, so the FINAL boot write (after the boot reconcile) carries exactly
+ * the revs a live refresh would have written — the gateway starts with them and
+ * no later write has to touch them. buildOpenclawConfig itself stays a pure
+ * function of (env, extraModelIds, entries).
  */
 export async function writeOpenclawConfig(
   env: AgentEnv,
@@ -329,12 +336,41 @@ export async function writeOpenclawConfig(
   const stateDir = env.OPENCLAW_STATE_DIR;
   const ws = join(stateDir, "workspace");
   await mkdir(ws, { recursive: true });
-  const config = buildOpenclawConfig(env, ws, extraModelIds);
+  const skillEntries = await readLockSkillEntries(stateDir);
+  const config = buildOpenclawConfig(env, ws, extraModelIds, skillEntries);
   await writeFile(
     join(stateDir, "openclaw.json"),
     JSON.stringify(config, null, 2),
     "utf8",
   );
+}
+
+/** OpenClaw ignores `skills.allowBundled: []` (treated as unset → every bundled
+ *  skill stays), so "no bundled skills" needs a non-empty list that matches
+ *  nothing. */
+export const NO_BUNDLED_SKILLS_SENTINEL = "__none__";
+
+/**
+ * Resolve OPENCLAW_BUNDLED_SKILLS into `skills.allowBundled`, or undefined to
+ * emit no key at all.
+ *
+ * Without an allowlist the gateway advertises every eligible OpenClaw bundled
+ * skill (notion, weather, taskflow, canvas, … — 14–19 of them, ~4–6k chars) in
+ * EVERY model call's system prompt, though nobody installed them. Default
+ * (unset, empty or `none`): no bundled skills — emitted as a non-empty
+ * sentinel, since openclaw treats `[]` as "all". An agent's skills come from
+ * the platform library; the bundled `skill-creator` would teach it to write
+ * skill folders itself, which SkillSync quarantines. Comma/space-separated
+ * names allow exactly those; `all` restores OpenClaw's default (no allowlist).
+ * Only applied at gateway start — a change needs a redeploy. Exported for unit
+ * tests.
+ */
+export function resolveAllowBundled(raw: string | undefined): string[] | undefined {
+  const list = parseToolList(raw);
+  const lower = list.map((s) => s.toLowerCase());
+  if (lower.length === 1 && lower[0] === "all") return undefined;
+  if (list.length === 0 || lower.includes("none")) return [NO_BUNDLED_SKILLS_SENTINEL];
+  return list;
 }
 
 /**
@@ -403,11 +439,13 @@ export function resolveHeartbeatEvery(env: AgentEnv): string {
 }
 
 /** Exported for unit tests — builds the openclaw.json object from env + the
- *  rendered workspace path. */
+ *  rendered workspace path. `skillEntries` is the SkillSync lock's
+ *  `skills.entries` block (see ../skills/lock.ts `lockSkillEntries`). */
 export function buildOpenclawConfig(
   env: AgentEnv,
   workspace: string,
   extraModelIds: readonly string[] = [],
+  skillEntries: SkillEntries = {},
 ): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
   if (env.PLATFORM_MCP_URL) {
@@ -447,6 +485,11 @@ export function buildOpenclawConfig(
     toolsAllow.length > 0 ? [] : parseToolList(env.OPENCLAW_TOOLS_ALSO_ALLOW);
   // Root-level tools.toolSearch (deferred discovery); undefined => not emitted.
   const toolSearch = resolveToolSearchConfig(env.OPENCLAW_TOOL_SEARCH);
+  // Bundled-skill allowlist (default: none); undefined => not emitted
+  // (OPENCLAW_BUNDLED_SKILLS=all).
+  const allowBundled = resolveAllowBundled(env.OPENCLAW_BUNDLED_SKILLS);
+  // Lock-derived per-skill revs, keys sorted (byte-stable for the same lock).
+  const entryKeys = Object.keys(skillEntries).sort();
 
   // openclaw.json shape derived from `openclaw config schema` for the
   // pinned CLI version. openclaw 2026.5.x rejects unknown top-level keys
@@ -513,6 +556,13 @@ export function buildOpenclawConfig(
       mode: "local",
       bind: "loopback",
       auth: { mode: "token", token: env.OPENCLAW_GATEWAY_TOKEN },
+      // Apply every runtime edit of this file in-process, never by restarting.
+      // SkillSync (and the deprecated /skills/install) change skills by bumping
+      // `skills.entries.<key>.config.rev` here; openclaw hot-reloads any
+      // `skills.*` change and rebuilds every session's skills list on its next
+      // turn. "hot" guarantees no config edit can make the gateway restart
+      // itself (the shim treats a gateway exit as fatal). Verified on 2026.5.20.
+      reload: { mode: "hot" },
       // The shim proxies user turns via the OpenAI-compatible chat
       // completions endpoint (mirrors what the original Python agent-core
       // does). Disabled by default in openclaw 2026.5.x, so opt in here.
@@ -556,6 +606,24 @@ export function buildOpenclawConfig(
       // not opted in. See env.ts for the all-or-nothing caveat that keeps it off
       // by default.
       ...(toolSearch ? { toolSearch } : {}),
+    },
+    // Skills. `allowBundled` trims OpenClaw's bundled skills (14–19 of them,
+    // advertised in every model call's prompt by default) to the ones we want —
+    // none unless OPENCLAW_BUNDLED_SKILLS says otherwise; read at gateway start
+    // only. `entries` carries one `config.rev` per
+    // platform-managed skill from the SkillSync lock: the same value the live
+    // refresh writes (../skills/refresh.ts), so the gateway starts with the
+    // current revs. `config` is a free-form bag in the schema; nothing else
+    // (`enabled`, `env`, `apiKey`) is set here.
+    skills: {
+      ...(allowBundled ? { allowBundled } : {}),
+      ...(entryKeys.length > 0
+        ? {
+            entries: Object.fromEntries(
+              entryKeys.map((k) => [k, { config: { rev: skillEntries[k]!.config.rev } }]),
+            ),
+          }
+        : {}),
     },
     // We don't bind any native channels — all conversation flows through
     // the shim's HTTP surface, which is what the knoxville console talks to.

@@ -74,9 +74,9 @@ RUN npm run build && npm prune --omit=dev
 #
 # IMPORTANT: this build-time `uv pip install` is only a cache/offline fallback —
 # it is NOT how a skill's deps actually get provisioned. Skills are synced at
-# RUNTIME (workspace/skills/ is wiped + reinstalled every boot, and the live
-# /skills/install route adds more), so the authoritative, generalized installer
-# is the boot/live step in src/skills/deps.ts (`provisionSkillDeps`): it reads
+# RUNTIME (SkillSync reconciles workspace/skills/ at boot and live, without a
+# restart), so the authoritative, generalized installer is the per-skill step
+# in src/skills/deps.ts (`provisionSkillDepsFor` / `provisionSkillDeps`): it reads
 # each installed SKILL.md's `metadata.openclaw.install.uv` and `uv pip install`s
 # it into THIS venv (the interpreter bare `python3` resolves to). That means a
 # newly-installed skill's deps are covered automatically without editing this

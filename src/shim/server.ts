@@ -31,11 +31,9 @@ import {
 } from "./routes-internal.js";
 import { UsageAccumulator } from "./usage-telemetry.js";
 import { ToolCallHub } from "./tool-telemetry.js";
-import {
-  handleSkillsInstall,
-  handleSkillsList,
-  handleSkillsRemove,
-} from "./routes-skills.js";
+import { routeSkills, type SkillsRouteDeps } from "./routes-skills.js";
+import type { RefreshGate } from "../skills/refresh.js";
+import type { SkillSync } from "../skills/sync.js";
 import {
   handleOAuthComplete,
   handleOAuthStart,
@@ -60,6 +58,14 @@ export function startShim(
   // proxy (started before the shim) shares the same instance; a fresh one is
   // created when omitted, which keeps standalone callers and tests simple.
   usageAccumulator?: UsageAccumulator,
+  // The SkillSync instance boot reconciled with (null/omitted when the platform
+  // MCP isn't configured). Shared so a POST /skills/sync nudge joins the same
+  // single-flight reconciler the background poll uses.
+  skillSync?: SkillSync | null,
+  // The process-wide skills refresh gate (see ../skills/refresh.ts): the
+  // deprecated /skills/install + DELETE routes bump revs through it too, so a
+  // call that lands while the gateway is still starting isn't lost.
+  refreshGate?: RefreshGate,
 ): Promise<ServerHandle> {
   const db = new MessagingDB(env);
   const cancels = new CancelRegistry();
@@ -94,6 +100,12 @@ export function startShim(
     db,
     sessions: new OAuthSessionManager(env),
     gateway,
+    ...(refreshGate ? { refreshGate } : {}),
+  };
+  const skills: SkillsRouteDeps = {
+    env,
+    sync: skillSync ?? null,
+    ...(refreshGate ? { refresh: (changes) => refreshGate.push(changes) } : {}),
   };
 
   const server = createServer((req, res) => {
@@ -109,6 +121,7 @@ export function startShim(
       taskRunner,
       usage,
       toolCalls,
+      skills,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -164,6 +177,7 @@ async function route(
   taskRunner: TaskRunner,
   usage: UsageAccumulator,
   toolCalls: ToolCallHub,
+  skills: SkillsRouteDeps,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -211,33 +225,12 @@ async function route(
   }
 
   // Live skill management (console operator surface). Gateway-token authed like
-  // /files/*, handled before the JWT gate. Lets the console install/remove
-  // skills into the running agent without a redeploy; each mutation restarts
-  // the openclaw gateway in place to reload the skill registry.
+  // /files/*, handled before the JWT gate. POST /skills/sync is the console's
+  // nudge into SkillSync; the install/remove pair is the deprecated ClawHub path
+  // for older consoles. Nothing here restarts the gateway — changes reach every
+  // session on its next turn via a hot-reloaded skills.* config bump.
   if (path === "/skills" || path.startsWith("/skills/")) {
-    requireGatewayToken(req.headers.authorization, env);
-    if (path === "/skills") {
-      if (method !== "GET") throw new HttpError(405, "method not allowed");
-      return handleSkillsList(res, env);
-    }
-    if (path === "/skills/install") {
-      if (method !== "POST") throw new HttpError(405, "method not allowed");
-      return handleSkillsInstall(req, res, env, oauth.gateway);
-    }
-    if (path === "/skills/search") {
-      // Registry search isn't wired; the console treats 501 as "unavailable".
-      throw new HttpError(501, "skill search not supported");
-    }
-    const removeMatch = /^\/skills\/(.+)$/.exec(path);
-    if (removeMatch && method === "DELETE") {
-      return handleSkillsRemove(
-        decodeURIComponent(removeMatch[1]!),
-        res,
-        env,
-        oauth.gateway,
-      );
-    }
-    throw new HttpError(405, "method not allowed");
+    return routeSkills(path, method, req, res, skills);
   }
 
   // Everything below requires a valid bearer JWT.
