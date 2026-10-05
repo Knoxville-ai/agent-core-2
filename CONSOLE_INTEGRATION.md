@@ -646,7 +646,7 @@ signal on their own.
 When someone asks the agent to build a page — a report, dashboard, calculator,
 one-pager — the agent writes one self-contained HTML document and publishes it
 with the platform MCP tool **`publish_artifact`**. The console stores it in its
-own Supabase (`public.artifacts` + the private `artifacts` bucket) and returns a
+own Supabase (`public.agent_artifacts` + the private `agent-artifacts` bucket) and returns a
 link on the **console**, `/a/<id>` — never on this container — with private /
 org / public visibility. `get_artifact` and `list_my_artifacts` read back what
 the agent has published. The console's CONTRACT.md (“Artifacts”) owns the
