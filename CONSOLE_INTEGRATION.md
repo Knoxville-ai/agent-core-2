@@ -74,9 +74,11 @@ Skills are platform objects: an immutable, content-addressed **version** in the
 console's skills library, installed onto an agent as **desired state**. The
 vessel's `SkillSync` (`src/skills/sync.ts`) reconciles `workspace/skills/` to
 that state — at boot, when the console nudges it, and on a safety poll — and
-makes the running gateway see the result **without a restart**. Design:
-console `docs/skills-library-design.md` (§5 verified runtime behavior, §9 the
-vessel).
+makes the running gateway see the result **without a restart**. Skills are
+written and versioned in the platform — the console's editor, or the
+`create_skill` / `edit_skill` / `publish_skill` MCP tools, where a person
+approves what an agent writes — never as folders on an agent. Design: console
+`docs/skills-library-design.md` (§5 verified runtime behavior, §9 the vessel).
 
 ### Modes
 

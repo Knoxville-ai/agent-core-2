@@ -233,9 +233,9 @@ const Schema = z.object({
   //   "all"               → openclaw's default, no allowlist
   // None by default: an agent's skills come from the platform library, and the
   // bundled `skill-creator` teaches an agent to write skill folders itself —
-  // which SkillSync quarantines and the constitution forbids (platform skill
-  // authoring is a later phase). Read at gateway start only; a change needs a
-  // redeploy. Platform-library skills are not affected — they live in
+  // which SkillSync quarantines and the constitution forbids (agents write
+  // skills through the platform's create_skill / edit_skill / publish_skill
+  // tools instead). Read at gateway start only; a change needs a redeploy. Platform-library skills are not affected — they live in
   // workspace/skills/.
   OPENCLAW_BUNDLED_SKILLS: z.string().optional().default("none"),
 
