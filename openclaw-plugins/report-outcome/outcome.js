@@ -71,12 +71,18 @@ const SEND_CUSTOMER_EMAIL_SUFFIX = /(^|[.:/]|__)send_customer_email$/;
  *  Absent ids are harmless (the row is simply unlinked), so this is a nicety. */
 const LEARNING_LINK_SUFFIX = /(^|[.:/]|__)(ask_question|submit_for_review)$/;
 
-/** The platform's reminder tool (console migration 0137). The session decides
- *  who the reminder REPORTS TO — the person the agent was asked by — so the
- *  model must not choose it. Same stamping rule as the learning tools:
- *  `task_id` in a task session, `conversation_id` otherwise. Absent, the
- *  reminder still works and reports to the org's owner. */
-const CREATE_REMINDER_SUFFIX = /(^|[.:/]|__)create_reminder$/;
+/** The platform's reminder tools that need the session (console 0137). Same
+ *  stamping rule as the learning tools: `task_id` in a task session,
+ *  `conversation_id` otherwise. The model must not choose either:
+ *    create_reminder   the session decides who the reminder REPORTS TO — the
+ *                      person the agent was asked by. Absent, it reports to the
+ *                      org's owner.
+ *    resolve_reminder  the session decides whether the call may CLOSE the
+ *                      reminder — only its own run, or a conversation with a
+ *                      person, may; any other caller only gets the reminder's
+ *                      own check run now. A routine run once closed two
+ *                      unrelated reminders, so this is load-bearing. */
+const REMINDER_SESSION_SUFFIX = /(^|[.:/]|__)(create_reminder|resolve_reminder)$/;
 
 /** The platform's artifact publisher (console migration 0138). The session
  *  decides whose page it is — the person the agent was asked by, who can then
@@ -87,7 +93,7 @@ const PUBLISH_ARTIFACT_SUFFIX = /(^|[.:/]|__)publish_artifact$/;
 
 const CONVERSATION_ID_TOOLS = [
   { suffix: LEARNING_LINK_SUFFIX, param: "conversation_id" },
-  { suffix: CREATE_REMINDER_SUFFIX, param: "conversation_id" },
+  { suffix: REMINDER_SESSION_SUFFIX, param: "conversation_id" },
   { suffix: PUBLISH_ARTIFACT_SUFFIX, param: "conversation_id" },
   { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
   { suffix: START_TASK_SUFFIX, param: "conversation_id" },
@@ -131,9 +137,9 @@ export function isLearningLinkTool(toolName) {
   return typeof toolName === "string" && LEARNING_LINK_SUFFIX.test(toolName);
 }
 
-/** True when `toolName` is create_reminder (0137). */
-export function isCreateReminderTool(toolName) {
-  return typeof toolName === "string" && CREATE_REMINDER_SUFFIX.test(toolName);
+/** True when `toolName` is create_reminder or resolve_reminder (0137). */
+export function isReminderSessionTool(toolName) {
+  return typeof toolName === "string" && REMINDER_SESSION_SUFFIX.test(toolName);
 }
 
 /**

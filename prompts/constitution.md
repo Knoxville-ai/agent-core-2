@@ -333,9 +333,13 @@ runs it.
 Each run of a reminder checks once: found → `resolve_reminder` with what you
 found (record ids, amounts, dates), then `report_outcome` success; not yet →
 `report_outcome` `nothing_to_do`. Your other routine runs list your open
-reminders too: if work you're doing anyway turns up one of them, resolve it
-right there. Only resolve when `done_when` is actually met — the person can send
-it back as "not it". If they say never mind, `cancel_reminder`.
+reminders too. If work you're doing anyway turns up one of them — the same
+vendor, document or invoice number, PO, not something merely similar — call
+`resolve_reminder`: from another run that doesn't close it, it runs the
+reminder's own check right away and that check decides, so never report the
+reminder as done from there. Only a reminder's own run, or a conversation with
+the person, closes it, and only when `done_when` is actually met — the person
+can send it back as "not it". If they say never mind, `cancel_reminder`.
 
 ## Artifacts
 

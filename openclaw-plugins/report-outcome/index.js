@@ -4,7 +4,7 @@ import {
   buildOutcomeParams,
   conversationIdFromSessionKey,
   conversationIdParamFor,
-  isCreateReminderTool,
+  isReminderSessionTool,
   isEscalateToHumanTool,
   isLearningLinkTool,
   isSendCustomerEmailTool,
@@ -91,13 +91,14 @@ function stampSession(event, ctx) {
   // fall through to the normal conversation_id stamping below.
   // ask_question / submit_for_review (0125) never park, but take the same
   // task_id-in-a-task-session link so the console shows where they came from.
-  // create_reminder (0137) takes it to find who the reminder reports to, and
+  // create_reminder (0137) takes it to find who the reminder reports to,
+  // resolve_reminder to decide whether this call may close the reminder, and
   // publish_artifact (0138) to find whose page it is.
   if (
     isEscalateToHumanTool(toolName) ||
     isSendCustomerEmailTool(toolName) ||
     isLearningLinkTool(toolName) ||
-    isCreateReminderTool(toolName) ||
+    isReminderSessionTool(toolName) ||
     isPublishArtifactTool(toolName)
   ) {
     const taskId = taskIdFromSessionKey(ctx?.sessionKey);
