@@ -1,7 +1,7 @@
 {
   "id": "knox-report-outcome",
   "name": "Knox Conversation Id Injector",
-  "description": "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, send_customer_email, ask_question, submit_for_review, create_reminder and publish_artifact MCP calls so the model never has to know or type it; attach the file a publish_artifact call names.",
+  "description": "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, send_customer_email, ask_question, submit_for_review, create_reminder, resolve_reminder and publish_artifact MCP calls so the model never has to know or type it; attach the file a publish_artifact call names.",
   "activation": {
     "onStartup": true
   },

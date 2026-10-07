@@ -8,7 +8,7 @@ import {
   isEscalateToHumanTool,
   isSendCustomerEmailTool,
   isLearningLinkTool,
-  isCreateReminderTool,
+  isReminderSessionTool,
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
@@ -301,22 +301,26 @@ describe("isLearningLinkTool", () => {
   });
 });
 
-describe("isCreateReminderTool", () => {
-  it("matches create_reminder, bare and prefixed", () => {
-    expect(isCreateReminderTool("create_reminder")).toBe(true);
-    expect(isCreateReminderTool("knoxville_platform__create_reminder")).toBe(true);
-    expect(isCreateReminderTool("knoxville_platform.create_reminder")).toBe(true);
+describe("isReminderSessionTool", () => {
+  it("matches create_reminder and resolve_reminder, bare and prefixed", () => {
+    expect(isReminderSessionTool("create_reminder")).toBe(true);
+    expect(isReminderSessionTool("knoxville_platform__create_reminder")).toBe(true);
+    expect(isReminderSessionTool("knoxville_platform.create_reminder")).toBe(true);
+    expect(isReminderSessionTool("resolve_reminder")).toBe(true);
+    expect(isReminderSessionTool("knoxville_platform__resolve_reminder")).toBe(true);
   });
 
   it("does not match the other reminder tools or neighbours", () => {
-    for (const name of ["resolve_reminder", "list_my_reminders", "cancel_reminder", "create_routine", null]) {
-      expect(isCreateReminderTool(name), String(name)).toBe(false);
+    for (const name of ["list_my_reminders", "cancel_reminder", "create_routine", "resolve_reminders", null]) {
+      expect(isReminderSessionTool(name), String(name)).toBe(false);
     }
   });
 
-  it("stamps conversation_id outside a task session — it decides who the reminder reports to", () => {
+  it("stamps conversation_id outside a task session", () => {
+    // create: who the reminder reports to. resolve: whether this call may close it.
     expect(conversationIdParamFor("knoxville_platform__create_reminder")).toBe("conversation_id");
-    expect(conversationIdParamFor("resolve_reminder")).toBe(null);
+    expect(conversationIdParamFor("knoxville_platform__resolve_reminder")).toBe("conversation_id");
+    expect(conversationIdParamFor("cancel_reminder")).toBe(null);
   });
 });
 
