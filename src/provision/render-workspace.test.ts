@@ -661,10 +661,10 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
     return (config.tools as Record<string, unknown> | undefined) ?? {};
   }
 
-  it("emits no profile/deny keys by default (unset → openclaw default, no restriction)", () => {
+  it("emits no profile key by default, and denies only the platform-denied tools", () => {
     const t = tools(buildOpenclawConfig(makeEnv({}), "/ws"));
     expect(t.profile).toBeUndefined();
-    expect(t.deny).toBeUndefined();
+    expect(t.deny).toEqual(["cron"]);
     // …but the exec shim/venv PATH is always present.
     expect(t.exec).toBeDefined();
   });
@@ -681,7 +681,7 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
         "/ws",
       ),
     );
-    expect(t.deny).toEqual(["group:sessions", "sessions_spawn", "subagents"]);
+    expect(t.deny).toEqual(["cron", "group:sessions", "sessions_spawn", "subagents"]);
   });
 
   it("keeps the exec pathPrepend intact alongside a deny list", () => {
@@ -692,7 +692,17 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
       "/opt/knox-exec-shim",
       "/opt/skills-venv/bin",
     ]);
-    expect(t.deny).toEqual(["group:sessions"]);
+    expect(t.deny).toEqual(["cron", "group:sessions"]);
+  });
+
+  it("always denies the native cron tool and switches its scheduler off", () => {
+    const config = buildOpenclawConfig(makeEnv({ OPENCLAW_TOOLS_DENY: "cron group:sessions" }), "/ws");
+    // Listed once even when the operator also names it.
+    expect(tools(config).deny).toEqual(["cron", "group:sessions"]);
+    expect(config.cron).toEqual({ enabled: false });
+    // Deny wins over allow in openclaw, so an allowlist can't bring it back.
+    const allowed = buildOpenclawConfig(makeEnv({ OPENCLAW_TOOLS_ALLOW: "group:openclaw cron" }), "/ws");
+    expect(tools(allowed).deny).toEqual(["cron"]);
   });
 
   it("emits no allow/alsoAllow/toolSearch keys by default", () => {
@@ -779,7 +789,7 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
       "/opt/skills-venv/bin",
     ]);
     expect(t.allow).toEqual(["group:openclaw"]);
-    expect(t.deny).toEqual(["group:sessions"]);
+    expect(t.deny).toEqual(["cron", "group:sessions"]);
     expect(t.toolSearch).toEqual({ enabled: true, mode: "tools" });
   });
 });

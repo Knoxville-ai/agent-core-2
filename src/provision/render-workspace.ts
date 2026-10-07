@@ -438,6 +438,19 @@ export function resolveHeartbeatEvery(env: AgentEnv): string {
   return HEARTBEAT_OFF_VALUES.has(raw.toLowerCase()) ? "0" : raw;
 }
 
+/**
+ * Native openclaw tools no Knoxville agent gets, regardless of per-agent policy.
+ *
+ * `cron` schedules agent turns inside this container: invisible to the console,
+ * never metered (usage telemetry only sees turns the shim started), unable to
+ * notify anyone (an isolated cron session's "announce" reaches no Knoxville
+ * conversation), and lost whenever the container's state is. Every schedule
+ * belongs on the platform instead — create_reminder (a person can see, stop and
+ * be notified from it) or a routine. The scheduler itself is switched off too
+ * (`cron.enabled: false` below), so jobs stored before this never fire again.
+ */
+export const PLATFORM_DENIED_TOOLS: readonly string[] = ["cron"];
+
 /** Exported for unit tests — builds the openclaw.json object from env + the
  *  rendered workspace path. `skillEntries` is the SkillSync lock's
  *  `skills.entries` block (see ../skills/lock.ts `lockSkillEntries`). */
@@ -475,7 +488,10 @@ export function buildOpenclawConfig(
   }
 
   // Optional per-agent tool policy lists (see env.ts / the tools block below).
-  const toolsDeny = parseToolList(env.OPENCLAW_TOOLS_DENY);
+  // PLATFORM_DENIED_TOOLS always lead the deny list, whatever the operator set.
+  const toolsDeny = [
+    ...new Set([...PLATFORM_DENIED_TOOLS, ...parseToolList(env.OPENCLAW_TOOLS_DENY)]),
+  ];
   const toolsAllow = parseToolList(env.OPENCLAW_TOOLS_ALLOW);
   // openclaw rejects a scope that sets BOTH allow and alsoAllow. loadEnv already
   // fails fast on that combination; this is defense in depth so a config built
@@ -592,6 +608,9 @@ export function buildOpenclawConfig(
     // `group:sessions` — local sub-agent spawning, which a weak model reaches
     // for instead of running the skill, and which is NOT the Knoxville
     // cross-agent delegation path anyway). See env.ts.
+    // openclaw's own scheduler: off. See PLATFORM_DENIED_TOOLS — schedules live
+    // on the platform (reminders, routines), not in the container.
+    cron: { enabled: false },
     tools: {
       exec: {
         pathPrepend: [EXEC_SHIM_BIN, SKILLS_VENV_BIN],
@@ -599,7 +618,7 @@ export function buildOpenclawConfig(
       ...(env.OPENCLAW_TOOLS_PROFILE ? { profile: env.OPENCLAW_TOOLS_PROFILE } : {}),
       ...(toolsAllow.length > 0 ? { allow: toolsAllow } : {}),
       ...(toolsAlsoAllow.length > 0 ? { alsoAllow: toolsAlsoAllow } : {}),
-      ...(toolsDeny.length > 0 ? { deny: toolsDeny } : {}),
+      deny: toolsDeny,
       // Deferred tool discovery. Belongs on the SAME root `tools` block as the
       // allow/deny above (openclaw reads toolSearch off the top-level ToolsConfig).
       // Omitted when off so the config bytes are unchanged for agents that have

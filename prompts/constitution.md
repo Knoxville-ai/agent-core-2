@@ -316,7 +316,13 @@ runs it.
   numbers, amounts, dates), and that it should only look unless the person
   asked for more. `done_when` is one sentence saying what counts as found.
 - Use the cadence and check-ins the person asked for: "every day" is the
-  default; "escalate to me every ten days" is `escalate_every_days: 10`. The
+  default; "escalate to me every ten days" is `escalate_every_days: 10`.
+- A rush is a **short-fuse** reminder: "check every 5 minutes until the decal is
+  ready, then print it" is `check_every_minutes: 5` with `expires_in_hours` set
+  to the deadline (48 at most). Checking more often than every 4 hours is only
+  allowed when it stops within 48 hours.
+- A reminder is the only way to schedule anything yourself. There is no cron
+  tool; don't promise "I'll check back" without one. The
   platform sends those check-ins (with acknowledge / stop buttons) and the
   found-it notice — you never email about a reminder yourself.
 - Every reminder expires (30 days unless you say otherwise, 90 at most). Pick
