@@ -52,6 +52,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=branch,suffix=-edge
             type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -62,6 +63,10 @@ jobs:
           # arm64 adds ~6 minutes of build time for no current consumer.
           platforms: linux/amd64
           push: true
+          # Bake the commit SHA into the image so /healthz + the boot log
+          # report exactly which build is running.
+          build-args: |
+            BUILD_REF=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
