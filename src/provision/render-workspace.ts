@@ -63,6 +63,16 @@ const TOOL_TELEMETRY_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/tool-telemetry", import.meta.url),
 );
 
+/** LLM complete: a loopback, one-shot completion on the agent's own model — no
+ *  agent prompt, no tools, no session — for the shim's side tasks, such as
+ *  naming a conversation (../shim/conversation-title.ts). Rides EVERY vessel; it
+ *  does nothing until the shim calls it. Resolved the same way as the plugins
+ *  above. */
+export const LLM_COMPLETE_PLUGIN_ID = "knox-llm-complete";
+const LLM_COMPLETE_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/llm-complete", import.meta.url),
+);
+
 /** The platform constitution shipped in the image (see `prompts/constitution.md`).
  *  Resolved relative to this module so it works from both `src/` (tests) and
  *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
@@ -757,6 +767,20 @@ export function buildOpenclawConfig(
       enabled: true,
       hooks: { allowConversationAccess: true },
     };
+    plugins.entries = entries;
+    config.plugins = plugins;
+  }
+
+  // The completion route rides EVERY vessel, ungated: it is inert until the shim
+  // calls it, so AGENT_AUTO_TITLE switches off the caller rather than the route.
+  // It registers no hooks, so it needs no conversation-access grant.
+  {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, LLM_COMPLETE_PLUGIN_DIR] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    entries[LLM_COMPLETE_PLUGIN_ID] = { enabled: true };
     plugins.entries = entries;
     config.plugins = plugins;
   }

@@ -8,6 +8,11 @@ import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, type Principal } from "./auth.js";
 import { buildDynamicContext, parseAdvisoryCaller } from "./dynamic-context.js";
 import type { CancelRegistry } from "./cancel-registry.js";
+import {
+  autoTitleConversation,
+  openingUserMessages,
+  shouldAutoTitle,
+} from "./conversation-title.js";
 import { resolveCapabilities, type ModelCapabilities } from "./model-capabilities.js";
 import type {
   AttachmentRow,
@@ -49,7 +54,9 @@ import {
  *
  *   response body : SSE stream with data-only frames, one JSON object per
  *                   `data:` line:
- *     { type: "start", user_message_id, assistant_message_id }
+ *     { type: "start", user_message_id, assistant_message_id, auto_title? }
+ *         // auto_title: true when this turn is naming the conversation
+ *         // (see conversation-title.ts)
  *     { type: "token", delta }
  *     { type: "question", question }   // structured multiple-choice ask (mcq)
  *     { type: "done",  status: "complete"|"interrupted", message_id }
@@ -180,6 +187,17 @@ export async function handleSendMessage(
     const arr = attsByMessage.get(a.message_id) ?? [];
     arr.push(a);
     attsByMessage.set(a.message_id, arr);
+  }
+
+  // Name an untitled direct conversation in the background (conversation-title.ts).
+  // Started as soon as the person's opening messages are loaded, so the title
+  // usually lands while the reply is still streaming. Never awaited, never throws.
+  const opening = shouldAutoTitle(conversation, principal, env)
+    ? openingUserMessages(history, attsByMessage)
+    : [];
+  const autoTitle = opening.length > 0;
+  if (autoTitle) {
+    void autoTitleConversation({ env, db }, conversationId, opening);
   }
   // openclaw's tools (bash/python inside skills) run against the rendered
   // workspace, so materialize every attachment there and hand the model the
@@ -358,6 +376,9 @@ export async function handleSendMessage(
     type: "start",
     user_message_id: userMessageId,
     assistant_message_id: assistantMessageId,
+    // Tells the console the vessel is naming this conversation, so it skips its
+    // own first-message heuristic. Absent on vessels that predate auto-titling.
+    ...(autoTitle ? { auto_title: true } : {}),
   });
 
   let buffer = "";

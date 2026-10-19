@@ -140,3 +140,16 @@ describe("skills env", () => {
     expect(withEnv({ SKILL_SYNC_POLL_MS: "-5" }, loadEnv).SKILL_SYNC_POLL_MS).toBe(300_000);
   });
 });
+
+describe("conversation titles env", () => {
+  it("names conversations by default", () => {
+    expect(withEnv({}, loadEnv).AGENT_AUTO_TITLE).toBe(true);
+  });
+
+  it("can be switched off", () => {
+    for (const off of ["false", "0", "no", "off", " FALSE "]) {
+      expect(withEnv({ AGENT_AUTO_TITLE: off }, loadEnv).AGENT_AUTO_TITLE, off).toBe(false);
+    }
+    expect(withEnv({ AGENT_AUTO_TITLE: "true" }, loadEnv).AGENT_AUTO_TITLE).toBe(true);
+  });
+});

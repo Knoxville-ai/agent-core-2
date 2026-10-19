@@ -848,6 +848,50 @@ The vessel's part lives in the `knox-report-outcome` plugin:
 The constitution's *Artifacts* section teaches the agent when to publish and
 how to build a page that works in the sandbox.
 
+## Conversation titles
+
+When a person writes in a direct (`kind = 'user_agent'`) conversation whose
+`title` is empty, from the console, the mobile app or the Chrome extension,
+the vessel names it the way chat apps do. It makes one small, separate call to
+the agent's **own** model alongside the reply, never through the agent turn:
+
+```
+POST /api/v1/conversations/:id/messages        (a person, untitled conversation)
+  └─ shim: persist the turn, load the person's opening messages
+       ├─ the agent turn streams as usual  ──▶ SSE { type: "start", …, auto_title: true }
+       └─ in the background:
+            POST 127.0.0.1:<gateway>/knox/llm-complete   (openclaw-plugins/llm-complete)
+              └─ api.runtime.llm.complete: the agent's default model, credentials
+                 and base URL; no agent prompt, no tools, no session
+            UPDATE conversations SET title = … WHERE id = … AND title IS NULL
+                                                   ──▶ console header + sidebar over realtime
+```
+
+- **Model.** The agent's own provider, model and credentials (OpenRouter
+  through the cost proxy, Codex OAuth, a local Ollama model), so no message
+  goes anywhere the agent's turns don't already go. The call reads the
+  person's first three messages (each cut to 1,000 characters, plus attached
+  file names), a few hundred tokens in total. Its cost appears in the vessel
+  log (`conversation titled`), not in the turn's `token_usage`.
+- **Never overwrites.** The UPDATE only lands while `title` is still null, so a
+  rename made mid-call wins. Conversations that open with a title (routines,
+  tasks, email, MCP sessions) and agent-to-agent turns are never touched.
+- **No topic yet.** If the model answers that the messages raise no topic (a
+  bare "hi"), the title stays null and the person's next message tries again.
+- **Model unavailable.** If the call fails (provider error, timeout, an
+  openclaw without the completion runtime), the newest opening message is
+  shortened into a title instead, the same heuristic the console uses.
+
+**The `auto_title` flag.** The `start` SSE frame carries `auto_title: true` on
+every turn that runs this. The console's web chat used to title a new
+conversation itself from the first message; it now does so only when the flag
+is absent, meaning a vessel that predates this or one with titling turned off.
+The flag keeps the two from racing for the empty slot.
+
+`AGENT_AUTO_TITLE=false` turns titling off for an agent (the console's
+heuristic then applies again). The `knox-llm-complete` plugin is wired on every
+vessel regardless; it does nothing until called.
+
 ## Migration strategy
 
 The v0.3 image deploys side-by-side with v0.2:

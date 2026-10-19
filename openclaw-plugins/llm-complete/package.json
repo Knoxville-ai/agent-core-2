@@ -1,0 +1,8 @@
+{
+  "name": "knox-llm-complete",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "OpenClaw plugin: expose a loopback, one-shot completion on the agent's own model (no agent prompt, no tools) for the shim's side tasks."
+}

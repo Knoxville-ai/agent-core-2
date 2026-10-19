@@ -125,3 +125,60 @@ describe("MessagingDB.listMessages windowing", () => {
     expect(await db.listMessages("conv")).toEqual([]);
   });
 });
+
+describe("MessagingDB.setConversationTitleIfUnset", () => {
+  /** Records the update chain; answers with `rows` (the rows the UPDATE matched). */
+  function titleClient(result: { data: unknown; error: { message: string } | null }) {
+    const calls: Array<[string, ...unknown[]]> = [];
+    const builder: Record<string, unknown> = {
+      update: (patch: unknown) => {
+        calls.push(["update", patch]);
+        return builder;
+      },
+      eq: (col: string, value: unknown) => {
+        calls.push(["eq", col, value]);
+        return builder;
+      },
+      is: (col: string, value: unknown) => {
+        calls.push(["is", col, value]);
+        return builder;
+      },
+      select: (cols: string) => {
+        calls.push(["select", cols]);
+        return Promise.resolve(result);
+      },
+    };
+    const client = {
+      from: (table: string) => {
+        calls.push(["from", table]);
+        return builder;
+      },
+    } as unknown;
+    return { client, calls };
+  }
+
+  it("writes the title only where it is still null, in the UPDATE itself", async () => {
+    const { client, calls } = titleClient({ data: [{ id: "c1" }], error: null });
+    const db = new MessagingDB(env, client as never);
+    expect(await db.setConversationTitleIfUnset("c1", "Reconcile June invoices")).toBe(true);
+    expect(calls).toEqual([
+      ["from", "conversations"],
+      ["update", { title: "Reconcile June invoices" }],
+      ["eq", "id", "c1"],
+      ["is", "title", null],
+      ["select", "id"],
+    ]);
+  });
+
+  it("reports false when the conversation already had a title (nothing matched)", async () => {
+    const { client } = titleClient({ data: [], error: null });
+    const db = new MessagingDB(env, client as never);
+    expect(await db.setConversationTitleIfUnset("c1", "X")).toBe(false);
+  });
+
+  it("reports false on a query error rather than throwing", async () => {
+    const { client } = titleClient({ data: null, error: { message: "boom" } });
+    const db = new MessagingDB(env, client as never);
+    expect(await db.setConversationTitleIfUnset("c1", "X")).toBe(false);
+  });
+});

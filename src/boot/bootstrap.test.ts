@@ -132,6 +132,7 @@ function env(): AgentEnv {
     OPENCLAW_GATEWAY_PORT: 18789,
     OPENCLAW_STATE_DIR: stateDir,
     AGENT_TOOL_CALL_TRACKING: true,
+    AGENT_AUTO_TITLE: true,
     OPENCLAW_TOOL_SEARCH: "off",
     LOG_LEVEL: "info",
   } as AgentEnv;
