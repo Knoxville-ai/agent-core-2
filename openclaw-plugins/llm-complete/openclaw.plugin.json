@@ -1,0 +1,12 @@
+{
+  "id": "knox-llm-complete",
+  "name": "Knox LLM Complete",
+  "description": "Expose a loopback, one-shot completion on the agent's own model (no agent prompt, no tools) for the shim's side tasks, such as naming a conversation.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

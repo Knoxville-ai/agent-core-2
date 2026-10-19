@@ -163,6 +163,26 @@ export class MessagingDB implements ToolCallDB {
     return (data as Conversation | null) ?? null;
   }
 
+  /**
+   * Title a conversation only while it has no title, so an automatic name never
+   * overwrites one a person gave it — even one saved a moment ago. The check is
+   * in the UPDATE itself, not a read beforehand, so a rename that lands mid-call
+   * still wins. Returns whether the title was written.
+   */
+  async setConversationTitleIfUnset(conversationId: string, title: string): Promise<boolean> {
+    const { data, error } = await this.client
+      .from("conversations")
+      .update({ title })
+      .eq("id", conversationId)
+      .is("title", null)
+      .select("id");
+    if (error) {
+      log.warn("setConversationTitleIfUnset failed", { err: error.message });
+      return false;
+    }
+    return (data?.length ?? 0) > 0;
+  }
+
   async listMessages(conversationId: string, limit = 500): Promise<MessageRow[]> {
     // Take the NEWEST `limit` messages, then restore chronological order for the
     // model. This used to be `created_at ASC LIMIT 500`, which returns the

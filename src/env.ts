@@ -326,6 +326,23 @@ const Schema = z.object({
       return s !== "false" && s !== "0" && s !== "no" && s !== "off";
     }),
 
+  // ── Conversation titles ─────────────────────────────────────────────────────
+  // When a person writes in an untitled direct conversation, the shim names it
+  // in the background with one small call to this agent's own model (see
+  // shim/conversation-title.ts). On by default; the call is a few hundred tokens
+  // per new conversation.
+  //
+  // Kill switch: set to false and the vessel never names a conversation; the
+  // console then falls back to its own first-message heuristic.
+  AGENT_AUTO_TITLE: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => {
+      const s = v.trim().toLowerCase();
+      return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()

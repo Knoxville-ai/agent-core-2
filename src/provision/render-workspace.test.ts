@@ -10,6 +10,7 @@ import { writeLock } from "../skills/lock.js";
 import {
   buildOpenclawConfig,
   DELEGATED_CREDS_PLUGIN_ID,
+  LLM_COMPLETE_PLUGIN_ID,
   LOCAL_OLLAMA_BASE_URL,
   NO_BUNDLED_SKILLS_SENTINEL,
   parseExtraMcpServers,
@@ -43,6 +44,7 @@ function makeEnv(overrides: Partial<AgentEnv>): AgentEnv {
     OPENCLAW_GATEWAY_PORT: 18789,
     OPENCLAW_STATE_DIR: "/home/agent/.openclaw",
     AGENT_TOOL_CALL_TRACKING: true,
+    AGENT_AUTO_TITLE: true,
     LOG_LEVEL: "info",
     ...overrides,
   } as AgentEnv;
@@ -593,6 +595,24 @@ describe("buildOpenclawConfig platform plugins", () => {
       });
       expect(
         (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/tool-telemetry")),
+      ).toBe(true);
+    }
+  });
+
+  it("ALWAYS wires the llm-complete route, even with auto-titling off (it is inert until called)", () => {
+    for (const env of [
+      makeEnv({}),
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+      makeEnv({ AGENT_AUTO_TITLE: false }),
+    ]) {
+      const p = plugins(buildOpenclawConfig(env, "/ws"));
+      // No hooks, so no conversation-access grant.
+      expect(p.entries?.[LLM_COMPLETE_PLUGIN_ID]).toEqual({ enabled: true });
+      expect(
+        (p.load?.paths ?? []).some((path) => path.endsWith("openclaw-plugins/llm-complete")),
       ).toBe(true);
     }
   });
