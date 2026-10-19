@@ -326,6 +326,30 @@ const Schema = z.object({
       return s !== "false" && s !== "0" && s !== "no" && s !== "off";
     }),
 
+  // ── Process events (console phase 5, spec DECISIONS 64) ─────────────────────
+  // Agents' write calls to declared MCP tools (the console's
+  // spec/registry/tool-actions/) become kernel events, so the company's process
+  // map shows the agent's steps. Two observers feed one reporter (shim/
+  // process-events.ts): the knox-process-events openclaw plugin for MCP servers
+  // openclaw calls, and a loopback relay (shim/mcp-relay.ts) for MCP URLs skills
+  // call from scripts (e.g. drivethru-odoo's ODOO_MCP_URL). Before a declared
+  // write runs, the console checks its capability; it refuses only when the
+  // console enforces (AGENT_WRITE_GUARD), and this side fails open.
+  //
+  // Kill switch: false skips the plugin and the relay.
+  PROCESS_EVENTS: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => {
+      const s = v.trim().toLowerCase();
+      return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }),
+  // Env vars holding an MCP URL a skill calls, each with its tool-actions
+  // surface: VAR=surface, comma-separated. Each set var is pointed at the relay
+  // in the gateway's env only (openclaw.json keeps the real URL).
+  PROCESS_EVENTS_RELAY: z.string().optional().default("ODOO_MCP_URL=odoo-mcp"),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()

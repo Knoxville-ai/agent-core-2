@@ -63,6 +63,16 @@ const TOOL_TELEMETRY_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/tool-telemetry", import.meta.url),
 );
 
+/** Process events: guards and reports agents' calls to the MCP write tools the
+ *  console declares (its spec/registry/tool-actions/), over the shim's
+ *  /internal/process-events/* loopback routes, so they become events on the
+ *  company's process map. Rides vessels with the platform MCP (the reports go
+ *  there), gated by PROCESS_EVENTS. Resolved the same way as the plugins above. */
+export const PROCESS_EVENTS_PLUGIN_ID = "knox-process-events";
+const PROCESS_EVENTS_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/process-events", import.meta.url),
+);
+
 /** The platform constitution shipped in the image (see `prompts/constitution.md`).
  *  Resolved relative to this module so it works from both `src/` (tests) and
  *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
@@ -731,6 +741,24 @@ export function buildOpenclawConfig(
     // no actual cost. This plugin reads ONLY the usage counts off the event, never
     // conversation text, so granting the access is safe.
     entries[USAGE_TELEMETRY_PLUGIN_ID] = {
+      enabled: true,
+      hooks: { allowConversationAccess: true },
+    };
+    plugins.entries = entries;
+    config.plugins = plugins;
+  }
+
+  // Process events ride vessels with the platform MCP, gated by PROCESS_EVENTS:
+  // the reports go to the console, so without the platform MCP there is nowhere
+  // to send them. `after_tool_call` gets the same conversation-access opt-in as
+  // tool telemetry; this plugin reads only tool params and results.
+  if (env.PLATFORM_MCP_URL && env.PROCESS_EVENTS) {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, PROCESS_EVENTS_PLUGIN_DIR] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    entries[PROCESS_EVENTS_PLUGIN_ID] = {
       enabled: true,
       hooks: { allowConversationAccess: true },
     };

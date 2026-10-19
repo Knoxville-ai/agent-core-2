@@ -32,7 +32,12 @@ import { ensureOpenclawTempDir } from "./temp-dir.js";
 export class GatewayProcess {
   private child: ChildProcess | null = null;
 
-  constructor(private readonly env: AgentEnv) {}
+  /** `envOverrides` replace process env values for the gateway and everything it
+   *  spawns, e.g. the MCP relay's loopback URLs (../shim/mcp-relay.ts). */
+  constructor(
+    private readonly env: AgentEnv,
+    private readonly envOverrides: Record<string, string> = {},
+  ) {}
 
   async start(): Promise<void> {
     if (this.child) throw new Error("gateway already started");
@@ -58,6 +63,7 @@ export class GatewayProcess {
     const child = spawn("openclaw", ["gateway", "--port", port, "--verbose"], {
       env: {
         ...process.env,
+        ...this.envOverrides,
         HOME: userHome,
         OPENCLAW_HOME: userHome,
         OPENCLAW_STATE_DIR: stateDir,

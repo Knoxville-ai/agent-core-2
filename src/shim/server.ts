@@ -42,6 +42,8 @@ import {
 } from "./routes-oauth.js";
 import { MessagingDB } from "./supabase-db.js";
 import { sendJson } from "./util.js";
+import type { ProcessEvents } from "./process-events.js";
+import { handleProcessEventsGuard, handleProcessEventsRecord } from "./routes-process-events.js";
 
 interface ServerHandle {
   close: () => Promise<void>;
@@ -66,6 +68,9 @@ export function startShim(
   // deprecated /skills/install + DELETE routes bump revs through it too, so a
   // call that lands while the gateway is still starting isn't lost.
   refreshGate?: RefreshGate,
+  // The process-events reporter (process-events.ts), shared with the MCP relay.
+  // null when process events are off or the platform MCP isn't configured.
+  processEvents: ProcessEvents | null = null,
 ): Promise<ServerHandle> {
   const db = new MessagingDB(env);
   const cancels = new CancelRegistry();
@@ -122,6 +127,7 @@ export function startShim(
       usage,
       toolCalls,
       skills,
+      processEvents,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -178,6 +184,7 @@ async function route(
   usage: UsageAccumulator,
   toolCalls: ToolCallHub,
   skills: SkillsRouteDeps,
+  processEvents: ProcessEvents | null,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -222,6 +229,18 @@ async function route(
   if (path === "/internal/tool-call") {
     if (method !== "POST") throw new HttpError(405, "method not allowed");
     return handleToolCallIngest(req, res, env, toolCalls);
+  }
+
+  // Process events from the knox-process-events openclaw plugin: guard a
+  // declared write before it runs, report it after (see process-events.ts).
+  // Same loopback + gateway-token trust anchor as the routes above.
+  if (path === "/internal/process-events/guard") {
+    if (method !== "POST") throw new HttpError(405, "method not allowed");
+    return handleProcessEventsGuard(req, res, env, processEvents);
+  }
+  if (path === "/internal/process-events/record") {
+    if (method !== "POST") throw new HttpError(405, "method not allowed");
+    return handleProcessEventsRecord(req, res, env, processEvents);
   }
 
   // Live skill management (console operator surface). Gateway-token authed like

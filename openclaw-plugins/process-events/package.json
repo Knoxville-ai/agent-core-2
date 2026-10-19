@@ -1,0 +1,8 @@
+{
+  "name": "knox-process-events",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "OpenClaw plugin: guard and report agents' calls to declared MCP write tools (the console's tool actions), so they become events on the company's process map."
+}

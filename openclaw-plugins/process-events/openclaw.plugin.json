@@ -1,0 +1,12 @@
+{
+  "id": "knox-process-events",
+  "name": "Knox Process Events",
+  "description": "Guard and report agents' calls to declared MCP write tools, so they become events on the company's process map.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

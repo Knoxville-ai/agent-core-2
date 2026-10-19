@@ -8,6 +8,8 @@ import { restoreOAuthStore } from "./provision/oauth-store.js";
 import { assertStateDirWritable } from "./provision/state-dir.js";
 import { startCostProxy, costTrackingEnabled } from "./shim/cost-proxy.js";
 import { startShim } from "./shim/server.js";
+import { startMcpRelay } from "./shim/mcp-relay.js";
+import { processEventsFromEnv, runtimeVersion } from "./shim/process-events.js";
 import { UsageAccumulator } from "./shim/usage-telemetry.js";
 import { bumpSkillRevs, openWhenGatewayReady, RefreshGate } from "./skills/refresh.js";
 import { skillSyncFromEnv } from "./skills/sync.js";
@@ -91,13 +93,21 @@ async function main(): Promise<void> {
   // 3. Spawn openclaw gateway as a child. The shim talks to it over the
   //    OpenAI-compatible HTTP endpoint on the same port (loopback), so no
   //    WebSocket client is needed in this process.
-  const proc = new GatewayProcess(env);
+  //    Process events (console phase 5): one reporter turns agents' declared
+  //    MCP write calls into the company's process events. The MCP relay sits in
+  //    front of MCP URLs skills call from scripts (PROCESS_EVENTS_RELAY, e.g.
+  //    ODOO_MCP_URL); the gateway, and every skill it spawns, gets the relay's
+  //    loopback URL instead. Fail-open: no reporter or no relay, and the gateway
+  //    gets the real URLs.
+  const processEvents = processEventsFromEnv(env, runtimeVersion());
+  const relay = processEvents ? await startMcpRelay(env.PROCESS_EVENTS_RELAY, process.env, processEvents) : null;
+  const proc = new GatewayProcess(env, relay?.envOverrides ?? {});
   await proc.start();
 
   // 4. Start the HTTP shim. /readyz won't return 200 until the gateway
   //    finishes its startup sidecars; Railway's healthcheck handles the
   //    wait. The shim shares the UsageAccumulator the cost proxy feeds.
-  const shim = await startShim(env, proc, memory, usage, skillSync, refreshGate);
+  const shim = await startShim(env, proc, memory, usage, skillSync, refreshGate, processEvents);
 
   // 4b. SkillSync safety poll: catches desired-state changes whose nudge was
   //     missed (vessel down or unreachable). A no-op round trip when nothing
@@ -123,6 +133,7 @@ async function main(): Promise<void> {
     } catch (err) {
       log.warn("shim close failed", { err: String(err) });
     }
+    if (relay) await relay.close().catch(() => undefined);
     if (costProxy) {
       await costProxy.close().catch((err) => {
         log.warn("cost proxy close failed", { err: String(err) });

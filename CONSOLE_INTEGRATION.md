@@ -819,6 +819,54 @@ and make the route a no-op). If the running openclaw never fires
 `after_tool_call`, rows simply stay `status='called'` — a complete audit + billing
 signal on their own.
 
+## Process events (console phase 5, migrations 0169 and 0170)
+
+An agent's writes through a declared MCP tool become kernel events with the
+agent as actor, so the company's process map shows the agent's steps next to
+people's. The console declares, once per MCP surface, which write tools change
+which business records (`spec/registry/tool-actions/` in the console repo, e.g.
+`odoo-mcp.yaml`: `sales_confirm_order` with `confirm: true` confirms the sale
+order `sale.order/<order_id>`). The vessel observes calls and reports them; the
+console decides what they mean.
+
+```
+openclaw MCP server call            skill script (exec) calling ODOO_MCP_URL
+      │ before/after_tool_call            │
+      │ openclaw-plugins/process-events   │ src/shim/mcp-relay.ts (loopback)
+      ▼                                   ▼
+  shim /internal/process-events/*    relay forwards every byte to the real URL
+      └──────────────┬────────────────────┘
+                     ▼
+        src/shim/process-events.ts (one reporter)
+                     │  platform MCP broker tools, agent's own token
+                     ▼
+  get_tool_actions   which tools of which surfaces; which mcp.servers name is
+                     which surface (org_mcp_servers.surface, console 0170)
+  guard_tool_call    before a declared write: the kernel's capability verdict
+  record_tool_call   after it returns: the console emits its events
+```
+
+**Two observers, one reporter.** openclaw's hooks see the MCP servers openclaw
+calls. A skill that talks MCP from a script (drivethru-odoo) is invisible to
+them, so `PROCESS_EVENTS_RELAY` (default `ODOO_MCP_URL=odoo-mcp`) names env vars
+holding MCP URLs a skill calls: the gateway — and every subprocess it spawns —
+gets a loopback relay URL in their place, while `openclaw.json` keeps the real
+URL. The relay forwards requests and responses unchanged (streamable HTTP, JSON
+or SSE answers), guards a declared `tools/call` before forwarding it, and
+reports it when its answer comes back.
+
+**Fail open.** The guard blocks only on the console's explicit refusal, which it
+sends only while it enforces (`AGENT_WRITE_GUARD=enforce` on the console; the
+default `log` audits what it would refuse as `capability.unenforced` and lets
+the call run). A guard that can't reach the console allows the call. Reports are
+retried three times, then dropped with a warning; the call itself is never
+affected. Each report carries a unique call ID, and the console derives event
+IDs from it, so a retry never counts twice. If the relay can't bind, the
+gateway gets the real URLs.
+
+**Kill switch.** `PROCESS_EVENTS=false` skips the plugin and the relay. Both
+need the platform MCP (`PLATFORM_MCP_URL`, `PLATFORM_API_TOKEN`).
+
 ## Artifacts (console migration 0138)
 
 When someone asks the agent to build a page — a report, dashboard, calculator,
