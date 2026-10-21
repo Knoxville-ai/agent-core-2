@@ -153,3 +153,10 @@ describe("conversation titles env", () => {
     expect(withEnv({ AGENT_AUTO_TITLE: "true" }, loadEnv).AGENT_AUTO_TITLE).toBe(true);
   });
 });
+
+describe("turn broadcast env", () => {
+  it("broadcasts by default and can be switched off", () => {
+    expect(withEnv({}, loadEnv).AGENT_TURN_BROADCAST).toBe(true);
+    expect(withEnv({ AGENT_TURN_BROADCAST: "off" }, loadEnv).AGENT_TURN_BROADCAST).toBe(false);
+  });
+});

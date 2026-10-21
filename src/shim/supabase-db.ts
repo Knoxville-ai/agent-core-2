@@ -350,6 +350,49 @@ export class MessagingDB implements ToolCallDB {
     return true;
   }
 
+  /**
+   * Save a still-streaming reply's text (turn-live.ts). Filtered on
+   * `status = 'streaming'` so a save that lands after the row was finalized —
+   * or interrupted — is a no-op rather than overwriting the final content.
+   */
+  async saveStreamingContent(messageId: string, content: string): Promise<boolean> {
+    const { error } = await this.client
+      .from("messages")
+      .update({ content })
+      .eq("id", messageId)
+      .eq("status", "streaming");
+    if (error) {
+      log.warn("saveStreamingContent failed", { err: error.message });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Close out this agent's assistant rows still `streaming` (or queued as
+   * `pending`) from a previous process. A turn lives in this process only; when
+   * the container restarts mid-turn nothing else will ever finish its row, and
+   * every client would show it as "still replying" forever. Called once at
+   * boot, before the shim accepts requests, so no live turn of this process can
+   * match. The row keeps whatever text was saved while it streamed. Returns how
+   * many rows were closed (0 on error — this must never block boot).
+   */
+  async failOrphanedTurns(agentUid: string): Promise<number> {
+    const { data, error } = await this.client
+      .from("messages")
+      .update({ status: "interrupted", completed_at: new Date().toISOString() })
+      .eq("role", "assistant")
+      .in("status", ["streaming", "pending"])
+      .eq("sender_kind", "agent")
+      .eq("sender_id", agentUid)
+      .select("id");
+    if (error) {
+      log.warn("failOrphanedTurns failed", { err: error.message });
+      return 0;
+    }
+    return (data ?? []).length;
+  }
+
   async insertAttachments(
     rows: InsertAttachmentRow[],
   ): Promise<AttachmentRow[]> {
