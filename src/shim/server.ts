@@ -41,13 +41,19 @@ import {
   type OAuthDeps,
 } from "./routes-oauth.js";
 import { MessagingDB } from "./supabase-db.js";
+import {
+  noopPublisher,
+  RealtimeRestPublisher,
+  TurnLocks,
+  type TurnPublisher,
+} from "./turn-live.js";
 import { sendJson } from "./util.js";
 
 interface ServerHandle {
   close: () => Promise<void>;
 }
 
-export function startShim(
+export async function startShim(
   env: AgentEnv,
   gateway: GatewayProcess,
   memory: MemoryCheckpoint,
@@ -69,6 +75,20 @@ export function startShim(
 ): Promise<ServerHandle> {
   const db = new MessagingDB(env);
   const cancels = new CancelRegistry();
+  // Chat turns outlive the request that starts them (turn-live.ts): one at a
+  // time per conversation, saved as they stream, deltas broadcast to whoever is
+  // following the conversation.
+  const turns: TurnDeps = {
+    turns: new TurnLocks(),
+    publisher: env.AGENT_TURN_BROADCAST ? new RealtimeRestPublisher(env) : noopPublisher,
+  };
+  // A turn lives in this process only, so any row a previous process left
+  // `streaming` (or queued as `pending`) will never finish. Close those out
+  // before accepting requests, so no turn of ours can match.
+  const orphaned = await db.failOrphanedTurns(env.AGENT_UID);
+  if (orphaned > 0) {
+    log.warn("closed turns orphaned by a previous process", { rows: orphaned });
+  }
   // Per-turn delegated-credential store, shared between the message route
   // (writer) and the loopback lookup route (reader for the gateway plugin).
   const delegatedCreds = new DelegatedCredentialStore();
@@ -122,6 +142,7 @@ export function startShim(
       usage,
       toolCalls,
       skills,
+      turns,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -155,6 +176,12 @@ export function startShim(
       log.info("shim listening", { port: env.AGENT_HTTP_PORT });
       resolve({
         close: async () => {
+          // Stop live chat turns and give them a moment to write their final
+          // state (partial reply, `interrupted`). Anything that misses the
+          // window is closed out by the next boot's failOrphanedTurns.
+          cancels.abortAll();
+          const drained = await turns.turns.drain(5_000);
+          if (!drained) log.warn("chat turns still running at shutdown");
           await taskRunner.shutdown();
           await new Promise<void>((r) => {
             server.close(() => r());
@@ -163,6 +190,11 @@ export function startShim(
       });
     });
   });
+}
+
+interface TurnDeps {
+  turns: TurnLocks;
+  publisher: TurnPublisher;
 }
 
 async function route(
@@ -178,6 +210,7 @@ async function route(
   usage: UsageAccumulator,
   toolCalls: ToolCallHub,
   skills: SkillsRouteDeps,
+  turns: TurnDeps,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -269,6 +302,7 @@ async function route(
         delegatedCreds,
         usage,
         toolCalls,
+        ...turns,
       });
     }
     if (sub === "interrupt") {

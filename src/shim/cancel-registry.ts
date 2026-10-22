@@ -20,6 +20,11 @@ export class CancelRegistry {
     this.entries.delete(messageId);
   }
 
+  /** Abort every live entry (shutdown). */
+  abortAll(): void {
+    for (const controller of this.entries.values()) controller.abort();
+  }
+
   signal(messageId: string): boolean {
     const controller = this.entries.get(messageId);
     if (!controller) return false;

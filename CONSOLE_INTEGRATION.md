@@ -51,6 +51,7 @@ The console provisions an agent by:
 | `PLATFORM_MCP_URL` | URL of the platform's MCP server. Set this to give the agent an outbound channel to discover and converse with other platform agents (drive-throughs) AND to fetch its own bundle at boot. |
 | `PLATFORM_API_TOKEN` | per-agent bearer (`knox_agent_*`) for the platform MCP. Required whenever `PLATFORM_MCP_URL` is set. |
 | `OPENCLAW_BUNDLED_SKILLS` | OpenClaw's own bundled skills the agent may see → `skills.allowBundled`. Default (unset, empty or `none`): **no bundled skills** — emitted as the non-empty sentinel `["__none__"]`, since openclaw treats `[]` as "all". An agent's skills come from the platform library; the bundled `skill-creator` would teach it to write skill folders itself, which SkillSync quarantines. A comma/space list (e.g. `skill-creator`) allows just those; `all` = openclaw's default (every eligible bundled skill — 14–19 of them, ~4–6k chars — in every model call's prompt). Read at gateway start only. |
+| `AGENT_TURN_BROADCAST` | Publish chat-turn token deltas on the `conversation:<id>` realtime topic (default `true`). See [Chat turn lifecycle](#chat-turn-lifecycle). |
 | `SKILL_SYNC_POLL_MS` | SkillSync safety-poll interval. Default `300000` (5 min); `0` disables; values under 10s are raised to 10s. |
 
 When both are set, the shim's `renderWorkspace()` adds an entry to
@@ -517,8 +518,8 @@ Identical to v0.2 for the endpoints the console actually calls:
 
 | Method + path | Behavior |
 | --- | --- |
-| `POST /api/v1/conversations/:id/messages` | Body: `{ "text": "…" }`. Response: `text/event-stream` with events `delta` / `tool_call` / `tool_result` / `done` / `error`. Verified by `Authorization: Bearer <Supabase session.access_token>` against `SUPABASE_JWT_SECRET`. |
-| `POST /api/v1/conversations/:id/interrupt` | Aborts the in-flight turn. Returns `{ ok: true }` on success, `{ ok: false, error }` on gateway failure. |
+| `POST /api/v1/conversations/:id/messages` | Body: `{ content, attachments? }`. Response: `text/event-stream` with `data:` frames `start` / `token` / `question` / `done` / `error`, or — with `Prefer: respond-async` — `202 { ok, user_message_id, assistant_message_id, auto_title? }` as soon as the rows exist. Either way the turn is **not tied to the connection**; see [Chat turn lifecycle](#chat-turn-lifecycle). Verified by `Authorization: Bearer <Supabase session.access_token>` against `SUPABASE_JWT_SECRET`. |
+| `POST /api/v1/conversations/:id/interrupt` | Body `{ assistant_message_id }`. Cancels that turn (running or queued) — the only way a turn is cancelled. Returns `{ cancelled }`. |
 | `GET  /healthz` / `/readyz` | Liveness / readiness. `/readyz` returns 503 until the openclaw gateway WebSocket is connected. |
 | `GET  /files/list?path=…` | Operator filesystem inspection for the console Files tab. Auth: `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>` (the gateway token, **not** a user JWT — only the console server holds it). Returns `{ path, entries: [{ name, type, size, mtime }] }`. `path` defaults to the first allowed root. |
 | `GET  /files/read?path=…` | Reads one file. Same auth. Returns `{ path, size, encoding: "utf-8" \| "base64", truncated, content }`; content is capped at 1 MiB and base64-encoded when binary. |
@@ -537,6 +538,40 @@ rendered agent workspace at `<OPENCLAW_STATE_DIR>/workspace`. The openclaw
 state dir itself is **not** browsable, since `openclaw.json` there holds the
 LLM API key and the OAuth-store pointer. Symlinks are resolved (`realpath`)
 and re-checked against the allowlist so a link can't escape a root.
+
+## Chat turn lifecycle
+
+A chat turn is not tied to the HTTP request that starts it
+(`src/shim/turn-live.ts`). Closing the connection — a closed tab, a
+backgrounded iOS app, a closed extension panel, Vercel's 300s function ceiling,
+an edge proxy's idle reaper — **never cancels the turn**; only
+`POST …/interrupt` does. The reply reaches clients three ways, none of which
+depends on who is still connected:
+
+| Output | What | Who uses it |
+| --- | --- | --- |
+| The assistant row | `messages.content` is saved about once a second while `status = 'streaming'` (filtered on that status, so a late save never overwrites the final reply), then finalized with `status`, `completed_at`, `token_usage`. | Every client — load, poll, or `postgres_changes`. The source of truth. |
+| Realtime broadcast | Private topic `conversation:<conversation_id>`, event `turn`, published over Supabase's broadcast REST endpoint with the service role key. Payloads: `{ type: "start", message_id, user_message_id }`, `{ type: "token", message_id, offset, delta }` (deltas coalesced ~100ms), `{ type: "question", message_id, question }`, `{ type: "done", message_id, status }`. Best effort. Subscribers are authorized by the console's RLS on `realtime.messages` (migration 0154: members of the conversation's org). `AGENT_TURN_BROADCAST=false` turns it off. | Web console, for smooth live tokens on any open tab. |
+| SSE | The response stream, when the caller didn't ask for `respond-async`. A fast path onto the same turn; frames stop when the socket closes. | iOS, the extension, the A2A bridge, public drive-throughs. |
+
+`offset` is the length of the visible reply before the delta, in the same
+coordinates as the row's saved `content` (the visible text excludes a
+suppressed ` ```knox:ask ` block). A client that loaded the row mid-turn appends
+only the part of a delta past what it already has, and ignores a delta that
+starts beyond it until the next row save catches it up.
+
+**One turn at a time per conversation.** The assistant row is reserved as
+`pending` before the turn waits for its conversation's lock, so the `start`
+frame / `202` arrives immediately; it flips to `streaming` when the turn runs,
+and its history is read only then, so it is built on the previous turn's
+finished reply. An interrupt of a `pending` turn finalizes it as `interrupted`
+without calling the model.
+
+**Restarts.** A turn lives in one process. On SIGTERM the shim interrupts live
+turns and waits up to 5s for them to write their final state; at boot, before
+accepting requests, it marks any of this agent's assistant rows still
+`streaming` or `pending` as `interrupted` (keeping the text saved so far), so no
+client shows a reply that will never finish.
 
 ## Long-running tasks (console migration 0047)
 

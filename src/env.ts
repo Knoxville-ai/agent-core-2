@@ -343,6 +343,24 @@ const Schema = z.object({
       return s !== "false" && s !== "0" && s !== "no" && s !== "off";
     }),
 
+  // ── Live turn delivery ──────────────────────────────────────────────────────
+  // A chat turn is not tied to the HTTP request that started it (see
+  // shim/turn-live.ts): its text is saved to the assistant row as it streams,
+  // and its token deltas are published on the private Supabase Realtime topic
+  // `conversation:<id>`, so any client — including one that reconnects
+  // mid-turn — can follow it.
+  //
+  // Kill switch: set to false to stop publishing deltas. The row is still
+  // saved as it streams, so clients fall back to following it at that cadence.
+  AGENT_TURN_BROADCAST: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => {
+      const s = v.trim().toLowerCase();
+      return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }),
+
   // Ports
   AGENT_HTTP_PORT: z
     .string()

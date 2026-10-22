@@ -21,6 +21,7 @@ import { handleSendMessage, type MessagesDeps } from "./routes-messages.js";
 import type { AgentEnv } from "../env.js";
 import type { Principal } from "./auth.js";
 import type { Conversation, MessageRow, MessagingDB } from "./supabase-db.js";
+import { noopPublisher, TurnLocks } from "./turn-live.js";
 
 const ORG = "bacon-company";
 const AGENT = "560bd7e31e229d1d";
@@ -103,6 +104,7 @@ function fakeRes() {
       return true;
     },
     end: () => {},
+    on: () => res,
   } as unknown as ServerResponse;
   const frames = () =>
     writes
@@ -143,6 +145,8 @@ describe("handleSendMessage auto-title", () => {
       delegatedCreds: { set: () => 0, clear: () => {} },
       usage: { begin: () => {}, drain: () => null },
       toolCalls: { begin: () => {}, end: () => ({ count: 0, errorCount: 0 }) },
+      turns: new TurnLocks(),
+      publisher: noopPublisher,
     } as unknown as MessagesDeps;
   }
 

@@ -35,6 +35,12 @@ import {
   type UsageAccumulator,
 } from "./usage-telemetry.js";
 import type { ToolCallHub } from "./tool-telemetry.js";
+import {
+  StreamingRowWriter,
+  TurnBroadcaster,
+  type TurnLocks,
+  type TurnPublisher,
+} from "./turn-live.js";
 import { readJsonBody } from "./util.js";
 import {
   type Mcq,
@@ -63,8 +69,17 @@ import {
  *     { type: "error", error }
  *
  * Persists the user turn + reserves an assistant row before calling
- * openclaw's /v1/chat/completions endpoint, streams deltas into the
- * row, and updates the row's status + final content on done.
+ * openclaw's /v1/chat/completions endpoint, saves the reply into the
+ * row as it streams, and updates the row's status + final content on done.
+ *
+ * The turn is NOT tied to this request (turn-live.ts): closing the
+ * connection never cancels it — only /interrupt does — and the reply also
+ * goes to the row and the `conversation:<id>` realtime topic. With
+ * `Prefer: respond-async` the response is instead
+ *     202 { ok, user_message_id, assistant_message_id, auto_title? }
+ * sent as soon as the rows exist, and the turn runs on without a connection.
+ * Turns on one conversation run one at a time; a turn queued behind another
+ * sits as an assistant row with status `pending`.
  */
 
 /** How often to emit an SSE comment during a silent stretch of a turn. Well
@@ -102,6 +117,10 @@ export interface MessagesDeps {
    *  each tool call is attributed to the right conversation + assistant row, and
    *  close it out in the `finally` below. */
   toolCalls: ToolCallHub;
+  /** One turn at a time per conversation; also what shutdown drains. */
+  turns: TurnLocks;
+  /** Where token deltas are broadcast (turn-live.ts). */
+  publisher: TurnPublisher;
 }
 
 export async function handleSendMessage(
@@ -177,95 +196,15 @@ export async function handleSendMessage(
     });
   }
 
-  // 4. Reload history (including the just-inserted user row) and build
-  //    OpenAI-format messages for the upstream call.
-  const history = await db.listMessages(conversationId);
-  const historyIds = history.map((r) => r.id);
-  const allAttachments = await db.listAttachmentsForMessages(historyIds);
-  const attsByMessage = new Map<string, AttachmentRow[]>();
-  for (const a of allAttachments) {
-    const arr = attsByMessage.get(a.message_id) ?? [];
-    arr.push(a);
-    attsByMessage.set(a.message_id, arr);
-  }
-
-  // Name an untitled direct conversation in the background (conversation-title.ts).
-  // Started as soon as the person's opening messages are loaded, so the title
-  // usually lands while the reply is still streaming. Never awaited, never throws.
-  const opening = shouldAutoTitle(conversation, principal, env)
-    ? openingUserMessages(history, attsByMessage)
-    : [];
-  const autoTitle = opening.length > 0;
-  if (autoTitle) {
-    void autoTitleConversation({ env, db }, conversationId, opening);
-  }
-  // openclaw's tools (bash/python inside skills) run against the rendered
-  // workspace, so materialize every attachment there and hand the model the
-  // on-disk paths. This is the ONLY path by which a non-image file (a
-  // spreadsheet, PDF, doc) reaches the model — it can't be "seen" like an
-  // image, but the agent can run code against it on disk. Images are
-  // ADDITIONALLY inlined as base64 below for multimodal models to see.
-  const workspaceDir = join(env.OPENCLAW_STATE_DIR, "workspace");
-  const openaiMessages = await historyToOpenaiMessages(
-    history,
-    attsByMessage,
-    caps,
-    db,
-    workspaceDir,
-    conversationId,
-  );
-
-  // DYNAMIC layer: recompute per-turn caller context (who is calling + what we
-  // have learned about them) and conversation-scoped recent memory. SOUL.md
-  // carries the STATIC identity; anything per-caller/per-turn must be injected
-  // here because SOUL is assembled once at boot. Fail-open — a missing table or a
-  // DB hiccup must never break a turn.
-  //
-  // PLACEMENT (prompt-cache critical): this block is APPENDED, not prepended.
-  //
-  // Its content is recomputed every turn from mutating sources — recent memories,
-  // caller context ordered by `last_interaction_at`, and a 30s-TTL knowledge
-  // index. At index 0 a single `remember` call during turn N changes byte 0 of
-  // turn N+1, which invalidates the ENTIRE prompt prefix: providers match the
-  // cache token-by-token from the front, so one changed leading token forces a
-  // full recompute of everything after it. Worse, `buildDynamicContext` returns
-  // null when it has no sections, so a conversation could flip between "no
-  // leading system message" and "one" mid-stream, shifting every message index.
-  //
-  // Appending moves the volatile bytes behind the entire stable history, so the
-  // shared prefix across consecutive turns goes from ~0% to ~everything-but-the-
-  // tail. The model still sees the same content in the same turn.
-  //
-  // Set AGENT_DYNAMIC_CONTEXT_POSITION=lead to restore the old prepend behavior
-  // without a code release, if a model is found to weight a trailing system
-  // block differently.
-  try {
-    const dynamic = await buildDynamicContext(
-      db,
-      env,
-      principal,
-      parseAdvisoryCaller(req.headers),
-    );
-    if (dynamic) {
-      const msg = { role: "system" as const, content: dynamic };
-      if (env.AGENT_DYNAMIC_CONTEXT_POSITION === "lead") {
-        openaiMessages.unshift(msg);
-      } else {
-        openaiMessages.push(msg);
-      }
-    }
-  } catch (err) {
-    log.warn("dynamic context injection failed (non-fatal)", {
-      err: String(err),
-    });
-  }
-
-  // 5. Reserve an assistant row; we stream into it.
+  // 4. Reserve the assistant row now, before waiting for this conversation's
+  //    turn lock, so the caller gets both ids immediately even when an earlier
+  //    turn is still running. `pending` = queued behind that turn; it flips to
+  //    `streaming` once this turn holds the lock.
   const assistantMessageId = await db.insertMessage({
     conversationId,
     role: "assistant",
     content: "",
-    status: "streaming",
+    status: "pending",
     parentMessageId: userMessageId,
     senderKind: "agent",
     senderId: env.AGENT_UID,
@@ -274,10 +213,98 @@ export async function handleSendMessage(
     throw new HttpError(500, "failed to reserve assistant message");
   }
 
+  // The turn's only cancel path is an explicit /interrupt. A client closing its
+  // socket — a closed tab, a backgrounded app, a closed extension panel, an edge
+  // proxy's timeout — never cancels it: the reply keeps streaming into the row
+  // and onto the conversation's realtime topic (turn-live.ts) for whoever looks
+  // next.
   const abortController = cancels.register(assistantMessageId);
-  // Map client disconnect to the same abort signal so we don't keep
-  // burning provider tokens after the browser goes away.
-  req.on("close", () => abortController.abort());
+  const live = new TurnBroadcaster(deps.publisher, conversationId, assistantMessageId);
+  const rowWriter = new StreamingRowWriter(db, assistantMessageId);
+
+  // Name an untitled direct conversation in the background (conversation-title.ts).
+  // Started as soon as the person's opening messages are loaded, so the title
+  // usually lands while the reply is still streaming. Never awaited, never throws.
+  // Read here rather than from the turn's history below so the caller hears
+  // `auto_title` up front, even when this turn is queued.
+  let autoTitle = false;
+  if (shouldAutoTitle(conversation, principal, env)) {
+    const early = await db.listMessages(conversationId);
+    const earlyAtts = groupAttachments(
+      await db.listAttachmentsForMessages(early.map((r) => r.id)),
+    );
+    const opening = openingUserMessages(early, earlyAtts);
+    autoTitle = opening.length > 0;
+    if (autoTitle) {
+      void autoTitleConversation({ env, db }, conversationId, opening);
+    }
+  }
+
+  const startFrame = {
+    type: "start",
+    user_message_id: userMessageId,
+    assistant_message_id: assistantMessageId,
+    // Tells the console the vessel is naming this conversation, so it skips its
+    // own first-message heuristic. Absent on vessels that predate auto-titling.
+    ...(autoTitle ? { auto_title: true } : {}),
+  };
+  live.start(userMessageId);
+
+  // Delivery mode. `Prefer: respond-async` (RFC 7240) → answer 202 with the ids
+  // right now and run the turn detached from this request; the caller follows
+  // it on the realtime topic and the row. Otherwise stream SSE as before — the
+  // stream is now only a fast path onto the same turn.
+  const respondAsync = /\brespond-async\b/i.test(String(req.headers["prefer"] ?? ""));
+  let clientGone = false;
+  let keepalive: NodeJS.Timeout | null = null;
+  const sseSend = (payload: unknown): void => {
+    if (respondAsync || clientGone) return;
+    try {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch {
+      clientGone = true;
+    }
+  };
+  if (respondAsync) {
+    res.writeHead(202, {
+      "Content-Type": "application/json",
+      "Preference-Applied": "respond-async",
+    });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        user_message_id: userMessageId,
+        assistant_message_id: assistantMessageId,
+        ...(autoTitle ? { auto_title: true } : {}),
+      }),
+    );
+  } else {
+    res.on("close", () => {
+      clientGone = true;
+    });
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    // Keepalive. A turn that spends minutes inside one tool call (or queued
+    // behind another turn) emits no token deltas, and an idle HTTP connection
+    // is exactly what an edge proxy reaps (Railway's is ~60s). An SSE comment
+    // line is ignored by every conformant client (the console's reader skips
+    // non-`data:` lines, and the A2A bridge's parser does too) but it keeps
+    // bytes moving. Losing the connection anyway costs the turn nothing.
+    keepalive = setInterval(() => {
+      if (clientGone) return;
+      try {
+        res.write(`: keepalive ${Date.now()}\n\n`);
+      } catch {
+        clientGone = true;
+      }
+    }, KEEPALIVE_INTERVAL_MS);
+    keepalive.unref?.();
+    sseSend(startFrame);
+  }
 
   // Session key pins openclaw's per-session state across turns. A2A
   // and webchat use different prefixes so an agent calling us doesn't
@@ -286,102 +313,10 @@ export async function handleSendMessage(
     ? `a2a:${conversationId}`
     : `webchat:${conversationId}`;
 
-  // Open this turn's usage bucket. Every model call openclaw makes inside the
-  // agentic loop reports back through the loopback ingest route under this same
-  // session key; we drain the rollup in the `finally` below.
-  deps.usage.begin(sessionKey);
-
-  // Register this turn's context for tool-call tracking. Every tool call openclaw
-  // makes reports back through the /internal/tool-call loopback route under this
-  // session key; the hub anchors each one to this conversation + assistant row so
-  // the console can render it live under the right bubble. Closed in `finally`.
-  deps.toolCalls.begin(sessionKey, {
-    conversationId,
-    assistantMessageId,
-    taskId: null,
-  });
-
-  // Platform-brokered delegated credentials (agent-to-agent turns only).
-  // On a delegated turn, pull the credentials the calling agent shared for THIS
-  // conversation and stash them keyed by the session key. The openclaw
-  // `before_tool_call` plugin reads them back over the loopback route and injects
-  // them into this turn's skill subprocess env, so a skill reads them from its
-  // environment exactly as it would standalone. They are NEVER added to
-  // `openaiMessages` / the prompt / the transcript, and are cleared in the
-  // `finally` below. A non-delegated turn skips this entirely, so its skills see
-  // no delegated env — keyed isolation, no cross-turn leakage.
-  const delegated = detectDelegatedTurn(req.headers, principal.kind, conversationId);
-  // Lease for the entry THIS turn stages, so the `finally` below only clears
-  // what it staged. Two turns can be live on one conversation (a caller that
-  // re-sends after its MCP client times out is the common way), and clearing by
-  // session key alone lets the first to finish wipe the second's credentials.
-  let credentialLease: CredentialLease = 0;
-  if (delegated.delegated) {
-    const creds = await fetchDelegatedCredentialsForTurn(env, delegated.conversationId);
-    credentialLease = deps.delegatedCreds.set(sessionKey, creds);
-    if (Object.keys(creds).length > 0) {
-      // Key names + count only — never the values.
-      log.info("delegated credentials staged for turn", {
-        session_key: sessionKey,
-        connection_id: delegated.connectionId,
-        keys: credentialKeyNames(creds),
-      });
-    }
-    // Steer weaker models toward actually running the skill on this turn (the
-    // brokered creds live in the skill's exec env, invisible to the model, so a
-    // model that hunts for them concludes "no access" and bails). It carries NO
-    // credential values — behavioral guidance only — and is added ONLY to the
-    // outgoing message array here, never written back to the conversation
-    // history.
-    //
-    // Appended for the same prompt-cache reason as the dynamic block above: this
-    // note is present on delegated turns and absent on ordinary ones, so at
-    // index 0 it made the identity of the first message alternate on any
-    // conversation that mixes the two — zeroing the shared prefix every time it
-    // flipped. At the tail it is also simply more recent, which is where a
-    // behavioral nudge wants to be.
-    openaiMessages.push({ role: "system", content: DELEGATED_TURN_SYSTEM_NOTE });
-  }
-
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
-  const sseSend = (payload: unknown): void => {
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  };
-
-  // Keepalive. A turn that spends minutes inside one tool call emits no token
-  // deltas, and an idle HTTP connection is exactly what an edge proxy reaps
-  // (Railway's is ~60s) — which surfaced as "the agent just stopped replying"
-  // on precisely the slow turns that mattered. An SSE comment line is ignored
-  // by every conformant client (the console's reader skips non-`data:` lines,
-  // and the A2A bridge's parser does too) but it keeps bytes moving.
-  //
-  // Note this only buys a turn more time; it is NOT how long work should be
-  // done. Anything that runs for many minutes belongs in a task (routes-tasks),
-  // which holds no connection at all.
-  const keepalive = setInterval(() => {
-    try {
-      res.write(`: keepalive ${Date.now()}\n\n`);
-    } catch {
-      /* stream already torn down; the finally below clears the timer */
-    }
-  }, KEEPALIVE_INTERVAL_MS);
-  keepalive.unref?.();
-
-  sseSend({
-    type: "start",
-    user_message_id: userMessageId,
-    assistant_message_id: assistantMessageId,
-    // Tells the console the vessel is naming this conversation, so it skips its
-    // own first-message heuristic. Absent on vessels that predate auto-titling.
-    ...(autoTitle ? { auto_title: true } : {}),
-  });
-
   let buffer = "";
+  // The reply as clients see it: `buffer` minus a suppressed knox:ask block.
+  // This is what streams into the row and what broadcast offsets count.
+  let visible = "";
   // Set when the model emitted a structured multiple-choice question this turn.
   // When present, the assistant row is persisted as the serialized `mcq` payload
   // (not the raw fenced text), matching the console's structured-message convention.
@@ -391,7 +326,162 @@ export async function handleSendMessage(
   // (requested via stream_options below). Persisted onto the assistant row
   // so the console's metrics dashboard can chart token in/out over time.
   const usageRef: { value: OpenaiUsage | null } = { value: null };
+  // Lease for the delegated credentials THIS turn stages (see below).
+  let credentialLease: CredentialLease = 0;
+  // Set once this turn has opened its usage / tool-call buckets, so the
+  // `finally` only closes what it opened.
+  let opened = false;
+  let cacheTotals: CacheUsageTotals | null = null;
+
+  const emitVisible = (delta: string): void => {
+    if (!delta) return;
+    const offset = visible.length;
+    visible += delta;
+    sseSend({ type: "token", delta });
+    live.token(delta, offset);
+    rowWriter.update(visible);
+  };
+
+  // One turn at a time per conversation (turn-live.ts TurnLocks).
+  const releaseLock = await deps.turns.acquire(conversationId);
   try {
+    if (abortController.signal.aborted) {
+      // Interrupted while queued: never run.
+      finalStatus = "interrupted";
+      sseSend({ type: "done", status: "interrupted", message_id: assistantMessageId });
+      return;
+    }
+    await db.updateMessage(assistantMessageId, { status: "streaming" });
+    // 5. Reload history (including the just-inserted user row) and build
+    //    OpenAI-format messages for the upstream call. Read only now that this
+    //    turn holds the lock, so an earlier turn's reply is final. This turn's
+    //    own reserved row is not part of the prompt.
+    const history = (await db.listMessages(conversationId)).filter(
+      (r) => r.id !== assistantMessageId,
+    );
+    const attsByMessage = groupAttachments(
+      await db.listAttachmentsForMessages(history.map((r) => r.id)),
+    );
+
+    // openclaw's tools (bash/python inside skills) run against the rendered
+    // workspace, so materialize every attachment there and hand the model the
+    // on-disk paths. This is the ONLY path by which a non-image file (a
+    // spreadsheet, PDF, doc) reaches the model — it can't be "seen" like an
+    // image, but the agent can run code against it on disk. Images are
+    // ADDITIONALLY inlined as base64 below for multimodal models to see.
+    const workspaceDir = join(env.OPENCLAW_STATE_DIR, "workspace");
+    const openaiMessages = await historyToOpenaiMessages(
+      history,
+      attsByMessage,
+      caps,
+      db,
+      workspaceDir,
+      conversationId,
+    );
+
+    // DYNAMIC layer: recompute per-turn caller context (who is calling + what we
+    // have learned about them) and conversation-scoped recent memory. SOUL.md
+    // carries the STATIC identity; anything per-caller/per-turn must be injected
+    // here because SOUL is assembled once at boot. Fail-open — a missing table or a
+    // DB hiccup must never break a turn.
+    //
+    // PLACEMENT (prompt-cache critical): this block is APPENDED, not prepended.
+    //
+    // Its content is recomputed every turn from mutating sources — recent memories,
+    // caller context ordered by `last_interaction_at`, and a 30s-TTL knowledge
+    // index. At index 0 a single `remember` call during turn N changes byte 0 of
+    // turn N+1, which invalidates the ENTIRE prompt prefix: providers match the
+    // cache token-by-token from the front, so one changed leading token forces a
+    // full recompute of everything after it. Worse, `buildDynamicContext` returns
+    // null when it has no sections, so a conversation could flip between "no
+    // leading system message" and "one" mid-stream, shifting every message index.
+    //
+    // Appending moves the volatile bytes behind the entire stable history, so the
+    // shared prefix across consecutive turns goes from ~0% to ~everything-but-the-
+    // tail. The model still sees the same content in the same turn.
+    //
+    // Set AGENT_DYNAMIC_CONTEXT_POSITION=lead to restore the old prepend behavior
+    // without a code release, if a model is found to weight a trailing system
+    // block differently.
+    try {
+      const dynamic = await buildDynamicContext(
+        db,
+        env,
+        principal,
+        parseAdvisoryCaller(req.headers),
+      );
+      if (dynamic) {
+        const msg = { role: "system" as const, content: dynamic };
+        if (env.AGENT_DYNAMIC_CONTEXT_POSITION === "lead") {
+          openaiMessages.unshift(msg);
+        } else {
+          openaiMessages.push(msg);
+        }
+      }
+    } catch (err) {
+      log.warn("dynamic context injection failed (non-fatal)", {
+        err: String(err),
+      });
+    }
+
+    // Open this turn's usage bucket. Every model call openclaw makes inside the
+    // agentic loop reports back through the loopback ingest route under this same
+    // session key; we drain the rollup in the `finally` below.
+    deps.usage.begin(sessionKey);
+
+    // Register this turn's context for tool-call tracking. Every tool call openclaw
+    // makes reports back through the /internal/tool-call loopback route under this
+    // session key; the hub anchors each one to this conversation + assistant row so
+    // the console can render it live under the right bubble. Closed in `finally`.
+    deps.toolCalls.begin(sessionKey, {
+      conversationId,
+      assistantMessageId,
+      taskId: null,
+    });
+    opened = true;
+
+
+    // Platform-brokered delegated credentials (agent-to-agent turns only).
+    // On a delegated turn, pull the credentials the calling agent shared for THIS
+    // conversation and stash them keyed by the session key. The openclaw
+    // `before_tool_call` plugin reads them back over the loopback route and injects
+    // them into this turn's skill subprocess env, so a skill reads them from its
+    // environment exactly as it would standalone. They are NEVER added to
+    // `openaiMessages` / the prompt / the transcript, and are cleared in the
+    // `finally` below. A non-delegated turn skips this entirely, so its skills see
+    // no delegated env — keyed isolation, no cross-turn leakage.
+    const delegated = detectDelegatedTurn(req.headers, principal.kind, conversationId);
+    // Lease for the entry THIS turn stages, so the `finally` below only clears
+    // what it staged — even though turns on one conversation are now serialized,
+    // an a2a and a webchat turn share neither lock key nor lease semantics with a
+    // later turn that re-stages under the same session key.
+    if (delegated.delegated) {
+      const creds = await fetchDelegatedCredentialsForTurn(env, delegated.conversationId);
+      credentialLease = deps.delegatedCreds.set(sessionKey, creds);
+      if (Object.keys(creds).length > 0) {
+        // Key names + count only — never the values.
+        log.info("delegated credentials staged for turn", {
+          session_key: sessionKey,
+          connection_id: delegated.connectionId,
+          keys: credentialKeyNames(creds),
+        });
+      }
+      // Steer weaker models toward actually running the skill on this turn (the
+      // brokered creds live in the skill's exec env, invisible to the model, so a
+      // model that hunts for them concludes "no access" and bails). It carries NO
+      // credential values — behavioral guidance only — and is added ONLY to the
+      // outgoing message array here, never written back to the conversation
+      // history.
+      //
+      // Appended for the same prompt-cache reason as the dynamic block above: this
+      // note is present on delegated turns and absent on ordinary ones, so at
+      // index 0 it made the identity of the first message alternate on any
+      // conversation that mixes the two — zeroing the shared prefix every time it
+      // flipped. At the tail it is also simply more recent, which is where a
+      // behavioral nudge wants to be.
+      openaiMessages.push({ role: "system", content: DELEGATED_TURN_SYSTEM_NOTE });
+    }
+
     const gatewayUrl = `http://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}/v1/chat/completions`;
     const payload = {
       model: process.env.OPENCLAW_MODEL_ROUTE ?? "openclaw/default",
@@ -437,11 +527,9 @@ export async function handleSendMessage(
         return;
       }
       buffer += token;
-      const visible = sentinel.push(token);
-      if (visible) sseSend({ type: "token", delta: visible });
+      emitVisible(sentinel.push(token));
     }
-    const tail = sentinel.flush();
-    if (tail) sseSend({ type: "token", delta: tail });
+    emitVisible(sentinel.flush());
 
     // If the model asked a structured multiple-choice question, turn the
     // suppressed knox:ask block into a `question` frame and persist the assistant
@@ -454,8 +542,9 @@ export async function handleSendMessage(
       if (mcq) {
         questionPayload = mcq;
         sseSend({ type: "question", question: mcq });
+        live.question(mcq);
       } else {
-        sseSend({ type: "token", delta: sentinel.suppressedText() });
+        emitVisible(sentinel.suppressedText());
       }
     }
 
@@ -475,36 +564,36 @@ export async function handleSendMessage(
     } else {
       log.error("streaming failed", { err: String(err) });
       finalStatus = "error";
-      try {
-        sseSend({ type: "error", error: "internal error" });
-      } catch {
-        /* response may already be torn down */
-      }
+      sseSend({ type: "error", error: "internal error" });
     }
   } finally {
-    clearInterval(keepalive);
-    // Drop the delegated credentials THIS turn staged. The turn is over, so they
-    // must not outlive it — but passing the lease means we do not wipe an entry a
-    // later, still-running turn staged under the same session key. Idempotent +
-    // safe on a non-delegated turn (lease 0 matches nothing).
-    deps.delegatedCreds.clear(sessionKey, credentialLease);
-    // Drain this turn's per-model-call rollup (prompt-cache split + loop
-    // iteration count). Null when the telemetry plugin is not loaded, in which
-    // case token_usage keeps exactly its previous shape.
-    const cacheTotals = deps.usage.drain(sessionKey);
-    if (cacheTotals) logUsageTotals(sessionKey, cacheTotals);
-    // Close out this turn's tool-call tracking. The rows are already persisted;
-    // this just drops the turn's context and logs the tally. Any tool call whose
-    // `after_tool_call` never arrived stays `status='called'` — a call we saw
-    // start but not finish.
-    const toolTotals = deps.toolCalls.end(sessionKey);
-    if (toolTotals.count > 0) {
-      log.info("turn tool calls", {
-        session_key: sessionKey,
-        tool_calls: toolTotals.count,
-        tool_errors: toolTotals.errorCount,
-      });
+    if (keepalive) clearInterval(keepalive);
+    if (opened) {
+      // Drop the delegated credentials THIS turn staged. The turn is over, so
+      // they must not outlive it — but passing the lease means we do not wipe an
+      // entry a later turn staged under the same session key. Idempotent + safe
+      // on a non-delegated turn (lease 0 matches nothing).
+      deps.delegatedCreds.clear(sessionKey, credentialLease);
+      // Drain this turn's per-model-call rollup (prompt-cache split + loop
+      // iteration count). Null when the telemetry plugin is not loaded, in which
+      // case token_usage keeps exactly its previous shape.
+      cacheTotals = deps.usage.drain(sessionKey);
+      if (cacheTotals) logUsageTotals(sessionKey, cacheTotals);
+      // Close out this turn's tool-call tracking. The rows are already persisted;
+      // this just drops the turn's context and logs the tally. Any tool call whose
+      // `after_tool_call` never arrived stays `status='called'` — a call we saw
+      // start but not finish.
+      const toolTotals = deps.toolCalls.end(sessionKey);
+      if (toolTotals.count > 0) {
+        log.info("turn tool calls", {
+          session_key: sessionKey,
+          tool_calls: toolTotals.count,
+          tool_errors: toolTotals.errorCount,
+        });
+      }
     }
+    // Wait out any in-flight streaming save so this final write lands last.
+    await rowWriter.settle();
     await db.updateMessage(assistantMessageId, {
       content: questionPayload ? JSON.stringify(questionPayload) : buffer,
       status: finalStatus,
@@ -512,10 +601,14 @@ export async function handleSendMessage(
       tokenUsage: buildTokenUsage(usageRef.value, env, cacheTotals),
     });
     cancels.release(assistantMessageId);
-    try {
-      res.end();
-    } catch {
-      /* already closed */
+    releaseLock();
+    await live.done(finalStatus);
+    if (!respondAsync) {
+      try {
+        res.end();
+      } catch {
+        /* already closed */
+      }
     }
     // Checkpoint agent-owned memory (playbook.md + notes/) to Supabase now that
     // the turn is complete and any tool-driven file writes have settled. The
@@ -526,6 +619,16 @@ export async function handleSendMessage(
 }
 
 // ── helpers ─────────────────────────────────────────────
+
+function groupAttachments(rows: AttachmentRow[]): Map<string, AttachmentRow[]> {
+  const byMessage = new Map<string, AttachmentRow[]>();
+  for (const a of rows) {
+    const arr = byMessage.get(a.message_id) ?? [];
+    arr.push(a);
+    byMessage.set(a.message_id, arr);
+  }
+  return byMessage;
+}
 
 /**
  * Build a one-shot platform MCP client from env and fetch the delegated
