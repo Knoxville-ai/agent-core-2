@@ -6,8 +6,14 @@ const Schema = z.object({
   AGENT_ORG: z.string().min(1),
   AGENT_ROLE: z.string().min(1).default("generic"),
 
-  // Shim ↔ console auth
-  SUPABASE_JWT_SECRET: z.string().min(1),
+  // Shim ↔ console auth. Legacy: the shared HS256 secret the console used to
+  // sign user and A2A bearers. Optional now — platform tokens are ES256 and
+  // verified against the console's public keys (PLATFORM_JWKS_URL), so the
+  // container holds nothing that can mint a token. Leave unset on new agents.
+  SUPABASE_JWT_SECRET: z.string().optional().default(""),
+  // Console JWKS for platform tokens. Defaults to the PLATFORM_MCP_URL origin
+  // + /api/agent-auth/jwks when unset (see shim/auth.ts platformJwksUrl).
+  PLATFORM_JWKS_URL: z.string().url().optional(),
   MESSAGING_ENABLED: z
     .string()
     .optional()

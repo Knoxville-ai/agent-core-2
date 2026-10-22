@@ -685,9 +685,9 @@ export async function authorizeConversation(
       throw new HttpError(403, "cross-org call forbidden");
     }
   } else if (conversation.user_id !== null) {
-    // A non-agent token that verified against SUPABASE_JWT_SECRET can only have
-    // been minted by the console, which authorizes the caller before it opens
-    // the conversation. Anonymous conversations (user_id null — public
+    // A non-agent token is either a console-minted platform token or a Supabase
+    // session token; the console authorizes the caller before it opens the
+    // conversation. Anonymous conversations (user_id null — public
     // drive-thru chats and agent-to-agent delegation, where the conversation_id
     // is the capability) are addressable by anyone the console let through.
     // Only user-owned conversations require the caller to be an org member.
