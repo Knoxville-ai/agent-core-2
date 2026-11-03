@@ -31,7 +31,7 @@ ENV NODE_ENV=production \
 #
 # git gives the agent a real checkout through the exec tool: clone, branch,
 # commit, push. HTTPS only (no openssh-client); auth comes from the
-# git-credential-env helper installed below, which reads GITHUB_TOKEN.
+# git-credential-env helper installed below, which reads KNOX_GITHUB_TOKEN.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl tini bsdextrautils gosu git \
  && rm -rf /var/lib/apt/lists/* \
@@ -41,9 +41,11 @@ RUN apt-get update \
  && chown -R agent:agent /app /home/agent
 
 # GitHub auth for git over HTTPS: a credential helper that returns the
-# GITHUB_TOKEN (or GH_TOKEN) env var for github.com and nothing for any other
-# host. Bind a GitHub token to the agent as an org credential named
-# GITHUB_TOKEN; with none set, git just fails auth as it would anyway.
+# KNOX_GITHUB_TOKEN env var for github.com and nothing for any other host.
+# Bind a GitHub token to the agent as an org credential with env key
+# KNOX_GITHUB_TOKEN; with none set, git just fails auth as it would anyway.
+# Not GITHUB_TOKEN / GH_TOKEN: openclaw strips those from every exec
+# command's env, so the helper would never see them (see the helper's header).
 # Commit identity is not set here: the agent sets user.name/user.email in its
 # checkout, or the GIT_AUTHOR_* / GIT_COMMITTER_* env vars supply it.
 COPY docker/git-credential-env /usr/local/bin/git-credential-env
