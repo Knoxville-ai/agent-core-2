@@ -28,13 +28,28 @@ ENV NODE_ENV=production \
 # gosu lets the entrypoint start as root (to chown the Railway volume that
 # mounts root-owned + empty over OPENCLAW_STATE_DIR) and then drop to the
 # agent uid before exec'ing the Node process. See entrypoint.sh.
+#
+# git gives the agent a real checkout through the exec tool: clone, branch,
+# commit, push. HTTPS only (no openssh-client); auth comes from the
+# git-credential-env helper installed below, which reads GITHUB_TOKEN.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl tini bsdextrautils gosu \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini bsdextrautils gosu git \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1001 agent \
  && useradd  --system --uid 1001 --gid 1001 --create-home --home-dir /home/agent --shell /bin/bash agent \
  && mkdir -p /app /home/agent/.openclaw/workspace/skills \
  && chown -R agent:agent /app /home/agent
+
+# GitHub auth for git over HTTPS: a credential helper that returns the
+# GITHUB_TOKEN (or GH_TOKEN) env var for github.com and nothing for any other
+# host. Bind a GitHub token to the agent as an org credential named
+# GITHUB_TOKEN; with none set, git just fails auth as it would anyway.
+# Commit identity is not set here: the agent sets user.name/user.email in its
+# checkout, or the GIT_AUTHOR_* / GIT_COMMITTER_* env vars supply it.
+COPY docker/git-credential-env /usr/local/bin/git-credential-env
+RUN chmod 755 /usr/local/bin/git-credential-env \
+ && git config --system credential.https://github.com.helper env \
+ && git config --system init.defaultBranch main
 
 WORKDIR /app
 
