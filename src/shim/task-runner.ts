@@ -12,6 +12,7 @@ import {
   fetchDelegatedCredentialsForTurn,
   historyToOpenaiMessages,
   iterOpenaiDeltas,
+  modelFailureText,
   type OpenaiUsage,
   type StreamTermination,
 } from "./routes-messages.js";
@@ -652,6 +653,18 @@ export class TaskRunner {
       if (!task.abort.signal.aborted) {
         error = err instanceof Error ? err.message : String(err);
       }
+    }
+    // A provider failure arrives as an error frame on an otherwise clean stream
+    // (see StreamTermination.error); without this the task "succeeded" with
+    // an empty result.
+    const streamError = terminalRef.value.error;
+    if (!error && streamError && !task.abort.signal.aborted) {
+      error = modelFailureText(streamError, env);
+      log.warn("task model call failed", {
+        task_id: spec.taskId,
+        error_type: streamError.type,
+        error: streamError.message.slice(0, 500),
+      });
     }
 
     // Drain this task's per-model-call rollup (prompt-cache split + loop

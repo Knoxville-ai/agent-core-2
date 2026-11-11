@@ -322,6 +322,13 @@ export async function handleSendMessage(
   // (not the raw fenced text), matching the console's structured-message convention.
   let questionPayload: Mcq | null = null;
   let finalStatus: "complete" | "interrupted" | "error" = "complete";
+  // Why the turn produced no reply, in words for the person reading the chat.
+  // Saved as the row's content when nothing visible was written, so a failed
+  // turn reads as an explained error instead of a blank "complete" bubble.
+  let failure: string | null = null;
+  const terminalRef: { value: StreamTermination } = {
+    value: { finishReason: null, sawDone: false, error: null },
+  };
   // Filled in from the upstream `usage` frame when openclaw reports it
   // (requested via stream_options below). Persisted onto the assistant row
   // so the console's metrics dashboard can chart token in/out over time.
@@ -505,6 +512,12 @@ export async function handleSendMessage(
     if (!upstream.ok || !upstream.body) {
       const errBody = await upstream.text().catch(() => "");
       finalStatus = "error";
+      failure = gatewayFailureText(upstream.status, errBody, env);
+      log.warn("model gateway rejected the turn", {
+        conversation_id: conversationId,
+        status: upstream.status,
+        body: errBody.slice(0, 500),
+      });
       sseSend({
         type: "error",
         error: `gateway ${upstream.status}: ${errBody.slice(0, 500)}`,
@@ -516,7 +529,7 @@ export async function handleSendMessage(
     // token stream, so the raw JSON never flashes in the chat while the model is
     // writing it. We still accumulate the full text into `buffer` for parsing.
     const sentinel = new SentinelFilter();
-    for await (const token of iterOpenaiDeltas(upstream.body, usageRef)) {
+    for await (const token of iterOpenaiDeltas(upstream.body, usageRef, terminalRef)) {
       if (abortController.signal.aborted) {
         finalStatus = "interrupted";
         sseSend({
@@ -548,6 +561,30 @@ export async function handleSendMessage(
       }
     }
 
+    // A model call that failed, or one that finished without a word, is not a
+    // reply. Both used to save as status "complete" with empty content, which
+    // the chat shows as a blank bubble with no hint of what went wrong.
+    const streamError = terminalRef.value.error;
+    if (streamError || (!questionPayload && !visible.trim())) {
+      finalStatus = "error";
+      failure = streamError
+        ? modelFailureText(streamError, env)
+        : EMPTY_REPLY_TEXT;
+      log.warn(streamError ? "model call failed" : "model returned an empty reply", {
+        conversation_id: conversationId,
+        provider: env.LLM_PROVIDER,
+        model: env.LLM_MODEL,
+        error_type: streamError?.type ?? null,
+        error_code: streamError?.code ?? null,
+        error: streamError?.message.slice(0, 500) ?? null,
+        finish_reason: terminalRef.value.finishReason,
+        saw_done: terminalRef.value.sawDone,
+        partial_chars: visible.length,
+      });
+      sseSend({ type: "error", error: failure });
+      return;
+    }
+
     sseSend({
       type: "done",
       status: "complete",
@@ -564,6 +601,7 @@ export async function handleSendMessage(
     } else {
       log.error("streaming failed", { err: String(err) });
       finalStatus = "error";
+      failure = INTERNAL_ERROR_TEXT;
       sseSend({ type: "error", error: "internal error" });
     }
   } finally {
@@ -595,7 +633,11 @@ export async function handleSendMessage(
     // Wait out any in-flight streaming save so this final write lands last.
     await rowWriter.settle();
     await db.updateMessage(assistantMessageId, {
-      content: questionPayload ? JSON.stringify(questionPayload) : buffer,
+      content: questionPayload
+        ? JSON.stringify(questionPayload)
+        : failure && !visible.trim()
+          ? failure
+          : buffer,
       status: finalStatus,
       completedAt: new Date().toISOString(),
       tokenUsage: buildTokenUsage(usageRef.value, env, cacheTotals),
@@ -619,6 +661,55 @@ export async function handleSendMessage(
 }
 
 // ── helpers ─────────────────────────────────────────────
+
+const EMPTY_REPLY_TEXT =
+  "The agent didn't reply: the model finished without writing anything. Try sending the message again.";
+
+const INTERNAL_ERROR_TEXT =
+  "The agent hit an internal error before it could reply. Try sending the message again.";
+
+function modelLabel(env: AgentEnv): string {
+  return [env.LLM_PROVIDER, env.LLM_MODEL].filter(Boolean).join(" · ") || "the model";
+}
+
+/**
+ * A model-call failure from the stream, as a sentence for the chat. The
+ * provider's own message is kept (trimmed) because it is usually the useful
+ * part — "Incorrect API key provided", "model not found" — and providers mask
+ * keys in it.
+ */
+export function modelFailureText(error: StreamError, env: AgentEnv): string {
+  const detail = error.message.trim().slice(0, 300);
+  const why = detail ? ` (${detail})` : "";
+  const model = modelLabel(env);
+  switch (error.type) {
+    case "authentication_error":
+    case "permission_error":
+      return `The agent couldn't reply: ${model} rejected its API key${why}. Check the key on the agent's Model tab.`;
+    case "insufficient_quota":
+      return `The agent couldn't reply: the ${model} account is out of credit or quota${why}.`;
+    case "rate_limit_error":
+      return `The agent couldn't reply: ${model} is rate-limiting requests${why}. Try again in a moment.`;
+    case "invalid_request_error":
+      return `The agent couldn't reply: ${model} rejected the request${why}. Check the model on the agent's Model tab.`;
+    default:
+      return `The agent couldn't reply: the call to ${model} failed${why}. Try again in a moment.`;
+  }
+}
+
+function gatewayFailureText(status: number, body: string, env: AgentEnv): string {
+  let detail = body.trim();
+  try {
+    const parsed = JSON.parse(detail) as { error?: { message?: unknown } | string };
+    const e = parsed?.error;
+    if (typeof e === "string") detail = e;
+    else if (e && typeof e.message === "string") detail = e.message;
+  } catch {
+    // Not JSON — keep the text.
+  }
+  detail = detail.slice(0, 300);
+  return `The agent couldn't reply: its model gateway answered ${status}${detail ? ` (${detail})` : ""} for ${modelLabel(env)}.`;
+}
 
 function groupAttachments(rows: AttachmentRow[]): Map<string, AttachmentRow[]> {
   const byMessage = new Map<string, AttachmentRow[]>();
@@ -806,6 +897,10 @@ export async function historyToOpenaiMessages(
   let inlinedBytes = 0;
   for (const r of rows) {
     if (r.system_generated) continue;
+    // A failed turn's row holds our explanation of the failure (or a fragment
+    // cut short by it), not something the model said. Keep it out of the
+    // prompt so the model doesn't read the error back as its own words.
+    if (r.role === "assistant" && r.status === "error") continue;
     if (r.role !== "user" && r.role !== "assistant" && r.role !== "system" && r.role !== "tool") {
       continue;
     }
@@ -1147,6 +1242,20 @@ export interface StreamTermination {
   finishReason: string | null;
   /** True once the `[DONE]` sentinel arrived — a clean OpenAI-style stream end. */
   sawDone: boolean;
+  /**
+   * The model call's failure, when the stream carried one. openclaw reports a
+   * provider failure it recognizes (bad or missing key, no quota, unknown
+   * model, rate limit, provider outage) mid-stream as a single
+   * `data: {"error": {...}}` frame followed by `[DONE]` — no text, no usage.
+   */
+  error?: StreamError | null;
+}
+
+/** The `error` object of an OpenAI-style error frame. */
+export interface StreamError {
+  message: string;
+  type: string | null;
+  code: string | null;
 }
 
 export async function* iterOpenaiDeltas(
@@ -1179,6 +1288,19 @@ export async function* iterOpenaiDeltas(
         try {
           frame = JSON.parse(body);
         } catch {
+          continue;
+        }
+        // A model-call failure (see StreamTermination.error). Before this was
+        // read, the frame was dropped and the turn saved as an empty reply.
+        if (frame.error && typeof frame.error === "object") {
+          const e = frame.error as Record<string, unknown>;
+          if (terminalRef) {
+            terminalRef.value.error = {
+              message: typeof e.message === "string" ? e.message : "",
+              type: typeof e.type === "string" ? e.type : null,
+              code: typeof e.code === "string" ? e.code : null,
+            };
+          }
           continue;
         }
         // Usage frames arrive on their own chunk (often with empty choices)
