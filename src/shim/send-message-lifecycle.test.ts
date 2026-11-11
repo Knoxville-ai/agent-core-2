@@ -44,6 +44,9 @@ function say(i: number, text: string): void {
     enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`),
   );
 }
+function fail(i: number, error: Record<string, unknown>): void {
+  gateway.streams[i]!.enqueue(enc.encode(`data: ${JSON.stringify({ error })}\n\n`));
+}
 function finish(i: number): void {
   gateway.streams[i]!.enqueue(enc.encode("data: [DONE]\n\n"));
   gateway.streams[i]!.close();
@@ -311,5 +314,70 @@ describe("handleSendMessage turn lifecycle", () => {
     expect(gateway.calls).toHaveLength(1);
     expect(rows.find((row) => row.id === "m4")!.status).toBe("interrupted");
     expect(r2.frames().at(-1)).toMatchObject({ type: "done", status: "interrupted" });
+  });
+
+  it("saves a provider failure as an explained error, not a blank reply", async () => {
+    const { db, rows } = fakeDb();
+    const r = fakeRes();
+    const turn = handleSendMessage("c1", person, fakeReq({ content: "hi" }), r.res, deps(db));
+    await until(() => gateway.streams.length === 1, "gateway call");
+    // What openclaw sends when the provider rejects the key: one error frame,
+    // then [DONE] — no text, no usage.
+    fail(0, { message: "Incorrect API key provided: sk-ab***yz.", type: "authentication_error" });
+    finish(0);
+    await turn;
+
+    const reply = rows.find((row) => row.role === "assistant")!;
+    expect(reply.status).toBe("error");
+    expect(reply.content).toContain("rejected its API key");
+    expect(reply.content).toContain("Incorrect API key provided");
+    expect(reply.content).toContain("openrouter · qwen/qwen3.7-plus");
+    expect(r.frames().at(-1)).toMatchObject({ type: "error" });
+    expect(published.at(-1)).toMatchObject({ type: "done", status: "error" });
+  });
+
+  it("marks a turn that ends without any text as an error", async () => {
+    const { db, rows } = fakeDb();
+    const turn = handleSendMessage("c1", person, fakeReq({ content: "hi" }), fakeRes().res, deps(db));
+    await until(() => gateway.streams.length === 1, "gateway call");
+    finish(0);
+    await turn;
+
+    const reply = rows.find((row) => row.role === "assistant")!;
+    expect(reply.status).toBe("error");
+    expect(reply.content).toContain("finished without writing anything");
+  });
+
+  it("keeps partial text when the stream fails after it started replying", async () => {
+    const { db, rows } = fakeDb();
+    const turn = handleSendMessage("c1", person, fakeReq({ content: "hi" }), fakeRes().res, deps(db));
+    await until(() => gateway.streams.length === 1, "gateway call");
+    say(0, "Half an answer");
+    fail(0, { message: "upstream provider overloaded", type: "api_error" });
+    finish(0);
+    await turn;
+
+    expect(rows.find((row) => row.role === "assistant")).toMatchObject({
+      status: "error",
+      content: "Half an answer",
+    });
+  });
+
+  it("leaves a failed turn's explanation out of the next prompt", async () => {
+    const { db } = fakeDb();
+    const first = handleSendMessage("c1", person, fakeReq({ content: "one" }), fakeRes().res, deps(db));
+    await until(() => gateway.streams.length === 1, "first gateway call");
+    fail(0, { message: "Incorrect API key provided", type: "authentication_error" });
+    finish(0);
+    await first;
+
+    const second = handleSendMessage("c1", person, fakeReq({ content: "two" }), fakeRes().res, deps(db));
+    await until(() => gateway.streams.length === 2, "second gateway call");
+    const prompt = gateway.calls[1]!.messages.map((m) => [m.role, m.content]);
+    expect(prompt.filter(([role]) => role === "assistant")).toEqual([]);
+    expect(prompt.at(-1)).toEqual(["user", "two"]);
+    say(1, "Back now.");
+    finish(1);
+    await second;
   });
 });

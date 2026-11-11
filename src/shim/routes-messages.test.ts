@@ -435,3 +435,31 @@ describe("buildTokenUsage prompt-cache decomposition", () => {
     expect(built).not.toHaveProperty("cost_source");
   });
 });
+
+describe("iterOpenaiDeltas error frames", () => {
+  it("records an error frame on the termination side channel", async () => {
+    const { iterOpenaiDeltas } = await import("./routes-messages.js");
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(
+          enc.encode(
+            `data: ${JSON.stringify({ error: { message: "model not found", type: "invalid_request_error", code: "model_not_found" } })}\n\n`,
+          ),
+        );
+        c.enqueue(enc.encode("data: [DONE]\n\n"));
+        c.close();
+      },
+    });
+    const terminalRef = { value: { finishReason: null, sawDone: false } as import("./routes-messages.js").StreamTermination };
+    const tokens: string[] = [];
+    for await (const t of iterOpenaiDeltas(body, undefined, terminalRef)) tokens.push(t);
+    expect(tokens).toEqual([]);
+    expect(terminalRef.value.sawDone).toBe(true);
+    expect(terminalRef.value.error).toEqual({
+      message: "model not found",
+      type: "invalid_request_error",
+      code: "model_not_found",
+    });
+  });
+});
