@@ -1,3 +1,6 @@
+import { createServer, request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -5,8 +8,10 @@ import {
   costTrackingEnabled,
   prepareChatBody,
   resolveUpstreamBase,
+  startCostProxy,
   upstreamTarget,
 } from "./cost-proxy.js";
+import type { UsageAccumulator } from "./usage-telemetry.js";
 import type { AgentEnv } from "../env.js";
 
 const env = (over: Partial<AgentEnv> = {}): AgentEnv =>
@@ -145,9 +150,132 @@ describe("prepareChatBody", () => {
 
   it("forwards a non-JSON-object body UNCHANGED with a null session key", () => {
     for (const raw of ["not json", "[1,2,3]", '"a string"']) {
-      const { body, sessionCacheKey } = prepareChatBody(Buffer.from(raw));
+      const { body, sessionCacheKey, outputLowered } = prepareChatBody(Buffer.from(raw), 32_000);
       expect(body.toString("utf8")).toBe(raw); // untouched
       expect(sessionCacheKey).toBeNull();
+      expect(outputLowered).toBeNull();
+    }
+  });
+
+  describe("output limit", () => {
+    const send = (obj: Record<string, unknown>, cap?: number) => {
+      const { body, outputLowered } = prepareChatBody(Buffer.from(JSON.stringify(obj)), cap);
+      return { parsed: JSON.parse(body.toString("utf8")) as Record<string, unknown>, outputLowered };
+    };
+
+    it("lowers a max_completion_tokens above the cap and reports it", () => {
+      // The call that failed: GLM's listed 943,718 left ~105k of a 1M window.
+      const { parsed, outputLowered } = send(
+        { model: "z-ai/glm-5.2", messages: [], max_completion_tokens: 943_718 },
+        32_000,
+      );
+      expect(parsed.max_completion_tokens).toBe(32_000);
+      expect(outputLowered).toEqual({ model: "z-ai/glm-5.2", from: 943_718, to: 32_000 });
+    });
+
+    it("lowers max_tokens the same way", () => {
+      const { parsed, outputLowered } = send({ model: "m", messages: [], max_tokens: 200_000 }, 32_000);
+      expect(parsed.max_tokens).toBe(32_000);
+      expect(outputLowered).toEqual({ model: "m", from: 200_000, to: 32_000 });
+    });
+
+    it("leaves a limit at or below the cap alone — it never raises one", () => {
+      for (const limit of [8_192, 32_000]) {
+        const { parsed, outputLowered } = send({ messages: [], max_tokens: limit }, 32_000);
+        expect(parsed.max_tokens).toBe(limit);
+        expect(outputLowered).toBeNull();
+      }
+    });
+
+    it("never adds a limit to a request that has none", () => {
+      const { parsed, outputLowered } = send({ messages: [] }, 32_000);
+      expect(parsed).not.toHaveProperty("max_tokens");
+      expect(parsed).not.toHaveProperty("max_completion_tokens");
+      expect(outputLowered).toBeNull();
+    });
+
+    it("leaves the limit alone without a cap, or when it isn't a number", () => {
+      expect(send({ messages: [], max_tokens: 943_718 }).parsed.max_tokens).toBe(943_718);
+      expect(send({ messages: [], max_tokens: "943718" }, 32_000).parsed.max_tokens).toBe("943718");
+    });
+
+    it("changes nothing else about the request", () => {
+      const request = {
+        model: "z-ai/glm-5.2",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        prompt_cache_key: "webchat:conv-1",
+        reasoning: { effort: "medium" },
+        max_completion_tokens: 943_718,
+      };
+      expect(send(request, 32_000).parsed).toEqual({
+        ...request,
+        max_completion_tokens: 32_000,
+        usage: { include: true },
+      });
+    });
+  });
+});
+
+describe("startCostProxy", () => {
+  const freePort = async (): Promise<number> => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const { port } = probe.address() as AddressInfo;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    return port;
+  };
+
+  /** POST through the proxy with node:http (no proxy env, no fetch quirks). */
+  const post = (url: string, body: string) =>
+    new Promise<{ status: number; text: string }>((resolve, reject) => {
+      const req = httpRequest(url, { method: "POST", headers: { "content-type": "application/json" } }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+
+  it("forwards a chat call with its output limit lowered to OPENROUTER_MAX_OUTPUT_TOKENS", async () => {
+    const received: Array<Record<string, unknown>> = [];
+    const upstream = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "gen-1", choices: [] }));
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    const usage = { enableCostCorrelation() {}, recordCost() {} } as unknown as UsageAccumulator;
+    const handle = await startCostProxy(
+      env({
+        OPENROUTER_COST_PROXY_PORT: await freePort(),
+        OPENROUTER_UPSTREAM_URL: `http://127.0.0.1:${upstreamPort}/api/v1`,
+        OPENROUTER_MAX_OUTPUT_TOKENS: 32_000,
+      }),
+      usage,
+    );
+    try {
+      expect(handle).not.toBeNull();
+      const res = await post(
+        `${handle!.baseUrl}/chat/completions`,
+        JSON.stringify({ model: "z-ai/glm-5.2", messages: [], max_completion_tokens: 943_718 }),
+      );
+      expect(res.status).toBe(200);
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({
+        model: "z-ai/glm-5.2",
+        max_completion_tokens: 32_000,
+        usage: { include: true },
+      });
+    } finally {
+      await handle?.close();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
     }
   });
 });

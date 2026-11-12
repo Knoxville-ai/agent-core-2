@@ -36,6 +36,10 @@ vi.mock("../provision/supabase-storage.js", () => ({
   },
 }));
 vi.mock("../provision/pinnable-models.js", () => ({ fetchPinnableModelIds: async () => [] }));
+vi.mock("../provision/openrouter-output-caps.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../provision/openrouter-output-caps.js")>()),
+  fetchOpenRouterCatalog: async () => null,
+}));
 vi.mock("../provision/agent-memory.js", () => ({
   MemoryCheckpoint: { fromEnv: () => ({ restore: async () => {} }) },
 }));

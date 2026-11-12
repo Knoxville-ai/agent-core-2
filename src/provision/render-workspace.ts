@@ -217,6 +217,10 @@ export interface RenderWorkspaceInput {
    *  prompt-cache-key compat flag so their cost is tracked (see
    *  pinnable-models.ts). Defaults to none. */
   extraModelIds?: readonly string[];
+  /** Output-token caps for overlaid OpenRouter models whose listed max output
+   *  would crowd the prompt out of the context window, by model id (see
+   *  openrouter-output-caps.ts). Defaults to none. */
+  outputCaps?: Readonly<Record<string, number>>;
 }
 
 export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void> {
@@ -242,9 +246,9 @@ export async function renderWorkspace(input: RenderWorkspaceInput): Promise<void
   // openclaw.json is also written earlier in bootstrap (before any skill
   // install) so the `openclaw skills install` CLI validates against a current,
   // valid config. Re-writing it here keeps renderWorkspace self-contained and
-  // idempotent — same env + extraModelIds in, same file out. bootstrap passes
-  // the SAME extraModelIds to both writes so the bytes stay identical.
-  await writeOpenclawConfig(env, input.extraModelIds ?? []);
+  // idempotent — same env + extraModelIds + outputCaps in, same file out.
+  // bootstrap passes the SAME values to both writes so the bytes stay identical.
+  await writeOpenclawConfig(env, input.extraModelIds ?? [], input.outputCaps ?? {});
 
   log.info("workspace rendered", {
     stateDir,
@@ -337,17 +341,18 @@ export function parseExtraMcpServers(
  * the write, so the FINAL boot write (after the boot reconcile) carries exactly
  * the revs a live refresh would have written — the gateway starts with them and
  * no later write has to touch them. buildOpenclawConfig itself stays a pure
- * function of (env, extraModelIds, entries).
+ * function of (env, extraModelIds, entries, outputCaps).
  */
 export async function writeOpenclawConfig(
   env: AgentEnv,
   extraModelIds: readonly string[] = [],
+  outputCaps: Readonly<Record<string, number>> = {},
 ): Promise<void> {
   const stateDir = env.OPENCLAW_STATE_DIR;
   const ws = join(stateDir, "workspace");
   await mkdir(ws, { recursive: true });
   const skillEntries = await readLockSkillEntries(stateDir);
-  const config = buildOpenclawConfig(env, ws, extraModelIds, skillEntries);
+  const config = buildOpenclawConfig(env, ws, extraModelIds, skillEntries, outputCaps);
   await writeFile(
     join(stateDir, "openclaw.json"),
     JSON.stringify(config, null, 2),
@@ -463,12 +468,15 @@ export const PLATFORM_DENIED_TOOLS: readonly string[] = ["cron"];
 
 /** Exported for unit tests — builds the openclaw.json object from env + the
  *  rendered workspace path. `skillEntries` is the SkillSync lock's
- *  `skills.entries` block (see ../skills/lock.ts `lockSkillEntries`). */
+ *  `skills.entries` block (see ../skills/lock.ts `lockSkillEntries`).
+ *  `outputCaps` maps an OpenRouter model id to the max output it is lowered to
+ *  (see ./openrouter-output-caps.ts). */
 export function buildOpenclawConfig(
   env: AgentEnv,
   workspace: string,
   extraModelIds: readonly string[] = [],
   skillEntries: SkillEntries = {},
+  outputCaps: Readonly<Record<string, number>> = {},
 ): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
   if (env.PLATFORM_MCP_URL) {
@@ -680,7 +688,9 @@ export function buildOpenclawConfig(
     //     LLM_BASE_URL
     //   - in-container Ollama → { apiKey: "ollama", baseUrl: loopback } with
     //     no LLM_API_KEY set (see buildProviderConfig)
-    const providerConfig = buildProviderConfig(env, extraModelIds);
+    //   - OpenRouter → also a models[] overlay (cost-tracking compat flag and
+    //     output caps; see buildProviderConfig)
+    const providerConfig = buildProviderConfig(env, extraModelIds, outputCaps);
     if (providerConfig) {
       config.models = {
         providers: {
@@ -811,6 +821,7 @@ export const LOCAL_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
 function buildProviderConfig(
   env: AgentEnv,
   extraModelIds: readonly string[] = [],
+  outputCaps: Readonly<Record<string, number>> = {},
 ): Record<string, unknown> | null {
   const provider = env.LLM_PROVIDER.trim().toLowerCase();
 
@@ -860,15 +871,31 @@ function buildProviderConfig(
   // no session id and the proxy cannot attribute its cost — the turn records
   // 0 tokens / $0 (the symptom this fixes). Listing every pinnable model keeps
   // per-routine model selection cost-tracked without a dedicated agent per model.
-  if (costTrackingEnabled(env) && env.LLM_MODEL) {
+  //
+  // The same entries carry output caps (`outputCaps`, by model id; see
+  // openrouter-output-caps.ts). openclaw sends a model's max output as each
+  // call's max_tokens, and some OpenRouter listings reserve nearly the whole
+  // context window for it, leaving too little room for the prompt. An entry's
+  // `maxTokens` REPLACES the catalog value (configured ?? provider ?? discovered
+  // in openclaw 2026.5.20), so a cap is only ever given for a model whose
+  // listing exceeds it. Caps don't depend on the cost proxy: with cost tracking
+  // off, a capped model still gets an entry, just without the compat flag.
+  if (provider === "openrouter" && env.LLM_MODEL) {
+    const tracked = costTrackingEnabled(env);
     const seen = new Set<string>();
     const overlay: Array<Record<string, unknown>> = [];
     for (const id of [env.LLM_MODEL, ...extraModelIds]) {
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      overlay.push({ id, name: id, compat: { supportsPromptCacheKey: true } });
+      const cap = Object.hasOwn(outputCaps, id) ? outputCaps[id] : undefined;
+      const capped = typeof cap === "number" && cap > 0;
+      if (!tracked && !capped) continue;
+      const entry: Record<string, unknown> = { id, name: id };
+      if (tracked) entry.compat = { supportsPromptCacheKey: true };
+      if (capped) entry.maxTokens = cap;
+      overlay.push(entry);
     }
-    cfg.models = overlay;
+    if (overlay.length > 0) cfg.models = overlay;
   }
   return Object.keys(cfg).length > 0 ? cfg : null;
 }
