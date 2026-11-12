@@ -40,17 +40,19 @@ RUN apt-get update \
  && mkdir -p /app /home/agent/.openclaw/workspace/skills \
  && chown -R agent:agent /app /home/agent
 
-# GitHub auth for git over HTTPS: a credential helper that returns the
-# KNOX_GITHUB_TOKEN env var for github.com and nothing for any other host.
-# Bind a GitHub token to the agent as an org credential with env key
-# KNOX_GITHUB_TOKEN; with none set, git just fails auth as it would anyway.
-# Not GITHUB_TOKEN / GH_TOKEN: openclaw strips those from every exec
-# command's env, so the helper would never see them (see the helper's header).
+# GitHub auth for git over HTTPS: a credential helper for github.com only
+# (nothing for any other host). It returns KNOX_GITHUB_TOKEN when that org
+# credential is bound to the agent; otherwise it asks the console's GitHub
+# connector for a one-hour token for the requested repository, if the agent
+# was granted it (see the helper's header). useHttpPath makes git send that
+# repository's path. Not GITHUB_TOKEN / GH_TOKEN: openclaw strips those from
+# every exec command's env, so the helper would never see them.
 # Commit identity is not set here: the agent sets user.name/user.email in its
 # checkout, or the GIT_AUTHOR_* / GIT_COMMITTER_* env vars supply it.
 COPY docker/git-credential-env /usr/local/bin/git-credential-env
 RUN chmod 755 /usr/local/bin/git-credential-env \
  && git config --system credential.https://github.com.helper env \
+ && git config --system credential.https://github.com.useHttpPath true \
  && git config --system init.defaultBranch main
 
 WORKDIR /app
