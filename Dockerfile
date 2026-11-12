@@ -245,7 +245,12 @@ ENV U2NET_HOME=/home/agent/.openclaw/u2net
 # baked one (the system libs installed above stay valid across Chromium
 # revisions, so that fallback never needs root).
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+# libatomic1 first: Playwright's bundled Node driver (1.65+) links against
+# libatomic.so.1, which bookworm-slim doesn't ship, so `playwright install-deps`
+# exits 127 before it can install anything. Also needed at runtime when a
+# skill installs a newer Playwright into the venv.
 RUN apt-get update \
+ && apt-get install -y --no-install-recommends libatomic1 \
  && /opt/skills-venv/bin/pip install --no-cache-dir 'playwright>=1.40' \
  && /opt/skills-venv/bin/python -m playwright install-deps chromium \
  && /opt/skills-venv/bin/python -m playwright install chromium \
