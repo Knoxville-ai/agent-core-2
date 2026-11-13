@@ -218,6 +218,91 @@ describe("buildOpenclawConfig model provider block", () => {
     expect(providers(config)).toEqual({ openrouter: { apiKey: "sk-or-test" } });
   });
 
+  it("OpenRouter + output caps → a capped model's entry carries maxTokens; the rest are unchanged", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "z-ai/glm-5.2",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: true,
+        OPENROUTER_COST_PROXY_PORT: 18790,
+      }),
+      "/ws",
+      ["openai/gpt-5.6-luna"],
+      {},
+      { "z-ai/glm-5.2": 32000 },
+    );
+    // openclaw would otherwise send GLM's listed 943,718 as max_tokens; the entry's
+    // maxTokens replaces it. The routine model has no cap, so its entry is as before.
+    expect(providers(config)).toEqual({
+      openrouter: {
+        apiKey: "sk-or-test",
+        baseUrl: "http://127.0.0.1:18790/api/v1",
+        models: [
+          {
+            id: "z-ai/glm-5.2",
+            name: "z-ai/glm-5.2",
+            compat: { supportsPromptCacheKey: true },
+            maxTokens: 32000,
+          },
+          { id: "openai/gpt-5.6-luna", name: "openai/gpt-5.6-luna", compat: { supportsPromptCacheKey: true } },
+        ],
+      },
+    });
+  });
+
+  it("OpenRouter cost tracking OFF + output caps → maxTokens-only entries for the capped models", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "z-ai/glm-5.2",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: false,
+      }),
+      "/ws",
+      ["openai/gpt-5.6-luna", "z-ai/glm-5.3"],
+      {},
+      { "z-ai/glm-5.2": 32000, "z-ai/glm-5.3": 32000 },
+    );
+    // The cap protects the call with or without the proxy; the compat flag and
+    // the proxy baseUrl stay off, and an uncapped model gets no entry at all.
+    expect(providers(config)).toEqual({
+      openrouter: {
+        apiKey: "sk-or-test",
+        models: [
+          { id: "z-ai/glm-5.2", name: "z-ai/glm-5.2", maxTokens: 32000 },
+          { id: "z-ai/glm-5.3", name: "z-ai/glm-5.3", maxTokens: 32000 },
+        ],
+      },
+    });
+  });
+
+  it("output caps only apply to models the overlay names, and only on OpenRouter", () => {
+    const openrouter = buildOpenclawConfig(
+      makeEnv({
+        LLM_PROVIDER: "openrouter",
+        LLM_MODEL: "z-ai/glm-5.2",
+        LLM_API_KEY: "sk-or-test",
+        OPENROUTER_COST_TRACKING: false,
+      }),
+      "/ws",
+      [],
+      {},
+      // A cap for a model this agent doesn't run, or a nonsense one, changes nothing.
+      { "some/other-model": 32000, "z-ai/glm-5.2": 0 },
+    );
+    expect(providers(openrouter)).toEqual({ openrouter: { apiKey: "sk-or-test" } });
+
+    const anthropic = buildOpenclawConfig(
+      makeEnv({ LLM_PROVIDER: "anthropic", LLM_MODEL: "claude-opus-4-8", LLM_API_KEY: "sk-ant" }),
+      "/ws",
+      [],
+      {},
+      { "claude-opus-4-8": 32000 },
+    );
+    expect(providers(anthropic)).toEqual({ anthropic: { apiKey: "sk-ant" } });
+  });
+
   it("hosted model with no key and no base URL → no providers block", () => {
     const config = buildOpenclawConfig(
       makeEnv({ LLM_PROVIDER: "anthropic", LLM_API_KEY: "" }),
@@ -389,6 +474,31 @@ describe("writeOpenclawConfig", () => {
       // mis-cased).
       expect(agents.defaults.model.primary).toBe("openrouter/qwen/qwen3.7-plus");
       expect(providers(config)).toEqual({ openrouter: { apiKey: "sk-or-test" } });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes the output caps it is given into openclaw.json", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "knox-openclaw-"));
+    try {
+      await writeOpenclawConfig(
+        makeEnv({
+          OPENCLAW_STATE_DIR: dir,
+          LLM_PROVIDER: "openrouter",
+          LLM_MODEL: "z-ai/glm-5.2",
+          LLM_API_KEY: "sk-or-test",
+        }),
+        [],
+        { "z-ai/glm-5.2": 32000 },
+      );
+      const config = JSON.parse(await readFile(join(dir, "openclaw.json"), "utf8")) as Record<string, unknown>;
+      expect(providers(config)).toEqual({
+        openrouter: {
+          apiKey: "sk-or-test",
+          models: [{ id: "z-ai/glm-5.2", name: "z-ai/glm-5.2", maxTokens: 32000 }],
+        },
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -35,12 +35,23 @@ import { sniffUsageCost } from "./cost-sniffer.js";
  * UsageAccumulator, which correlates it to the live turn by token counts (the
  * same per-call telemetry the knox-usage-telemetry plugin already feeds it).
  *
+ * It also keeps each call inside the model's context window. openclaw sends a
+ * model's listed max output as the call's max_tokens, and OpenRouter rejects a
+ * call whose prompt + max_tokens exceeds the window. Some listings reserve
+ * nearly all of it (z-ai/glm-5.2: 943,718 of 1,048,576), which leaves too little
+ * room for a long session's prompt, so the proxy lowers any larger limit to
+ * OPENROUTER_MAX_OUTPUT_TOKENS. openclaw.json carries the same cap for the
+ * models it overlays (provision/openrouter-output-caps.ts); this is the
+ * backstop for every call.
+ *
  * Safety posture
  * --------------
  *   - Loopback only. Bound to 127.0.0.1 — it carries the OpenRouter key and must
  *     never be reachable off-box. openclaw connects over loopback.
- *   - Transparent. It does not rewrite the request body (OpenRouter now returns
- *     cost unconditionally) so nothing about the call changes.
+ *   - Minimal rewrites. A chat request changes in two ways only: it asks for
+ *     `usage: { include: true }`, and an output limit above
+ *     OPENROUTER_MAX_OUTPUT_TOKENS is lowered to it (never raised, never added).
+ *     Everything else forwards as sent; see prepareChatBody.
  *   - Fail-open on observation. Sniffing runs on a tee and is fully wrapped: a
  *     parse error, an oversize body, or an unexpected shape yields no cost and
  *     never touches the forwarded bytes. The worst case is a turn priced by the
@@ -290,10 +301,12 @@ function forwardRequest(
   // that ties every one of this turn's calls together, so the proxy can sum their
   // costs and the turn's telemetry can claim the total — and (2) inject
   // `usage: { include: true }` so OpenRouter returns the per-request cost at all
-  // (openclaw doesn't ask, and OpenRouter emits it only when asked). If the body
-  // isn't parseable JSON it forwards UNCHANGED with no session key, and if it
-  // exceeds the cap (never for a real chat request) it streams through unchanged —
-  // a request must never break for the sake of cost capture.
+  // (openclaw doesn't ask, and OpenRouter emits it only when asked), and (3)
+  // lower an output limit that would crowd the prompt out of the context window
+  // (see the header). If the body isn't parseable JSON it forwards UNCHANGED with
+  // no session key, and if it exceeds the cap (never for a real chat request) it
+  // streams through unchanged — a request must never break for the sake of cost
+  // capture.
   const chunks: Buffer[] = [];
   let size = 0;
   let streaming = false;
@@ -324,12 +337,17 @@ function forwardRequest(
   clientReq.on("end", () => {
     if (streaming || aborted) return;
     const raw = Buffer.concat(chunks);
-    const { body, sessionCacheKey, requestKeys } = prepareChatBody(raw);
+    const { body, sessionCacheKey, requestKeys, outputLowered } = prepareChatBody(
+      raw,
+      env.OPENROUTER_MAX_OUTPUT_TOKENS,
+    );
     headers["content-length"] = String(body.length);
+    if (outputLowered) noteOutputLowered(outputLowered);
     log.debug("cost proxy: forwarding chat request", {
       has_session_key: Boolean(sessionCacheKey),
       injected: body !== raw,
       request_keys: requestKeys,
+      max_tokens_lowered_from: outputLowered?.from ?? null,
     });
     upstreamReq = forward(baseOptions, makeOnResponse(sessionCacheKey));
     wire(upstreamReq);
@@ -341,6 +359,35 @@ function forwardRequest(
  *  ones stream through unchanged. A real chat request is a few MB at most. */
 const MAX_INJECT_BODY_BYTES = 8_000_000;
 
+/** The request fields that carry a chat call's output limit. openclaw sends one
+ *  of them, per the model's `compat.maxTokensField`. */
+const OUTPUT_LIMIT_FIELDS = ["max_tokens", "max_completion_tokens"] as const;
+
+/** A chat request whose output limit the proxy lowered. */
+export interface OutputLowered {
+  /** The request's `model`, when it names one. */
+  model: string | null;
+  /** The limit the request asked for. */
+  from: number;
+  /** The limit it went out with. */
+  to: number;
+}
+
+/** (model, requested limit) pairs already reported, so a capped model is logged
+ *  once per process instead of on every call. */
+const loweredReported = new Set<string>();
+
+function noteOutputLowered(lowered: OutputLowered): void {
+  const key = `${lowered.model ?? ""}\u0000${lowered.from}`;
+  if (loweredReported.has(key)) return;
+  loweredReported.add(key);
+  log.info("cost proxy: lowered a model's max output tokens", {
+    model: lowered.model,
+    requested: lowered.from,
+    cap: lowered.to,
+  });
+}
+
 /**
  * Prepare an OpenRouter chat-completions request body: pull out
  * `prompt_cache_key` (the session id that ties a turn's calls together, so their
@@ -348,25 +395,35 @@ const MAX_INJECT_BODY_BYTES = 8_000_000;
  * response carries the per-request cost at all). The injection merges into any
  * existing `usage` object and leaves every other field untouched.
  *
+ * Given `maxOutputTokens`, an output limit (`max_tokens` or
+ * `max_completion_tokens`) above it is lowered to it, so the call leaves room
+ * for its prompt in the context window (see the header). A smaller limit stays
+ * as it is, and a request with none gets none.
+ *
  * On a body that is not a JSON object — or that fails to re-serialize — returns
  * the ORIGINAL bytes and a null session key, so the request forwards unchanged
  * and simply isn't costed. A request must never break for the sake of cost.
  */
-export function prepareChatBody(raw: Buffer): {
+export function prepareChatBody(
+  raw: Buffer,
+  maxOutputTokens?: number,
+): {
   body: Buffer;
   sessionCacheKey: string | null;
   /** Top-level request field NAMES (never values/content) — diagnostic only, to
    *  discover which field, if any, carries a per-request session identifier. */
   requestKeys: string[];
+  /** Set when the forwarded body's output limit was lowered to `maxOutputTokens`. */
+  outputLowered: OutputLowered | null;
 } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString("utf8"));
   } catch {
-    return { body: raw, sessionCacheKey: null, requestKeys: [] };
+    return { body: raw, sessionCacheKey: null, requestKeys: [], outputLowered: null };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { body: raw, sessionCacheKey: null, requestKeys: [] };
+    return { body: raw, sessionCacheKey: null, requestKeys: [], outputLowered: null };
   }
   const obj = parsed as Record<string, unknown>;
   const requestKeys = Object.keys(obj);
@@ -383,10 +440,29 @@ export function prepareChatBody(raw: Buffer): {
       ? (obj.usage as Record<string, unknown>)
       : {};
   obj.usage = { ...existing, include: true };
+  let outputLowered: OutputLowered | null = null;
+  if (typeof maxOutputTokens === "number" && maxOutputTokens > 0) {
+    for (const field of OUTPUT_LIMIT_FIELDS) {
+      const requested = obj[field];
+      if (typeof requested === "number" && Number.isFinite(requested) && requested > maxOutputTokens) {
+        obj[field] = maxOutputTokens;
+        outputLowered = {
+          model: typeof obj.model === "string" ? obj.model : null,
+          from: requested,
+          to: maxOutputTokens,
+        };
+      }
+    }
+  }
   try {
-    return { body: Buffer.from(JSON.stringify(obj), "utf8"), sessionCacheKey, requestKeys };
+    return {
+      body: Buffer.from(JSON.stringify(obj), "utf8"),
+      sessionCacheKey,
+      requestKeys,
+      outputLowered,
+    };
   } catch {
-    return { body: raw, sessionCacheKey, requestKeys };
+    return { body: raw, sessionCacheKey, requestKeys, outputLowered: null };
   }
 }
 

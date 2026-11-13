@@ -12,6 +12,7 @@ import type { AgentEnv } from "../env.js";
 import { log } from "../log.js";
 import { assembleSystemPrompt, parseEscalatedTools } from "../prompt/assemble.js";
 import { MemoryCheckpoint } from "../provision/agent-memory.js";
+import { fetchOpenRouterCatalog, outputCapsFor } from "../provision/openrouter-output-caps.js";
 import { fetchPinnableModelIds } from "../provision/pinnable-models.js";
 import {
   defaultIdentity,
@@ -102,9 +103,26 @@ export async function bootstrap(
 
   // Models this agent's routines can pin via a per-request override, so both
   // openclaw.json writes below overlay them with the prompt-cache-key compat
-  // flag and their turns stay cost-tracked (see pinnable-models.ts). Fail-open
-  // to [] — never blocks boot. Fetched once and passed to BOTH writes.
-  const extraModelIds = await fetchPinnableModelIds(env);
+  // flag and their turns stay cost-tracked (see pinnable-models.ts). Alongside,
+  // OpenRouter's model catalog, to cap any overlaid model whose listed max
+  // output would crowd the prompt out of its context window (see
+  // openrouter-output-caps.ts). Both fail open and never block boot. Fetched
+  // once and passed to BOTH writes.
+  const [extraModelIds, openRouterCatalog] = await Promise.all([
+    fetchPinnableModelIds(env),
+    fetchOpenRouterCatalog(env),
+  ]);
+  const outputCaps = outputCapsFor(
+    openRouterCatalog,
+    [env.LLM_MODEL, ...extraModelIds],
+    env.OPENROUTER_MAX_OUTPUT_TOKENS,
+  );
+  if (Object.keys(outputCaps).length > 0) {
+    log.info("openrouter output caps for openclaw.json", {
+      cap: env.OPENROUTER_MAX_OUTPUT_TOKENS,
+      models: Object.keys(outputCaps),
+    });
+  }
 
   const workspaceSkillsDir = join(env.OPENCLAW_STATE_DIR, "workspace", "skills");
 
@@ -115,7 +133,7 @@ export async function bootstrap(
   // model switch — the on-disk openclaw.json is stale/invalid until
   // renderWorkspace rewrites it at the end of boot, which would be too late.
   // renderWorkspace writes it again with the post-reconcile lock's revs.
-  await writeOpenclawConfig(env, extraModelIds);
+  await writeOpenclawConfig(env, extraModelIds, outputCaps);
 
   const sync = opts.skillSync ?? null;
   const outcome = sync ? await sync.reconcile("boot") : null;
@@ -206,7 +224,7 @@ export async function bootstrap(
     playbook,
     escalatedTools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
   });
-  await renderWorkspace({ env, assembledSoul: systemPrompt, blobs, extraModelIds });
+  await renderWorkspace({ env, assembledSoul: systemPrompt, blobs, extraModelIds, outputCaps });
 
   log.info("bootstrap complete", {
     assignments: bundle?.assignments.length ?? 0,

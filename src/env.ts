@@ -407,6 +407,25 @@ const Schema = z.object({
   // proxy targets the same endpoint openclaw would have called directly.
   OPENROUTER_UPSTREAM_URL: z.string().url().optional(),
 
+  // Most output tokens an OpenRouter call may reserve. openclaw sends a model's
+  // listed max output as each call's max_tokens, and OpenRouter rejects any call
+  // whose prompt + max_tokens exceeds the context window. Some listings reserve
+  // nearly all of it (z-ai/glm-5.2 lists 943,718 of a 1,048,576 window), leaving
+  // ~105k tokens for the prompt: a long session then fails every call with a
+  // "context overflow" that compaction can't fix. The vessel lowers any larger
+  // limit to this one, in openclaw.json for the models it overlays and in the
+  // cost proxy for every call; a model's own smaller limit is never raised.
+  // 32000 is the ceiling openclaw already applies to Anthropic models when no
+  // limit is requested. Values below 1024 are raised to 1024.
+  OPENROUTER_MAX_OUTPUT_TOKENS: z
+    .string()
+    .optional()
+    .default("32000")
+    .transform((v) => {
+      const n = Number.parseInt(v, 10);
+      return Number.isFinite(n) && n > 0 ? Math.max(1024, n) : 32_000;
+    }),
+
   // openclaw state directory (where openclaw.json + workspace live).
   // Distinct from openclaw's own OPENCLAW_HOME env var, which it treats
   // as the user-home equivalent and appends `.openclaw` to.
