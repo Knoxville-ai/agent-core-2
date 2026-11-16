@@ -106,6 +106,20 @@ describe("authorizeConversation", () => {
     ).resolves.toMatchObject({ id: "conv-1" });
   });
 
+  it("allows a cross-org agent for a conversation opened over a delegation connection (console §4d)", async () => {
+    // The platform's own org may hold connections into other orgs; the console
+    // stamps the connection on the conversation and mints the caller's real org.
+    const c = conv({ delegation_connection_id: "conn-1" } as Partial<Conversation>);
+    await expect(
+      authorizeConversation(
+        "conv-1",
+        { ...agent, orgId: "drivethru-admin" },
+        db(c),
+        env,
+      ),
+    ).resolves.toMatchObject({ id: "conv-1" });
+  });
+
   it("still requires org membership for a user-owned conversation", async () => {
     const c = conv({ user_id: "user-123" });
     await expect(
