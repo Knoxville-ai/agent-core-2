@@ -6,6 +6,7 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, type Principal } from "./auth.js";
+import { crossOrgAgentAllowed } from "./cross-org-callers.js";
 import { buildDynamicContext, parseAdvisoryCaller } from "./dynamic-context.js";
 import type { CancelRegistry } from "./cancel-registry.js";
 import {
@@ -763,16 +764,11 @@ export async function authorizeConversation(
     // before a conversation is ever opened.
     //
     // Same-org A2A stays strict: an agent principal must be in this agent's org.
-    // The ONE exception is a curated cross-org drive-thru call — the console
-    // stamps drive_through_connection_id when an operator-bound caller opens the
-    // conversation, and mints an honest A2A token carrying the caller's real
-    // org. Permit those, and only those, across the org boundary (console
-    // migration 0046). Credential sharing on such a turn is still limited to the
-    // operator-selected set and pulled + audited via get_delegated_credentials.
-    if (
-      principal.orgId !== env.AGENT_ORG &&
-      !conversation.drive_through_connection_id
-    ) {
+    // Across the org boundary, only a conversation the console stamped with the
+    // binding that allowed it — a curated drive-thru, or a delegation connection
+    // from the platform's own org — and the console mints an honest A2A token
+    // carrying the caller's real org (see crossOrgAgentAllowed).
+    if (principal.orgId !== env.AGENT_ORG && !crossOrgAgentAllowed(conversation)) {
       throw new HttpError(403, "cross-org call forbidden");
     }
   } else if (conversation.user_id !== null) {

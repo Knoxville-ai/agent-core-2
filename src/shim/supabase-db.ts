@@ -37,8 +37,13 @@ export interface Conversation {
   kind: string | null;
   /** Set when a cross-org drive-thru binding authorized this call (console
    *  migration 0046). Non-null is what permits an agent principal from another
-   *  org to reach this conversation (see authorizeConversation). */
+   *  org to reach this conversation (see crossOrgAgentAllowed). */
   drive_through_connection_id: string | null;
+  /** Set when a delegation connection (agent_connections) authorized this call.
+   *  Such a connection crosses orgs only when the caller is in the platform's
+   *  own org, and non-null permits that caller too (see crossOrgAgentAllowed).
+   *  Absent on rows read before this column was selected. */
+  delegation_connection_id?: string | null;
 }
 
 export interface MessageRow {
@@ -151,7 +156,7 @@ export class MessagingDB implements ToolCallDB {
     const { data, error } = await this.client
       .from("conversations")
       .select(
-        "id,org_id,agent_uid,user_id,title,archived_at,kind,drive_through_connection_id",
+        "id,org_id,agent_uid,user_id,title,archived_at,kind,drive_through_connection_id,delegation_connection_id",
       )
       .eq("id", conversationId)
       .limit(1)

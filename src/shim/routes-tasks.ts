@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { HttpError, type Principal } from "./auth.js";
+import { crossOrgAgentAllowed } from "./cross-org-callers.js";
 import { detectDelegatedTurn } from "./delegated-credentials.js";
 import type { TaskRunner, TaskSpec } from "./task-runner.js";
 import type { MessagingDB } from "./supabase-db.js";
@@ -201,8 +202,9 @@ export function handleTaskList(res: ServerResponse, deps: TasksDeps): void {
  *
  * Mirrors `authorizeConversation` in routes-messages: the conversation must
  * exist, belong to this agent, and — for a cross-org agent principal — carry the
- * drive-thru binding that permits the call. Kept as its own function because a
- * task start has no message body to validate and no SSE stream to fail into.
+ * drive-thru or delegation connection that permits the call
+ * (crossOrgAgentAllowed). Kept as its own function because a task start has no
+ * message body to validate and no SSE stream to fail into.
  */
 async function authorizeTaskConversation(
   conversationId: string,
@@ -218,10 +220,10 @@ async function authorizeTaskConversation(
 
   if (principal.kind === "agent") {
     const sameOrg = principal.orgId === deps.env.AGENT_ORG;
-    if (!sameOrg && !conversation.drive_through_connection_id) {
+    if (!sameOrg && !crossOrgAgentAllowed(conversation)) {
       throw new HttpError(
         403,
-        "cross-org task requires a drive-thru connection on the conversation",
+        "cross-org task requires a drive-thru or delegation connection on the conversation",
       );
     }
     return;
