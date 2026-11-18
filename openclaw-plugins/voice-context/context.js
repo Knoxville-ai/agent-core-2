@@ -30,6 +30,7 @@ export function buildVoiceContext(info) {
     "Work that will take more than a few seconds must not keep the caller waiting: start it with `start_task` " +
       "(`self: true` to do it yourself, or the target agent to delegate) and reply with what you started. " +
       "The result is delivered to this call's conversation in the console when it lands.",
+    "If you already started this same work earlier in this call, don't start it again: say it's already running.",
     "Only say something was started or done if the tool call actually succeeded; if it failed, say so.",
   );
   return lines.join("\n");

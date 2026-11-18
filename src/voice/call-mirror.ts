@@ -125,15 +125,15 @@ export function prettyPhone(phone: string): string {
 /** Final transcript lines merged into speaker turns, oldest first. */
 export function transcriptTurns(
   transcript: readonly TranscriptEntry[] | undefined,
-): Array<{ speaker: "bot" | "user"; text: string }> {
-  const turns: Array<{ speaker: "bot" | "user"; text: string }> = [];
+): Array<{ speaker: "bot" | "user"; text: string; at: number }> {
+  const turns: Array<{ speaker: "bot" | "user"; text: string; at: number }> = [];
   for (const e of transcript ?? []) {
     if (e.isFinal === false) continue;
     const text = dropRestatedPrefix(e.text.trim());
     if (!text) continue;
     const last = turns[turns.length - 1];
     if (last && last.speaker === e.speaker) last.text = `${last.text} ${text}`;
-    else turns.push({ speaker: e.speaker, text });
+    else turns.push({ speaker: e.speaker, text, at: e.timestamp });
   }
   return turns;
 }
@@ -287,6 +287,9 @@ export interface CallMirrorStore {
     senderKind: "user" | "agent" | "system";
     senderId: string | null;
     systemGenerated?: boolean;
+    /** When it was said (ms). The rows are written after the call, so without
+     *  this they'd all sort after the task cards posted during it. */
+    at?: number;
   }): Promise<void>;
   remember(input: { conversationId: string; body: string; tags: string[] }): Promise<void>;
 }
@@ -403,6 +406,7 @@ export class CallMirror {
         content: t.text,
         senderKind: t.speaker === "bot" ? "agent" : "user",
         senderId: t.speaker === "bot" ? agentUid : (st.userId ?? null),
+        at: t.at,
       });
     }
 
@@ -429,6 +433,7 @@ export class CallMirror {
       senderKind: "agent",
       senderId: agentUid,
       systemGenerated: !summary,
+      at: call.endedAt,
     });
 
     if (summary) {
@@ -622,6 +627,9 @@ export class SupabaseCallMirrorStore implements CallMirrorStore {
       sender_kind: input.senderKind,
     };
     if (input.senderId) row.sender_id = input.senderId;
+    if (typeof input.at === "number" && Number.isFinite(input.at)) {
+      row.created_at = new Date(input.at).toISOString();
+    }
     const { error } = await this.client.from("messages").insert(row);
     if (error) throw new Error(`insert phone message: ${error.message}`);
   }

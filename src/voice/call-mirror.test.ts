@@ -115,7 +115,9 @@ describe("CallMirror", () => {
       ["assistant", "Sunny and 60."],
       ["assistant", "Call ended · 1m 33s · hangup-user\n\nZach asked for the weather. Frank answered."],
     ]);
-    expect(calls.messages[0]).toMatchObject({ senderKind: "agent", senderId: "frank" });
+    expect(calls.messages[0]).toMatchObject({ senderKind: "agent", senderId: "frank", at: T0 + 3_000 });
+    expect(calls.messages[1]).toMatchObject({ at: T0 + 5_000 }); // first final line of the turn
+    expect(calls.messages[3]).toMatchObject({ at: T0 + 95_000 }); // summary at hang-up
     expect(calls.messages[1]).toMatchObject({ senderKind: "user", senderId: null });
     expect(calls.memories).toHaveLength(1);
     expect(calls.memories[0]).toMatchObject({ conversationId: "conv-1", tags: ["phone-call"] });
@@ -278,7 +280,7 @@ describe("helpers", () => {
     expect(prettyPhone("+447700900123")).toBe("+447700900123");
     expect(formatDuration(5_400)).toBe("5s");
     expect(formatDuration(125_000)).toBe("2m 05s");
-    expect(transcriptTurns(TRANSCRIPT)).toHaveLength(3);
+    expect(transcriptTurns(TRANSCRIPT).map((t) => t.at)).toEqual([T0 + 3_000, T0 + 5_000, T0 + 7_000]);
   });
 
   it("summary request + cleanup", () => {

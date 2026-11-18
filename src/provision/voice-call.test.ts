@@ -163,6 +163,7 @@ describe("resolveVoiceCall", () => {
   it("never claims work it didn't confirm", () => {
     const rt = resolve(SPEC).render!.entry.config.realtime as { instructions: string };
     expect(rt.instructions).toContain("Never tell the caller that something was started");
+    expect(rt.instructions).toContain('status \"working\": that is NOT a failure');
   });
 
   it("handoffs run on the agent's own model when given", () => {

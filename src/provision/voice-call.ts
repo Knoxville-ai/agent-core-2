@@ -156,8 +156,12 @@ export const REALTIME_BASE_INSTRUCTIONS =
   "several steps of tool work — call openclaw_agent_consult and ask the agent to START it as a background task (start_task with self: true) " +
   "rather than do it now. Then tell the caller it's underway, that they can hang up, and that the result will be posted to this call's " +
   "conversation in their Knoxville console.\n\n" +
-  "Never tell the caller that something was started, sent, booked, delegated or saved unless the answer from openclaw_agent_consult " +
-  "says it was. If the consult fails, times out or comes back empty, say plainly that you couldn't get it done and offer to try again.";
+  "A consult can take 20-30 seconds. While it runs you get a result with status \"working\": that is NOT a failure. Tell the caller " +
+  "you're on it and wait for the final result; don't call openclaw_agent_consult again for the same request meanwhile, and if the " +
+  "caller asks you to just handle it, say you're getting it started and ask them to hold a few more seconds until it's confirmed.\n\n" +
+  "Never tell the caller that something was started, sent, booked, delegated or saved unless the FINAL answer from " +
+  "openclaw_agent_consult says it was. If that final answer is an error or comes back empty, say plainly that you couldn't get it " +
+  "done and offer to try again.";
 
 export type KnownCaller = NonNullable<VoiceCallSpec["callers"]>[number];
 
