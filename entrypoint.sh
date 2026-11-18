@@ -34,6 +34,21 @@ else
   chown agent:agent "${OPENCLAW_STATE_DIR}"
 fi
 
+# Self-heal anything in the state dir that the agent uid doesn't own. The usual
+# culprit is an operator running `openclaw config patch` (or any openclaw
+# command) as ROOT over `railway ssh`: openclaw rewrites openclaw.json as
+# root:root 0600, and the next boot dies with
+#   EACCES: permission denied, open '/home/agent/.openclaw/openclaw.json'
+# in a crash loop no redeploy can clear. `find` only stats (cheap even over a
+# large session tree); only the stray entries get a chown. -xdev keeps it on the
+# volume. Run openclaw by hand as the agent instead:
+#   runuser -u agent -- openclaw ...
+STRAY_COUNT="$(find "${OPENCLAW_STATE_DIR}" -xdev ! -user agent -print 2>/dev/null | wc -l)"
+if [ "${STRAY_COUNT}" -gt 0 ]; then
+  echo "entrypoint: repairing ownership of ${STRAY_COUNT} path(s) in ${OPENCLAW_STATE_DIR} not owned by agent (was openclaw run as root?)" >&2
+  find "${OPENCLAW_STATE_DIR}" -xdev ! -user agent -exec chown -h agent:agent {} + 2>/dev/null || true
+fi
+
 # Workspace skills dir is reconciled every boot (SkillSync, or the legacy
 # bundle + boot-list install), but create it up front so the path exists.
 mkdir -p "${OPENCLAW_STATE_DIR}/workspace/skills"

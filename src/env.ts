@@ -96,6 +96,23 @@ const Schema = z.object({
   // "knoxville_platform" cannot be overridden here.
   OPENCLAW_MCP_SERVERS: z.string().optional(),
 
+  // Phone / voice calls (the official @openclaw/voice-call plugin, baked into
+  // the image). A JSON blob the console's Phone tab writes; unset = no phone.
+  // Rendered into openclaw.json -> plugins.entries.voice-call at boot by
+  // ../provision/voice-call.ts, so it survives every redeploy and nothing on
+  // the volume has to be hand-edited. Secrets are NOT in the blob: the plugin
+  // reads TELNYX_API_KEY / TELNYX_CONNECTION_ID / TELNYX_PUBLIC_KEY and
+  // OPENAI_API_KEY (realtime voice) from the container env. A malformed blob is
+  // logged and the phone stays off; it never fails boot. Shape:
+  // VoiceCallSpecSchema in ../provision/voice-call.ts.
+  OPENCLAW_VOICE_CALL: z.string().optional(),
+  // Public base URL of this agent's voice webhook domain — the Railway domain
+  // that targets port 3334 (VOICE_CALL_PORT), e.g.
+  // https://<svc>-production-xxxx.up.railway.app. The spec's `publicUrl` wins
+  // when both are set. `/voice/webhook` is appended when no path is given.
+  // Kept a plain string (validated in voice-call.ts) so a typo can't brick boot.
+  VOICE_PUBLIC_URL: z.string().optional(),
+
   // Optional per-agent tool policy, passed through to openclaw's
   // `tools.profile` / `tools.deny`. Default is unset → openclaw's own default
   // (no restriction), so leaving these blank changes nothing.

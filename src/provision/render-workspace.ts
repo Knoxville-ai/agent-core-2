@@ -1,5 +1,6 @@
+import { statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { log } from "../log.js";
@@ -7,6 +8,7 @@ import type { AgentEnv } from "../env.js";
 import { costProxyBaseUrl, costTrackingEnabled } from "../shim/cost-proxy.js";
 import { readLockSkillEntries, type SkillEntries } from "../skills/lock.js";
 import { AgentStorage } from "./supabase-storage.js";
+import { logVoiceCall, resolveVoiceCall, VOICE_CALL_PLUGIN_ID } from "./voice-call.js";
 
 /** Id + on-disk directory of the delegated-credentials OpenClaw plugin shipped in
  *  this repo (see `openclaw-plugins/`). Resolved relative to this module so it
@@ -353,10 +355,35 @@ export async function writeOpenclawConfig(
   await mkdir(ws, { recursive: true });
   const skillEntries = await readLockSkillEntries(stateDir);
   const config = buildOpenclawConfig(env, ws, extraModelIds, skillEntries, outputCaps);
-  await writeFile(
-    join(stateDir, "openclaw.json"),
-    JSON.stringify(config, null, 2),
-    "utf8",
+  const path = join(stateDir, "openclaw.json");
+  try {
+    await writeFile(path, JSON.stringify(config, null, 2), "utf8");
+  } catch (err) {
+    throw explainUnwritableConfig(path, err);
+  }
+}
+
+/** Turn an EACCES/EPERM on openclaw.json into an actionable error. The usual
+ *  cause is an `openclaw` command run as root on the live container, which
+ *  rewrites the file root-owned; entrypoint.sh repairs that on the next boot,
+ *  so this only fires if that repair could not run. Exported for unit tests. */
+export function explainUnwritableConfig(path: string, err: unknown): unknown {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  if (code !== "EACCES" && code !== "EPERM") return err;
+  let owner = "unknown";
+  try {
+    const st = statSync(path);
+    owner = `${st.uid}:${st.gid} mode ${(st.mode & 0o777).toString(8)}`;
+  } catch {
+    // keep "unknown"
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : "?";
+  return new Error(
+    `${path} is not writable by uid ${uid} (file is ${owner}). It was most likely ` +
+      `rewritten by an openclaw command run as root on the container. Fix: ` +
+      `chown -R agent:agent ${dirname(path)} (as root), or redeploy so the ` +
+      `entrypoint repairs ownership. Run openclaw by hand as the agent: ` +
+      `\`runuser -u agent -- openclaw ...\`. Cause: ${String(err)}`,
   );
 }
 
@@ -505,10 +532,23 @@ export function buildOpenclawConfig(
     mcpServers[name] = cfg;
   }
 
+  // Phone calls (OPENCLAW_VOICE_CALL → the @openclaw/voice-call plugin). Resolved
+  // up front because, unless outbound calling is switched on, it adds the
+  // plugin's `voice_call` tool to the deny list below. Null = no phone (unset,
+  // disabled, or misconfigured — the reason is logged, boot continues).
+  const voice = resolveVoiceCall(env.OPENCLAW_VOICE_CALL, {
+    publicUrl: env.VOICE_PUBLIC_URL,
+  });
+  logVoiceCall(voice);
+
   // Optional per-agent tool policy lists (see env.ts / the tools block below).
   // PLATFORM_DENIED_TOOLS always lead the deny list, whatever the operator set.
   const toolsDeny = [
-    ...new Set([...PLATFORM_DENIED_TOOLS, ...parseToolList(env.OPENCLAW_TOOLS_DENY)]),
+    ...new Set([
+      ...PLATFORM_DENIED_TOOLS,
+      ...parseToolList(env.OPENCLAW_TOOLS_DENY),
+      ...(voice.render?.toolsDeny ?? []),
+    ]),
   ];
   const toolsAllow = parseToolList(env.OPENCLAW_TOOLS_ALLOW);
   // openclaw rejects a scope that sets BOTH allow and alsoAllow. loadEnv already
@@ -791,6 +831,23 @@ export function buildOpenclawConfig(
     plugins.load = { ...load, paths: [...paths, LLM_COMPLETE_PLUGIN_DIR] };
     const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
     entries[LLM_COMPLETE_PLUGIN_ID] = { enabled: true };
+    plugins.entries = entries;
+    config.plugins = plugins;
+  }
+
+  // Phone calls: the official voice-call plugin, baked into the image as an npm
+  // dependency (see package.json + Dockerfile) and loaded from its package dir
+  // like the knox plugins above. Its webhook server binds VOICE_CALL_PORT
+  // (3334), which the agent's voice domain on Railway must target. Rendered
+  // from env every boot, so the block survives redeploys and a hand edit of
+  // openclaw.json can never be what keeps a phone working.
+  if (voice.render) {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, voice.render.pluginDir] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    entries[VOICE_CALL_PLUGIN_ID] = voice.render.entry;
     plugins.entries = entries;
     config.plugins = plugins;
   }

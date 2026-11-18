@@ -54,6 +54,8 @@ The console provisions an agent by:
 | `OPENCLAW_BUNDLED_SKILLS` | OpenClaw's own bundled skills the agent may see → `skills.allowBundled`. Default (unset, empty or `none`): **no bundled skills** — emitted as the non-empty sentinel `["__none__"]`, since openclaw treats `[]` as "all". An agent's skills come from the platform library; the bundled `skill-creator` would teach it to write skill folders itself, which SkillSync quarantines. A comma/space list (e.g. `skill-creator`) allows just those; `all` = openclaw's default (every eligible bundled skill — 14–19 of them, ~4–6k chars — in every model call's prompt). Read at gateway start only. |
 | `AGENT_TURN_BROADCAST` | Publish chat-turn token deltas on the `conversation:<id>` realtime topic (default `true`). See [Chat turn lifecycle](#chat-turn-lifecycle). |
 | `SKILL_SYNC_POLL_MS` | SkillSync safety-poll interval. Default `300000` (5 min); `0` disables; values under 10s are raised to 10s. |
+| `OPENCLAW_VOICE_CALL` | Phone calls: JSON spec the console's **Phone** tab writes → `plugins.entries.voice-call`. See [Phone calls](#phone-calls-voice-call-plugin). |
+| `VOICE_PUBLIC_URL` | Public https origin of the agent's voice domain (the Railway domain targeting port **3334**). |
 
 When both are set, the shim's `renderWorkspace()` adds an entry to
 `mcp.servers.knoxville_platform` in `openclaw.json`, and at boot the
@@ -927,6 +929,82 @@ The flag keeps the two from racing for the empty slot.
 `AGENT_AUTO_TITLE=false` turns titling off for an agent (the console's
 heuristic then applies again). The `knox-llm-complete` plugin is wired on every
 vessel regardless; it does nothing until called.
+
+## Phone calls (voice-call plugin)
+
+An agent gets a phone number through the official `@openclaw/voice-call`
+plugin, baked into the image (a pinned `package.json` dependency, same version
+as openclaw) and rendered into `openclaw.json` at every boot by
+`src/provision/voice-call.ts`. Nothing on the volume is hand-edited: the
+console's **Phone** tab writes one Railway variable and the vessel derives the
+plugin block from it, so the phone survives every redeploy.
+
+### Contract
+
+| Railway variable | Who sets it | Content |
+| --- | --- | --- |
+| `OPENCLAW_VOICE_CALL` | console Phone tab | JSON spec, no secrets (below) |
+| `VOICE_PUBLIC_URL` | console Phone tab / provisioning | `https://<voice domain>`; `/voice/webhook` is appended |
+| `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID`, `TELNYX_PUBLIC_KEY` | operator (secret) | read by the plugin from env |
+| `OPENAI_API_KEY` | operator (secret) | realtime voice (`realtime.provider: openai`) |
+
+```jsonc
+// OPENCLAW_VOICE_CALL — every key optional except fromNumber (non-mock)
+{
+  "enabled": true,                 // default true while the var is set
+  "provider": "telnyx",            // telnyx | twilio | plivo | mock
+  "fromNumber": "+18653501221",
+  "connectionId": "…",             // optional; else TELNYX_CONNECTION_ID
+  "inboundPolicy": "allowlist",    // allowlist (default) | open | disabled
+  "allowFrom": ["+18655550100"],
+  "inboundGreeting": "Hi, this is Frank.",
+  "callPrompt": "How to behave on calls…",   // → realtime.instructions + responseSystemPrompt
+  "sessionScope": "per-phone",     // per-phone (caller memory) | per-call
+  "outbound": { "enabled": false, "defaultMode": "conversation" },
+  "realtime": { "enabled": true, "provider": "openai", "voice": "marin",
+                "consultPolicy": "substantive", "toolPolicy": "owner" }
+}
+```
+
+Unknown keys are rejected. Any problem (bad JSON, missing secret, no public
+URL, plugin missing) is logged as `voice-call not enabled` with every reason,
+and the agent boots **without** a phone — a phone misconfiguration never
+bricks an agent.
+
+### What the vessel renders
+
+* `plugins.load.paths += /app/node_modules/@openclaw/voice-call`, and
+  `plugins.entries.voice-call = { enabled: true, config: {…} }` with
+  `serve: { port: 3334, bind: "0.0.0.0", path: "/voice/webhook" }`. The plugin
+  defaults to `127.0.0.1`, which Railway's edge cannot reach.
+* `publicUrl` = spec `publicUrl` ‖ `VOICE_PUBLIC_URL` (+ `/voice/webhook`). The
+  plugin hands this URL to the provider for call webhooks and the realtime
+  media stream. Telnyx signs `timestamp|body` with ed25519 (not the URL), so a
+  proxy does not break verification; unsigned requests get 401.
+* **Outbound off by default**: unless `outbound.enabled`, the plugin's
+  `voice_call` tool is added to `tools.deny`, so the agent cannot place calls
+  (AI-voice outbound needs prior consent under the TCPA). Operators can still
+  test with `openclaw voicecall smoke`.
+* **Realtime** (default on): `realtime.agentContext` injects `AGENTS.md` (the
+  identity), and `toolPolicy` defaults to `owner` (full agent tools via
+  `openclaw_agent_consult`) when inbound is allowlist-only, `safe-read-only`
+  otherwise.
+
+### Railway setup per agent
+
+1. A second service domain targeting port **3334** (keep 8080 for the shim).
+2. `VOICE_PUBLIC_URL=https://<that domain>`.
+3. The provider secrets above, plus `OPENAI_API_KEY` for realtime.
+4. The provider's webhook (Telnyx Voice API application) set to
+   `https://<that domain>/voice/webhook` and the number assigned to it.
+5. Redeploy. Verify, **as the agent user** (never root — a root `openclaw`
+   rewrites `openclaw.json` root-owned; the entrypoint repairs that on the next
+   boot):
+
+   ```bash
+   runuser -u agent -- openclaw voicecall setup --json
+   runuser -u agent -- openclaw voicecall smoke --to +1… --yes
+   ```
 
 ## Migration strategy
 

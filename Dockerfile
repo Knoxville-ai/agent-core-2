@@ -66,6 +66,14 @@ RUN npm install --omit=dev=false --no-audit --no-fund
 # must be globally installed for the gateway child to launch.
 RUN npm install -g --no-audit --no-fund openclaw@2026.5.20
 
+# The official voice-call plugin (phone numbers for agents) is NOT installed
+# here: it is a pinned dependency in package.json ("@openclaw/voice-call"), so
+# the `npm install` above puts it in /app/node_modules, where it resolves the
+# same-version openclaw/plugin-sdk, and `npm prune --omit=dev` keeps it.
+# src/provision/voice-call.ts loads it via plugins.load.paths when the agent has
+# OPENCLAW_VOICE_CALL set. Keep its version EQUAL to the openclaw pin above
+# (its plugin API floor is its own version), and bump both together.
+
 # Build the shim.
 COPY --chown=agent:agent tsconfig.json ./
 COPY --chown=agent:agent src ./src
@@ -311,7 +319,12 @@ RUN mkdir -p /home/agent/.npm-global \
 # as root so entrypoint.sh can chown the mount, then drops to the agent uid
 # via `gosu` before exec'ing Node. tini (PID 1) still reaps the openclaw
 # grandchild on SIGTERM regardless of which uid runs the Node process.
-EXPOSE 8080
+# 8080: the shim (console HTTP/SSE contract). 3334: the voice-call plugin's
+# webhook + realtime media stream, only listening for an agent with a phone
+# (OPENCLAW_VOICE_CALL); its Railway voice domain must target 3334. Both bind
+# 0.0.0.0. The gateway (18789) and the OpenRouter cost proxy (18790) are
+# loopback-only.
+EXPOSE 8080 3334
 
 # Tini reaps the openclaw child cleanly when Railway sends SIGTERM.
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
