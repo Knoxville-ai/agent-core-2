@@ -11,6 +11,14 @@ import { startShim } from "./shim/server.js";
 import { UsageAccumulator } from "./shim/usage-telemetry.js";
 import { bumpSkillRevs, openWhenGatewayReady, RefreshGate } from "./skills/refresh.js";
 import { skillSyncFromEnv } from "./skills/sync.js";
+import { resolveVoiceCall } from "./provision/voice-call.js";
+import {
+  CallLogTail,
+  CallMirror,
+  llmCompleteSummarizer,
+  SupabaseCallMirrorStore,
+  voiceCallsDir,
+} from "./voice/call-mirror.js";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -114,10 +122,31 @@ async function main(): Promise<void> {
   //     route closes and reopens the same gate around its in-process restart.
   void openWhenGatewayReady(refreshGate, proc);
 
+  // 4d. Phone calls → console. When the agent has a phone, mirror every
+  //     answered call into a console conversation (opened when it's answered,
+  //     so a background task started mid-call has a thread to report to) and,
+  //     when it ends, write the transcript, a summary and a memory. Fail-soft.
+  const voice = resolveVoiceCall(env.OPENCLAW_VOICE_CALL, { publicUrl: env.VOICE_PUBLIC_URL });
+  let callTail: CallLogTail | null = null;
+  if (voice.render) {
+    const scope = voice.render.entry.config.sessionScope === "per-call" ? "per-call" : "per-phone";
+    const mirror = new CallMirror({
+      store: new SupabaseCallMirrorStore(env),
+      agentUid: env.AGENT_UID,
+      scope,
+      summarize: llmCompleteSummarizer(env),
+    });
+    callTail = new CallLogTail(voiceCallsDir(env), mirror);
+    await callTail.start().catch((err) => {
+      log.warn("phone call mirror not started (non-fatal)", { err: String(err) });
+    });
+  }
+
   // 5. Graceful shutdown.
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     log.info("shutdown requested", { signal });
     skillSync?.stopPolling();
+    callTail?.stop();
     try {
       await shim.close();
     } catch (err) {

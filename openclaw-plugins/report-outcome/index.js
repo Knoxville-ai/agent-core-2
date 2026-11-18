@@ -9,6 +9,7 @@ import {
   isLearningLinkTool,
   isSendCustomerEmailTool,
   isStartTaskTool,
+  isVoiceSessionKey,
   taskIdFromSessionKey,
 } from "./outcome.js";
 import { inlineArtifactFile, isPublishArtifactTool, workspaceDir } from "./artifact.js";
@@ -49,7 +50,9 @@ export default definePluginEntry({
       "before_tool_call",
       async (event, ctx) => {
         const toolName = event?.toolName;
-        const stamped = stampSession(event, ctx);
+        const stamped = isVoiceSessionKey(ctx?.sessionKey)
+          ? await stampVoiceSession(event, ctx)
+          : stampSession(event, ctx);
         if (!isPublishArtifactTool(toolName)) return stamped ? { params: stamped } : undefined;
 
         // publish_artifact (0138) may name a workspace file instead of carrying
@@ -75,6 +78,51 @@ export default definePluginEntry({
     );
   },
 });
+
+/**
+ * A phone call's session: ask the shim which console conversation the call is
+ * mirrored into (src/voice/call-mirror.ts) and stamp that, so a background task
+ * started mid-call posts its card and result in the call's thread. Fail-open
+ * like the rest: no answer → the call goes through unchanged.
+ */
+async function stampVoiceSession(event, ctx) {
+  const toolName = event?.toolName;
+  const param = conversationIdParamFor(toolName);
+  if (!param) return null;
+  const conversationId = await voiceConversationLookup(ctx?.sessionKey);
+  const label = String(toolName).split(/[.:/]|__/).pop();
+  if (!conversationId) {
+    console.error(
+      `[knox-report-outcome] ${label} from a phone call with no mirrored conversation ` +
+        `(session=${ctx?.sessionKey})`,
+    );
+    return null;
+  }
+  const params = buildOutcomeParams(event?.params ?? {}, conversationId, param);
+  if (!params) return null;
+  console.error(
+    `[knox-report-outcome] stamped ${param}=${conversationId} onto ${label} ` +
+      `(phone session=${ctx?.sessionKey})`,
+  );
+  return params;
+}
+
+/** GET the shim's loopback voice-session → conversation link. */
+async function voiceConversationLookup(sessionKey) {
+  const port = process.env.AGENT_HTTP_PORT || "8080";
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/internal/voice-conversation?session_key=${encodeURIComponent(sessionKey ?? "")}`,
+      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) },
+    );
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    return typeof body?.conversation_id === "string" ? body.conversation_id : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The session-id half: the params with the runtime-derived conversation id (or

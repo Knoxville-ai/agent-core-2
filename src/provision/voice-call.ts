@@ -119,6 +119,11 @@ export const VoiceCallSpecSchema = z
         /** What the full agent may use when consulted mid-call. Default: all of
          *  its tools ("owner") for allowlisted callers, read-only otherwise. */
         toolPolicy: z.enum(["safe-read-only", "owner", "none"]).optional(),
+        /** Search the agent's memory and past sessions before handing off.
+         *  CAUTION: when the search finds anything, the snippets ARE the answer
+         *  and the full agent is not consulted for that question (no tools, no
+         *  background tasks). Off by default. */
+        fastContext: z.boolean().optional(),
       })
       .strict()
       .optional(),
@@ -129,9 +134,13 @@ export type VoiceCallSpec = z.infer<typeof VoiceCallSpecSchema>;
 
 /** Base instructions for the realtime voice model. The plugin's own default,
  *  reworded for a Knoxville agent; the operator's callPrompt is appended. */
-const REALTIME_BASE_INSTRUCTIONS =
+export const REALTIME_BASE_INSTRUCTIONS =
   "You are this agent's voice on a phone call. Keep spoken replies brief, natural and easy to follow by ear — no lists, markdown or URLs. " +
-  "When a question needs deeper reasoning, current information, the agent's memory or its tools, call openclaw_agent_consult before answering, and say a short filler line while you wait.";
+  "When a question needs deeper reasoning, current information, the agent's memory or its tools, call openclaw_agent_consult before answering, and say a short filler line while you wait.\n\n" +
+  "Don't keep the caller on hold for long work. If they ask for something that will take more than a few seconds — research, drafting, " +
+  "several steps of tool work — call openclaw_agent_consult and ask the agent to START it as a background task (start_task with self: true) " +
+  "rather than do it now. Then tell the caller it's underway, that they can hang up, and that the result will be posted to this call's " +
+  "conversation in their Knoxville console.";
 
 /** Env vars the plugin needs per provider (when the spec doesn't carry them). */
 function requiredProviderEnv(spec: VoiceCallSpec, provider: string): string[] {
@@ -300,6 +309,17 @@ export function resolveVoiceCall(
       // Give the fast voice model the agent's identity (AGENTS.md is the
       // identity layer). Not SOUL.md: it opens with the ~20k constitution and
       // would fill the capsule before any identity made it in.
+      ...(spec.realtime?.fastContext
+        ? {
+            fastContext: {
+              enabled: true,
+              timeoutMs: 800,
+              maxResults: 3,
+              sources: ["memory", "sessions"],
+              fallbackToConsult: true,
+            },
+          }
+        : {}),
       agentContext: {
         enabled: true,
         maxChars: 6000,

@@ -116,6 +116,25 @@ describe("resolveVoiceCall", () => {
     });
   });
 
+  it("fastContext is opt-in and falls back to the full agent on a miss", () => {
+    const off = resolve(SPEC).render!.entry.config.realtime as Record<string, unknown>;
+    expect(off).not.toHaveProperty("fastContext");
+    const on = resolve({ ...SPEC, realtime: { fastContext: true } }).render!.entry.config
+      .realtime as Record<string, unknown>;
+    expect(on.fastContext).toEqual({
+      enabled: true,
+      timeoutMs: 800,
+      maxResults: 3,
+      sources: ["memory", "sessions"],
+      fallbackToConsult: true,
+    });
+  });
+
+  it("tells the voice model to hand long work off as a background task", () => {
+    const rt = resolve(SPEC).render!.entry.config.realtime as { instructions: string };
+    expect(rt.instructions).toContain("start_task with self: true");
+  });
+
   it("realtime off → no realtime block and no OPENAI_API_KEY needed", () => {
     const env = { ...TELNYX_ENV, OPENAI_API_KEY: undefined };
     const { render, reason } = resolve({ ...SPEC, realtime: { enabled: false } }, env);

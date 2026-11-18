@@ -48,6 +48,7 @@ import {
   type TurnPublisher,
 } from "./turn-live.js";
 import { sendJson } from "./util.js";
+import { voiceConversations } from "../voice/call-mirror.js";
 
 interface ServerHandle {
   close: () => Promise<void>;
@@ -255,6 +256,18 @@ async function route(
   if (path === "/internal/tool-call") {
     if (method !== "POST") throw new HttpError(405, "method not allowed");
     return handleToolCallIngest(req, res, env, toolCalls);
+  }
+
+  // Which console conversation a live phone call's voice session belongs to,
+  // for the knox-report-outcome plugin: a platform tool called mid-call
+  // (start_task, report_outcome, ...) gets that conversation stamped on, so a
+  // background task's card and result land in the call's thread. Same loopback
+  // + gateway-token trust anchor as the routes above. See ../voice/call-mirror.ts.
+  if (path === "/internal/voice-conversation") {
+    if (method !== "GET") throw new HttpError(405, "method not allowed");
+    requireGatewayToken(req.headers.authorization, env);
+    const conversationId = voiceConversations.get(url.searchParams.get("session_key"));
+    return sendJson(res, 200, { conversation_id: conversationId });
   }
 
   // Live skill management (console operator surface). Gateway-token authed like

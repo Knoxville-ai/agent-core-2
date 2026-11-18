@@ -120,6 +120,11 @@ export function isStartTaskTool(toolName) {
   return typeof toolName === "string" && START_TASK_SUFFIX.test(toolName);
 }
 
+/** True for a voice-call session key (`voice:…`, however it is prefixed). */
+export function isVoiceSessionKey(sessionKey) {
+  return typeof sessionKey === "string" && /(^|:)voice:/.test(sessionKey);
+}
+
 /** True when `toolName` is the platform `escalate_to_human` tool. */
 export function isEscalateToHumanTool(toolName) {
   return typeof toolName === "string" && ESCALATE_TO_HUMAN_SUFFIX.test(toolName);
@@ -169,6 +174,11 @@ export function needsConversationId(toolName) {
  */
 export function conversationIdFromSessionKey(sessionKey) {
   if (typeof sessionKey !== "string") return null;
+  // A phone call's session (`voice:<digits>` / `voice:call:<callId>`, see the
+  // voice-call plugin) holds a phone number or call id, never a conversation
+  // id. The call's conversation is looked up from the shim instead
+  // (voiceConversationLookup in index.js).
+  if (isVoiceSessionKey(sessionKey)) return null;
   // A `task:<taskId>` session is a long-running task executor, not a session
   // that can be closed (console migration 0047). Everything after the colon
   // there is a TASK id, and stamping it as a conversation id would send the

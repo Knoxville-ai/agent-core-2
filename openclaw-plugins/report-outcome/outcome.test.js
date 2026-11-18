@@ -4,6 +4,7 @@ import {
   buildOutcomeParams,
   buildStartTaskParams,
   conversationIdFromSessionKey,
+  isVoiceSessionKey,
   isReportOutcomeTool,
   isEscalateToHumanTool,
   isSendCustomerEmailTool,
@@ -202,6 +203,17 @@ describe("isReportOutcomeTool", () => {
 });
 
 describe("conversationIdFromSessionKey", () => {
+  it("never reads a phone call's session as a conversation id", () => {
+    // voice:<digits> would otherwise stamp the caller's phone number as the id.
+    expect(conversationIdFromSessionKey("voice:19016512542")).toBeNull();
+    expect(conversationIdFromSessionKey("voice:call:abc")).toBeNull();
+    expect(conversationIdFromSessionKey("agent:main:voice:19016512542")).toBeNull();
+    expect(isVoiceSessionKey("voice:19016512542")).toBe(true);
+    expect(isVoiceSessionKey("agent:main:voice:call:x")).toBe(true);
+    expect(isVoiceSessionKey("webchat:conv-1")).toBe(false);
+    expect(isVoiceSessionKey(undefined)).toBe(false);
+  });
+
   it("strips the webchat: / a2a: prefix", () => {
     expect(conversationIdFromSessionKey("webchat:conv-1")).toBe("conv-1");
     expect(conversationIdFromSessionKey("a2a:conv-2")).toBe("conv-2");
