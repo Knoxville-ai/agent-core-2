@@ -266,8 +266,7 @@ async function route(
   if (path === "/internal/voice-conversation") {
     if (method !== "GET") throw new HttpError(405, "method not allowed");
     requireGatewayToken(req.headers.authorization, env);
-    const conversationId = voiceConversations.get(url.searchParams.get("session_key"));
-    return sendJson(res, 200, { conversation_id: conversationId });
+    return sendJson(res, 200, voiceConversations.lookup(url.searchParams.get("session_key")));
   }
 
   // Live skill management (console operator surface). Gateway-token authed like

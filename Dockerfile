@@ -88,6 +88,12 @@ COPY --chown=agent:agent openclaw-plugins ./openclaw-plugins
 COPY --chown=agent:agent prompts ./prompts
 RUN npm run build && npm prune --omit=dev
 
+# Record what the realtime voice SAYS in the voice-call plugin's call log (it
+# only recorded the caller). Fails the build if the pinned plugin's code moved.
+# See docker/patch-voice-call.mjs.
+COPY --chown=agent:agent docker/patch-voice-call.mjs /app/docker/patch-voice-call.mjs
+RUN node /app/docker/patch-voice-call.mjs /app/node_modules/@openclaw/voice-call
+
 # --- Python toolchain for skills that declare `install.uv` -------------------
 # node:24-bookworm-slim ships no Python, so skills whose openclaw frontmatter
 # declares `requires.bins: [python3]` + `install.uv: [...]` (e.g.

@@ -75,6 +75,13 @@ const LLM_COMPLETE_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/llm-complete", import.meta.url),
 );
 
+/** Phone-call context: who is on the line, injected before each mid-call
+ *  consult (see `openclaw-plugins/voice-context`). Wired only with a phone. */
+export const VOICE_CONTEXT_PLUGIN_ID = "knox-voice-context";
+const VOICE_CONTEXT_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/voice-context", import.meta.url),
+);
+
 /** The platform constitution shipped in the image (see `prompts/constitution.md`).
  *  Resolved relative to this module so it works from both `src/` (tests) and
  *  `dist/` (runtime): in each layout `provision/` is one dir below the repo root
@@ -538,6 +545,9 @@ export function buildOpenclawConfig(
   // disabled, or misconfigured — the reason is logged, boot continues).
   const voice = resolveVoiceCall(env.OPENCLAW_VOICE_CALL, {
     publicUrl: env.VOICE_PUBLIC_URL,
+    // Mid-call handoffs run on the agent's own model (and, for OpenRouter,
+    // through the cost proxy), not OpenClaw's built-in default.
+    responseModel: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
   });
   logVoiceCall(voice);
 
@@ -845,9 +855,15 @@ export function buildOpenclawConfig(
     const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
     const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
     const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
-    plugins.load = { ...load, paths: [...paths, voice.render.pluginDir] };
+    plugins.load = {
+      ...load,
+      paths: [...paths, voice.render.pluginDir, VOICE_CONTEXT_PLUGIN_DIR],
+    };
     const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
     entries[VOICE_CALL_PLUGIN_ID] = voice.render.entry;
+    // Tells the agent who is on the line before each mid-call consult. Uses
+    // before_prompt_build, which needs no conversation-access grant.
+    entries[VOICE_CONTEXT_PLUGIN_ID] = { enabled: true };
     plugins.entries = entries;
     config.plugins = plugins;
   }

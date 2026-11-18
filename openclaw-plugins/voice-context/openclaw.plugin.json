@@ -1,0 +1,12 @@
+{
+  "id": "knox-voice-context",
+  "name": "Knox Voice Context",
+  "description": "On a phone call, tell the agent who is on the line and how to hand off long work, before each mid-call consult.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

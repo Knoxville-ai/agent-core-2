@@ -10,6 +10,7 @@ import {
   CallMirror,
   cleanSummary,
   consultSessionKey,
+  dropRestatedPrefix,
   formatDuration,
   prettyPhone,
   transcriptTurns,
@@ -164,6 +165,59 @@ describe("CallMirror", () => {
     const { m } = mirror(store);
     await m.handle(call({ answeredAt: undefined, state: "no-answer", endedAt: T0 + 30_000 }));
     expect(calls.conversations).toHaveLength(0);
+  });
+});
+
+describe("caller identity", () => {
+  it("a selected member is matched from the spec, named, filed under them and looked up by the plugin", async () => {
+    const { store, calls } = fakeStore(null);
+    const index = new VoiceConversationIndex();
+    const m = new CallMirror({
+      store,
+      agentUid: "frank",
+      scope: "per-phone",
+      callers: [{ phone: "+19016512542", name: "Zach Tucker", userId: "user-zach" }],
+      summarize: async () => null,
+      index,
+    });
+    await m.handle(call());
+    expect(calls.conversations).toEqual([{ userId: "user-zach", title: "Phone call from Zach Tucker" }]);
+    expect(index.lookup("voice:19016512542")).toEqual({
+      conversation_id: "conv-1",
+      caller: { name: "Zach Tucker", phone: "+1 901-651-2542", member: true },
+    });
+  });
+
+  it("before the mirror links the call, known callers still resolve by number", () => {
+    const index = new VoiceConversationIndex();
+    index.setKnownCallers([{ phone: "+19016512542", name: "Zach Tucker", userId: "u" }]);
+    expect(index.lookup("voice:19016512542")).toEqual({
+      conversation_id: null,
+      caller: { name: "Zach Tucker", phone: "+1 901-651-2542", member: true },
+    });
+    expect(index.lookup("voice:15550001111").caller).toEqual({
+      name: null,
+      phone: "+1 555-000-1111",
+      member: false,
+    });
+    expect(index.lookup("webchat:c")).toEqual({ conversation_id: null, caller: null });
+  });
+});
+
+describe("dropRestatedPrefix", () => {
+  it("fixes the partial+final restatement from the live call", () => {
+    const heard =
+      "Can you delegate a task to the Bacon 's sales assistant to see how many Can you delegate a task to the " +
+      "Bacon's sales assistant to see how many Sales orders we confirmed today. Just delegate that task.";
+    expect(dropRestatedPrefix(heard)).toBe(
+      "Can you delegate a task to the Bacon's sales assistant to see how many Sales orders we confirmed today. Just delegate that task.",
+    );
+  });
+
+  it("leaves ordinary speech alone", () => {
+    for (const t of ["thank you thank you so much", "Sunny and 60.", "Call me back about the order and the order total."]) {
+      expect(dropRestatedPrefix(t)).toBe(t);
+    }
   });
 });
 

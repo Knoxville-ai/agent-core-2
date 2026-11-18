@@ -107,6 +107,13 @@ export function voiceSessionTail(sessionKey: string | null | undefined): string 
   return m ? m[1]! : null;
 }
 
+/** "+19016512542" → "+1 901-651-2542"; anything else unchanged. */
+export function displayE164(phone: string): string {
+  const d = digitsOf(phone);
+  if (d.length === 11 && d.startsWith("1")) return `+1 ${d.slice(1, 4)}-${d.slice(4, 7)}-${d.slice(7)}`;
+  return phone;
+}
+
 /** "+19016512542" → "(901) 651-2542"; anything else unchanged. */
 export function prettyPhone(phone: string): string {
   const d = digitsOf(phone);
@@ -122,13 +129,38 @@ export function transcriptTurns(
   const turns: Array<{ speaker: "bot" | "user"; text: string }> = [];
   for (const e of transcript ?? []) {
     if (e.isFinal === false) continue;
-    const text = e.text.trim();
+    const text = dropRestatedPrefix(e.text.trim());
     if (!text) continue;
     const last = turns[turns.length - 1];
     if (last && last.speaker === e.speaker) last.text = `${last.text} ${text}`;
     else turns.push({ speaker: e.speaker, text });
   }
   return turns;
+}
+
+const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/**
+ * The realtime plugin builds a caller's final transcript by appending the
+ * provider's final text to the live partial it had so far, so a line can read
+ * "Can you delegate a task to see how many Can you delegate a task to see how
+ * many orders we confirmed today". Drop such a restated prefix: at a word
+ * boundary, if the rest (letters/digits only) starts with everything before
+ * it, keep only the rest. Repeats until stable; leaves ordinary text alone.
+ */
+export function dropRestatedPrefix(text: string): string {
+  let out = text;
+  for (let guard = 0; guard < 5; guard++) {
+    let cut = -1;
+    for (let i = out.indexOf(" "); i > 0; i = out.indexOf(" ", i + 1)) {
+      const head = normalized(out.slice(0, i));
+      if (head.length < 12) continue;
+      if (normalized(out.slice(i)).startsWith(head)) cut = i;
+    }
+    if (cut < 0) break;
+    out = out.slice(cut).trim();
+  }
+  return out;
 }
 
 export function formatDuration(ms: number): string {
@@ -174,11 +206,51 @@ export function cleanSummary(raw: string): string | null {
 
 /** Live voice session → conversation links, read by the report-outcome plugin
  *  through `GET /internal/voice-conversation`. */
-export class VoiceConversationIndex {
-  private readonly links = new Map<string, { conversationId: string; expiresAt: number | null }>();
+/** Who is on the line, as the voice-context plugin tells the agent. */
+export interface CallerIdentity {
+  name: string | null;
+  /** Display form, e.g. "+1 901-651-2542". */
+  phone: string;
+  member: boolean;
+}
 
-  set(sessionKey: string, conversationId: string): void {
-    this.links.set(sessionKey, { conversationId, expiresAt: null });
+export class VoiceConversationIndex {
+  private readonly links = new Map<
+    string,
+    { conversationId: string; caller: CallerIdentity | null; expiresAt: number | null }
+  >();
+  /** Known callers by digits — answers "who is this?" before the mirror has
+   *  linked the call (its log poll runs every couple of seconds). */
+  private known = new Map<string, CallerIdentity>();
+
+  setKnownCallers(callers: ReadonlyArray<{ phone: string; name: string; userId?: string }>): void {
+    this.known = new Map(
+      callers.map((c) => [
+        digitsOf(c.phone),
+        { name: c.name, phone: displayE164(c.phone), member: Boolean(c.userId) },
+      ]),
+    );
+  }
+
+  set(sessionKey: string, conversationId: string, caller: CallerIdentity | null = null): void {
+    this.links.set(sessionKey, { conversationId, caller, expiresAt: null });
+  }
+
+  /** Conversation + caller for a voice session (the shim route's answer). */
+  lookup(
+    sessionKey: string | null | undefined,
+    now = Date.now(),
+  ): { conversation_id: string | null; caller: CallerIdentity | null } {
+    const tail = voiceSessionTail(sessionKey);
+    if (!tail) return { conversation_id: null, caller: null };
+    const conversationId = this.get(tail, now);
+    const link = conversationId ? this.links.get(tail) : undefined;
+    let caller = link?.caller ?? null;
+    if (!caller) {
+      const m = /^voice:(\d{7,15})$/.exec(tail);
+      if (m) caller = this.known.get(m[1]!) ?? { name: null, phone: displayE164(`+${m[1]}`), member: false };
+    }
+    return { conversation_id: conversationId, caller };
   }
 
   /** The call ended: keep the link a little longer for a consult still running. */
@@ -223,6 +295,9 @@ export interface CallMirrorDeps {
   store: CallMirrorStore;
   agentUid: string;
   scope: "per-phone" | "per-call";
+  /** The spec's known callers ("Accept calls from" members). Matched first;
+   *  a profile-phone match is the fallback. */
+  callers?: ReadonlyArray<{ phone: string; name: string; userId?: string }>;
   /** Ask the agent's model for a summary; null when unavailable. */
   summarize: (request: Record<string, unknown>) => Promise<string | null>;
   index?: VoiceConversationIndex;
@@ -280,8 +355,13 @@ export class CallMirror {
 
     if (!st.conversationId) {
       const party = counterpart(call);
-      const member = await this.deps.store.findMemberByPhone(digitsOf(party)).catch(() => null);
-      const who = member?.name?.trim() || prettyPhone(party);
+      const known = (this.deps.callers ?? []).find((c) => digitsOf(c.phone) === digitsOf(party));
+      const member = known
+        ? known.userId
+          ? { userId: known.userId, name: known.name }
+          : null
+        : await this.deps.store.findMemberByPhone(digitsOf(party)).catch(() => null);
+      const who = known?.name || member?.name?.trim() || prettyPhone(party);
       const title =
         call.direction === "outbound" ? `Phone call to ${who}` : `Phone call from ${who}`;
       st.conversationId = await this.deps.store.createConversation({
@@ -291,7 +371,11 @@ export class CallMirror {
       st.userId = member?.userId ?? null;
       st.who = who;
       this.state.set(call.callId, st);
-      this.index.set(sessionKey, st.conversationId);
+      this.index.set(sessionKey, st.conversationId, {
+        name: known?.name || member?.name?.trim() || null,
+        phone: displayE164(party),
+        member: Boolean(member),
+      });
       log.info("phone call mirrored", {
         callId: call.callId,
         direction: call.direction,

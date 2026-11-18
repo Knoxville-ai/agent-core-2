@@ -135,6 +135,47 @@ describe("resolveVoiceCall", () => {
     expect(rt.instructions).toContain("start_task with self: true");
   });
 
+  it("known callers join the allowlist and the voice is told who is calling", () => {
+    const { render } = resolve({
+      ...SPEC,
+      allowFrom: undefined,
+      callers: [{ phone: "+19016512542", name: "Zach Tucker", userId: "u-1" }],
+    });
+    expect(render!.entry.config.allowFrom).toEqual(["+19016512542"]);
+    expect(render!.callers).toEqual([{ phone: "+19016512542", name: "Zach Tucker", userId: "u-1" }]);
+    const rt = render!.entry.config.realtime as { instructions: string };
+    expect(rt.instructions).toContain("every caller is Zach Tucker (+1 901-651-2542)");
+  });
+
+  it("several callers: listed, and the voice asks when unsure", () => {
+    const { render } = resolve({
+      ...SPEC,
+      callers: [
+        { phone: "+19016512542", name: "Zach" },
+        { phone: "+18655550199", name: "Ann" },
+      ],
+    });
+    expect(render!.entry.config.allowFrom).toEqual(["+18655550100", "+19016512542", "+18655550199"]);
+    const rt = render!.entry.config.realtime as { instructions: string };
+    expect(rt.instructions).toContain("Only these people can reach this line: Zach (+1 901-651-2542); Ann");
+  });
+
+  it("never claims work it didn't confirm", () => {
+    const rt = resolve(SPEC).render!.entry.config.realtime as { instructions: string };
+    expect(rt.instructions).toContain("Never tell the caller that something was started");
+  });
+
+  it("handoffs run on the agent's own model when given", () => {
+    const r = resolveVoiceCall(JSON.stringify(SPEC), {
+      publicUrl: PUBLIC,
+      envSource: TELNYX_ENV,
+      pluginDir: "/p",
+      responseModel: "openrouter/z-ai/glm-5.2",
+    });
+    expect(r.render!.entry.config.responseModel).toBe("openrouter/z-ai/glm-5.2");
+    expect(resolve(SPEC).render!.entry.config).not.toHaveProperty("responseModel");
+  });
+
   it("realtime off → no realtime block and no OPENAI_API_KEY needed", () => {
     const env = { ...TELNYX_ENV, OPENAI_API_KEY: undefined };
     const { render, reason } = resolve({ ...SPEC, realtime: { enabled: false } }, env);
@@ -239,7 +280,10 @@ describe("buildOpenclawConfig voice-call wiring", () => {
     };
     expect(plugins.entries[VOICE_CALL_PLUGIN_ID]!.enabled).toBe(true);
     expect(plugins.entries[VOICE_CALL_PLUGIN_ID]!.config.fromNumber).toBe("+18653501221");
-    expect(plugins.load.paths.at(-1)).toBe(resolveVoiceCallPluginDir());
+    expect(plugins.entries[VOICE_CALL_PLUGIN_ID]!.config.responseModel).toBe("anthropic/claude-opus-4-8");
+    expect(plugins.entries["knox-voice-context"]).toEqual({ enabled: true });
+    expect(plugins.load.paths.at(-2)).toBe(resolveVoiceCallPluginDir());
+    expect(plugins.load.paths.at(-1)).toMatch(/openclaw-plugins[\\/]voice-context$/);
     // Existing plugins survive the merge.
     expect(Object.keys(plugins.entries).length).toBeGreaterThan(1);
     expect((config.tools as { deny: string[] }).deny).toEqual([

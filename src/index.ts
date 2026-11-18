@@ -18,6 +18,7 @@ import {
   llmCompleteSummarizer,
   SupabaseCallMirrorStore,
   voiceCallsDir,
+  voiceConversations,
 } from "./voice/call-mirror.js";
 
 async function main(): Promise<void> {
@@ -130,10 +131,12 @@ async function main(): Promise<void> {
   let callTail: CallLogTail | null = null;
   if (voice.render) {
     const scope = voice.render.entry.config.sessionScope === "per-call" ? "per-call" : "per-phone";
+    voiceConversations.setKnownCallers(voice.render.callers);
     const mirror = new CallMirror({
       store: new SupabaseCallMirrorStore(env),
       agentUid: env.AGENT_UID,
       scope,
+      callers: voice.render.callers,
       summarize: llmCompleteSummarizer(env),
     });
     callTail = new CallLogTail(voiceCallsDir(env), mirror);

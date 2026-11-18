@@ -89,6 +89,21 @@ export const VoiceCallSpecSchema = z
     /** Who may call in. Default allowlist (only `allowFrom`). */
     inboundPolicy: z.enum(["disabled", "allowlist", "open"]).optional(),
     allowFrom: z.array(E164).optional(),
+    /** People the agent knows by number (the console's "Accept calls from"
+     *  member picker). Their numbers join `allowFrom`; the voice and the agent
+     *  are told who is calling, and the call is filed under `userId`. */
+    callers: z
+      .array(
+        z
+          .object({
+            phone: E164,
+            name: z.string().min(1).max(120),
+            userId: z.string().min(1).optional(),
+          })
+          .strict(),
+      )
+      .max(50)
+      .optional(),
     inboundGreeting: z.string().optional(),
     /** Operator guidance for how the agent should behave on calls. */
     callPrompt: z.string().optional(),
@@ -140,7 +155,43 @@ export const REALTIME_BASE_INSTRUCTIONS =
   "Don't keep the caller on hold for long work. If they ask for something that will take more than a few seconds — research, drafting, " +
   "several steps of tool work — call openclaw_agent_consult and ask the agent to START it as a background task (start_task with self: true) " +
   "rather than do it now. Then tell the caller it's underway, that they can hang up, and that the result will be posted to this call's " +
-  "conversation in their Knoxville console.";
+  "conversation in their Knoxville console.\n\n" +
+  "Never tell the caller that something was started, sent, booked, delegated or saved unless the answer from openclaw_agent_consult " +
+  "says it was. If the consult fails, times out or comes back empty, say plainly that you couldn't get it done and offer to try again.";
+
+export type KnownCaller = NonNullable<VoiceCallSpec["callers"]>[number];
+
+/** "+19016512542" → "+1 901-651-2542" for spoken/prompt use. */
+export function displayPhone(e164: string): string {
+  const d = e164.replace(/\D/g, "");
+  if (d.length === 11 && d.startsWith("1")) return `+1 ${d.slice(1, 4)}-${d.slice(4, 7)}-${d.slice(7)}`;
+  return e164;
+}
+
+/** The voice model's instructions: base + who may be calling + the operator's
+ *  call prompt. Exported for unit tests. */
+export function buildRealtimeInstructions(
+  callers: readonly KnownCaller[],
+  inboundPolicy: string,
+  callPrompt: string | undefined,
+): string {
+  const parts = [REALTIME_BASE_INSTRUCTIONS];
+  if (callers.length > 0) {
+    const list = callers.map((c) => `${c.name} (${displayPhone(c.phone)})`).join("; ");
+    if (inboundPolicy === "allowlist" && callers.length === 1) {
+      parts.push(
+        `Only ${callers[0]!.name} can reach this line, so every caller is ${callers[0]!.name} (${displayPhone(callers[0]!.phone)}). ` +
+          "Greet them by name and treat their requests as theirs.",
+      );
+    } else if (inboundPolicy === "allowlist") {
+      parts.push(`Only these people can reach this line: ${list}. If you're not sure which of them is calling, ask.`);
+    } else {
+      parts.push(`People you know by phone: ${list}. Anyone else is an unknown caller.`);
+    }
+  }
+  if (callPrompt) parts.push(`Operator instructions for calls:\n${callPrompt}`);
+  return parts.join("\n\n");
+}
 
 /** Env vars the plugin needs per provider (when the spec doesn't carry them). */
 function requiredProviderEnv(spec: VoiceCallSpec, provider: string): string[] {
@@ -183,6 +234,8 @@ export interface VoiceCallRender {
   entry: { enabled: true; config: Record<string, unknown> };
   /** Absolute plugin directory to add to `plugins.load.paths`. */
   pluginDir: string;
+  /** Known callers, for the call mirror and the voice-context plugin. */
+  callers: KnownCaller[];
   /** Tools to add to `tools.deny` (the outbound kill switch). */
   toolsDeny: string[];
 }
@@ -200,6 +253,10 @@ export function resolveVoiceCall(
     publicUrl?: string;
     envSource?: Record<string, string | undefined>;
     pluginDir?: string | null;
+    /** `<provider>/<model>` the agent runs on. The plugin otherwise answers
+     *  mid-call handoffs with OpenClaw's built-in default model (seen live:
+     *  openai/gpt-5.5), not the agent's — wrong model, wrong bill. */
+    responseModel?: string;
   } = {},
 ): { render: VoiceCallRender | null; reason: string | null } {
   if (!raw || !raw.trim()) return { render: null, reason: null };
@@ -229,7 +286,8 @@ export function resolveVoiceCall(
   if (missingEnv.length) problems.push(`missing env ${missingEnv.join(", ")}`);
 
   const inboundPolicy = spec.inboundPolicy ?? "allowlist";
-  const allowFrom = [...new Set(spec.allowFrom ?? [])];
+  const callers = spec.callers ?? [];
+  const allowFrom = [...new Set([...(spec.allowFrom ?? []), ...callers.map((c) => c.phone)])];
   const realtimeOn = spec.realtime?.enabled ?? true;
   const realtimeProvider = spec.realtime?.provider ?? "openai";
   if (realtimeOn) {
@@ -281,6 +339,7 @@ export function resolveVoiceCall(
     ...(allowFrom.length ? { allowFrom } : {}),
     ...(spec.inboundGreeting?.trim() ? { inboundGreeting: spec.inboundGreeting.trim() } : {}),
     ...(callPrompt ? { responseSystemPrompt: callPrompt } : {}),
+    ...(opts.responseModel ? { responseModel: opts.responseModel } : {}),
     sessionScope: spec.sessionScope ?? "per-phone",
     ...(spec.maxDurationSeconds ? { maxDurationSeconds: spec.maxDurationSeconds } : {}),
     ...(spec.maxConcurrentCalls ? { maxConcurrentCalls: spec.maxConcurrentCalls } : {}),
@@ -301,9 +360,7 @@ export function resolveVoiceCall(
     config.realtime = {
       enabled: true,
       provider: realtimeProvider,
-      instructions: callPrompt
-        ? `${REALTIME_BASE_INSTRUCTIONS}\n\nOperator instructions for calls:\n${callPrompt}`
-        : REALTIME_BASE_INSTRUCTIONS,
+      instructions: buildRealtimeInstructions(callers, inboundPolicy, callPrompt),
       toolPolicy,
       consultPolicy: spec.realtime?.consultPolicy ?? "substantive",
       // Give the fast voice model the agent's identity (AGENTS.md is the
@@ -338,6 +395,7 @@ export function resolveVoiceCall(
     render: {
       entry: { enabled: true, config },
       pluginDir,
+      callers,
       toolsDeny: outboundOn ? [] : [VOICE_CALL_TOOL],
     },
     reason: null,

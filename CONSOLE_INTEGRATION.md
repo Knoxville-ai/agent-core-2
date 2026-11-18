@@ -956,7 +956,8 @@ plugin block from it, so the phone survives every redeploy.
   "fromNumber": "+18653501221",
   "connectionId": "…",             // optional; else TELNYX_CONNECTION_ID
   "inboundPolicy": "allowlist",    // allowlist (default) | open | disabled
-  "allowFrom": ["+18655550100"],
+  "allowFrom": ["+18655550100"],     // plus every callers[].phone
+  "callers": [{ "phone": "+19016512542", "name": "Zach Tucker", "userId": "…" }],
   "inboundGreeting": "Hi, this is Frank.",
   "callPrompt": "How to behave on calls…",   // → realtime.instructions + responseSystemPrompt
   "sessionScope": "per-phone",     // per-phone (caller memory) | per-call
@@ -989,6 +990,25 @@ bricks an agent.
   identity), and `toolPolicy` defaults to `owner` (full agent tools via
   `openclaw_agent_consult`) when inbound is allowlist-only, `safe-read-only`
   otherwise.
+
+### Calls in the console, callers, background work
+
+* **Handoffs run on the agent's model**: `responseModel` is rendered as
+  `LLM_PROVIDER/LLM_MODEL` — unset, the plugin falls back to OpenClaw's
+  built-in default model.
+* **Known callers** (`callers`, the Phone tab's member picker): their numbers
+  join the allowlist, the voice is told who is calling (with one allowlisted
+  caller: "every caller is <name>"), and `knox-voice-context` prepends "live
+  phone call with <name>, a member of your organization" to every mid-call
+  consult (`before_prompt_build`, looked up via `GET /internal/voice-conversation`).
+* **Call records** (`src/voice/call-mirror.ts`): each answered call becomes a
+  conversation (origin `phone`, owned by the caller's `userId` or the member
+  whose profile phone matches), then gets the transcript, a summary and a
+  `phone-call` memory. Mid-call platform tools are stamped with that
+  conversation, so `start_task` (`self: true` or a delegation) reports there.
+* **Both sides of the transcript**: `docker/patch-voice-call.mjs` patches the
+  pinned plugin at build time to record the realtime voice's own lines (it only
+  recorded the caller's). The build fails if the patched code moved.
 
 ### Railway setup per agent
 
