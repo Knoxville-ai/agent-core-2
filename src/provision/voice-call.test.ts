@@ -166,6 +166,15 @@ describe("resolveVoiceCall", () => {
     expect(rt.instructions).toContain('status \"working\": that is NOT a failure');
   });
 
+  it("SMS is off unless enabled; texting is limited to the allowlist", () => {
+    expect(resolve(SPEC).render!.sms).toBeNull();
+    const r = resolve({ ...SPEC, sms: { enabled: true, messagingProfileId: "mp-1" } }).render!;
+    expect(r.sms).toEqual({ from: "+18653501221", messagingProfileId: "mp-1" });
+    expect(r.textable).toEqual(["+18655550100"]);
+    // Not part of the plugin's own config (its schema would reject it).
+    expect(r.entry.config).not.toHaveProperty("sms");
+  });
+
   it("handoffs run on the agent's own model when given", () => {
     const r = resolveVoiceCall(JSON.stringify(SPEC), {
       publicUrl: PUBLIC,

@@ -236,11 +236,36 @@ export class VoiceConversationIndex {
     this.links.set(sessionKey, { conversationId, caller, expiresAt: null });
   }
 
-  /** Conversation + caller for a voice session (the shim route's answer). */
+  private mirror: { byConversation(id: string): PhoneConversation | null } | null = null;
+  private smsEnabled = false;
+
+  /** Lets webchat sessions of a phone call's conversation be recognized. */
+  attach(mirror: { byConversation(id: string): PhoneConversation | null }, smsEnabled: boolean): void {
+    this.mirror = mirror;
+    this.smsEnabled = smsEnabled;
+  }
+
+  /** Conversation + caller for a voice session — or, for the webchat session
+   *  of a phone call's conversation (where task results arrive), the call it
+   *  records (the shim route's answer). */
   lookup(
     sessionKey: string | null | undefined,
     now = Date.now(),
-  ): { conversation_id: string | null; caller: CallerIdentity | null } {
+  ): {
+    conversation_id: string | null;
+    caller: CallerIdentity | null;
+    phone_record?: { live: boolean; sms: boolean };
+  } {
+    const web = /^(?:.*:)?webchat:(.+)$/.exec(sessionKey ?? "");
+    if (web && this.mirror) {
+      const rec = this.mirror.byConversation(web[1]!);
+      if (!rec) return { conversation_id: null, caller: null };
+      return {
+        conversation_id: rec.conversationId,
+        caller: { name: rec.who, phone: displayE164(rec.party), member: Boolean(rec.userId) },
+        phone_record: { live: rec.live, sms: this.smsEnabled },
+      };
+    }
     const tail = voiceSessionTail(sessionKey);
     if (!tail) return { conversation_id: null, caller: null };
     const conversationId = this.get(tail, now);
@@ -313,7 +338,20 @@ interface MirrorState {
   userId?: string | null;
   /** How the other party is named in titles and the summary. */
   who?: string;
+  /** The other party's number (E.164). */
+  party?: string;
   done?: boolean;
+}
+
+/** A mirrored call, as the notifier and the voice-context plugin see it. */
+export interface PhoneConversation {
+  callId: string;
+  conversationId: string;
+  party: string;
+  who: string;
+  userId: string | null;
+  /** The call is still connected. */
+  live: boolean;
 }
 
 /**
@@ -339,6 +377,22 @@ export class CallMirror {
     });
     this.pending.set(call.callId, next);
     return next;
+  }
+
+  /** The call a console conversation records, if this mirror made it. */
+  byConversation(conversationId: string): PhoneConversation | null {
+    for (const [callId, st] of this.state) {
+      if (st.conversationId !== conversationId) continue;
+      return {
+        callId,
+        conversationId,
+        party: st.party ?? "",
+        who: st.who ?? (st.party ? prettyPhone(st.party) : "the caller"),
+        userId: st.userId ?? null,
+        live: !st.done,
+      };
+    }
+    return null;
   }
 
   async idle(): Promise<void> {
@@ -373,6 +427,7 @@ export class CallMirror {
       });
       st.userId = member?.userId ?? null;
       st.who = who;
+      st.party = party;
       this.state.set(call.callId, st);
       this.index.set(sessionKey, st.conversationId, {
         name: known?.name || member?.name?.trim() || null,
@@ -599,6 +654,16 @@ export class SupabaseCallMirrorStore implements CallMirrorStore {
       if (d && d === want) return { userId: u.id, name: u.display_name };
     }
     return null;
+  }
+
+  /** The agent's name as the console shows it (agents.display_name). */
+  async agentDisplayName(): Promise<string | null> {
+    const { data } = await this.client
+      .from("agents")
+      .select("display_name")
+      .eq("id", this.env.AGENT_UID)
+      .maybeSingle();
+    return (data as { display_name: string | null } | null)?.display_name?.trim() || null;
   }
 
   async createConversation(input: { userId: string | null; title: string }): Promise<string> {

@@ -206,6 +206,32 @@ describe("caller identity", () => {
   });
 });
 
+describe("phone conversations", () => {
+  it("byConversation reports the call (live, then ended) and the index answers webchat lookups", async () => {
+    const { store } = fakeStore({ userId: "user-zach", name: "Zach Tucker" });
+    const index = new VoiceConversationIndex();
+    const { m } = mirror(store, { index });
+    index.attach(m, true);
+    await m.handle(call());
+    expect(m.byConversation("conv-1")).toEqual({
+      callId: "call-1",
+      conversationId: "conv-1",
+      party: "+19016512542",
+      who: "Zach Tucker",
+      userId: "user-zach",
+      live: true,
+    });
+    expect(index.lookup("webchat:conv-1")).toEqual({
+      conversation_id: "conv-1",
+      caller: { name: "Zach Tucker", phone: "+1 901-651-2542", member: true },
+      phone_record: { live: true, sms: true },
+    });
+    await m.handle(call({ state: "completed", endedAt: T0 + 30_000, transcript: TRANSCRIPT }));
+    expect(m.byConversation("conv-1")!.live).toBe(false);
+    expect(index.lookup("webchat:other")).toEqual({ conversation_id: null, caller: null });
+  });
+});
+
 describe("dropRestatedPrefix", () => {
   it("fixes the partial+final restatement from the live call", () => {
     const heard =

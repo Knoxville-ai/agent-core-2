@@ -49,6 +49,7 @@ import {
 } from "./turn-live.js";
 import { sendJson } from "./util.js";
 import { voiceConversations } from "../voice/call-mirror.js";
+import { phoneNotify } from "../voice/notify.js";
 
 interface ServerHandle {
   close: () => Promise<void>;
@@ -315,6 +316,7 @@ async function route(
         usage,
         toolCalls,
         ...turns,
+        onTurnComplete: (info) => phoneNotify.current?.handle(info),
       });
     }
     if (sub === "interrupt") {

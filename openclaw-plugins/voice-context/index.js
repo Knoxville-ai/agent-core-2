@@ -1,6 +1,11 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
-import { buildVoiceContext, isVoiceSessionKey } from "./context.js";
+import {
+  buildPhoneRecordContext,
+  buildVoiceContext,
+  isVoiceSessionKey,
+  isWebchatSessionKey,
+} from "./context.js";
 
 /**
  * Knox voice context — tells the agent, on every consult the realtime voice
@@ -20,9 +25,17 @@ export default definePluginEntry({
   register(api) {
     api.on("before_prompt_build", async (_event, ctx) => {
       const sessionKey = ctx?.sessionKey;
-      if (!isVoiceSessionKey(sessionKey)) return undefined;
-      const info = await lookup(sessionKey);
-      return { prependContext: buildVoiceContext(info) };
+      if (isVoiceSessionKey(sessionKey)) {
+        return { prependContext: buildVoiceContext(await lookup(sessionKey)) };
+      }
+      // A phone call's console conversation (task results land there): tell the
+      // agent its reply reaches the caller, so it writes for them instead of
+      // apologizing that it can't text them.
+      if (isWebchatSessionKey(sessionKey)) {
+        const text = buildPhoneRecordContext(await lookup(sessionKey));
+        return text ? { prependContext: text } : undefined;
+      }
+      return undefined;
     });
   },
 });

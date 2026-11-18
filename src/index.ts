@@ -20,6 +20,8 @@ import {
   voiceCallsDir,
   voiceConversations,
 } from "./voice/call-mirror.js";
+import { cliSpeaker, PhoneNotifier, phoneNotify, telnyxSms } from "./voice/notify.js";
+import { MessagingDB } from "./shim/supabase-db.js";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -132,12 +134,38 @@ async function main(): Promise<void> {
   if (voice.render) {
     const scope = voice.render.entry.config.sessionScope === "per-call" ? "per-call" : "per-phone";
     voiceConversations.setKnownCallers(voice.render.callers);
+    const mirrorStore = new SupabaseCallMirrorStore(env);
     const mirror = new CallMirror({
-      store: new SupabaseCallMirrorStore(env),
+      store: mirrorStore,
       agentUid: env.AGENT_UID,
       scope,
       callers: voice.render.callers,
       summarize: llmCompleteSummarizer(env),
+    });
+    voiceConversations.attach(mirror, Boolean(voice.render.sms));
+    // Results of phone-started work reach the caller: spoken if they're still
+    // on the line, texted (SMS on) once the call is over. See voice/notify.ts.
+    const db = new MessagingDB(env);
+    phoneNotify.current = new PhoneNotifier({
+      byConversation: (id) => mirror.byConversation(id),
+      speak: cliSpeaker(env),
+      sms:
+        voice.render.sms && process.env.TELNYX_API_KEY
+          ? telnyxSms(voice.render.sms.from, process.env.TELNYX_API_KEY, voice.render.sms.messagingProfileId)
+          : null,
+      textable: new Set(voice.render.textable),
+      note: async (conversationId, text) => {
+        await db.insertMessage({
+          conversationId,
+          role: "assistant",
+          content: text,
+          status: "complete",
+          systemGenerated: true,
+          senderKind: "system",
+          senderId: env.AGENT_UID,
+        });
+      },
+      agentName: (await mirrorStore.agentDisplayName().catch(() => null)) ?? "",
     });
     callTail = new CallLogTail(voiceCallsDir(env), mirror);
     await callTail.start().catch((err) => {

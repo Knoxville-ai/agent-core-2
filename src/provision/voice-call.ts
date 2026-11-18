@@ -104,6 +104,16 @@ export const VoiceCallSpecSchema = z
       )
       .max(50)
       .optional(),
+    /** Text the result of phone-started work to the caller once the call is
+     *  over (src/voice/notify.ts). Needs the number on a Telnyx messaging
+     *  profile and, for US recipients, 10DLC registration. Off by default. */
+    sms: z
+      .object({
+        enabled: z.boolean().optional(),
+        messagingProfileId: z.string().min(1).optional(),
+      })
+      .strict()
+      .optional(),
     inboundGreeting: z.string().optional(),
     /** Operator guidance for how the agent should behave on calls. */
     callPrompt: z.string().optional(),
@@ -240,6 +250,9 @@ export interface VoiceCallRender {
   pluginDir: string;
   /** Known callers, for the call mirror and the voice-context plugin. */
   callers: KnownCaller[];
+  /** Texting results after a call (null = off), and who may be texted. */
+  sms: { from: string; messagingProfileId?: string } | null;
+  textable: string[];
   /** Tools to add to `tools.deny` (the outbound kill switch). */
   toolsDeny: string[];
 }
@@ -400,6 +413,11 @@ export function resolveVoiceCall(
       entry: { enabled: true, config },
       pluginDir,
       callers,
+      sms:
+        spec.sms?.enabled && spec.fromNumber && provider === "telnyx"
+          ? { from: spec.fromNumber, ...(spec.sms.messagingProfileId ? { messagingProfileId: spec.sms.messagingProfileId } : {}) }
+          : null,
+      textable: allowFrom,
       toolsDeny: outboundOn ? [] : [VOICE_CALL_TOOL],
     },
     reason: null,

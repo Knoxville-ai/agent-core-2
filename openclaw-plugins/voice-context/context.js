@@ -35,3 +35,35 @@ export function buildVoiceContext(info) {
   );
   return lines.join("\n");
 }
+
+/** True for the webchat session of a console conversation (where task results
+ *  for a phone call's conversation arrive). */
+export function isWebchatSessionKey(sessionKey) {
+  return typeof sessionKey === "string" && /(^|:)webchat:/.test(sessionKey);
+}
+
+/**
+ * Context for a turn in a phone call's console conversation — typically the
+ * result of work started on the call coming back. `info.phone_record` is
+ * `{ live, sms }` from the shim; null/absent means "not a phone call".
+ */
+export function buildPhoneRecordContext(info) {
+  const rec = info?.phone_record;
+  if (!rec) return null;
+  const caller = info.caller ?? {};
+  const who = caller.name || caller.phone || "the caller";
+  const delivery = rec.live
+    ? "it is spoken to them on the call right away"
+    : rec.sms
+      ? "it is texted to them"
+      : "they will see it here in the console";
+  return [
+    "## This conversation is a phone call",
+    `This conversation is the record of a phone call with ${who}` +
+      (caller.phone && caller.name ? ` (${caller.phone})` : "") +
+      (caller.member ? ", a member of your organization" : "") +
+      `. ${rec.live ? "They are still on the line." : "The call has ended."}`,
+    `When work you started for them comes back here, write the result for them briefly and plainly — the platform delivers your reply: ${delivery}. ` +
+      "You don't need to text, call or escalate it yourself, and don't say you can't reach them.",
+  ].join("\n");
+}

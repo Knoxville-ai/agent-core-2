@@ -122,6 +122,14 @@ export interface MessagesDeps {
   turns: TurnLocks;
   /** Where token deltas are broadcast (turn-live.ts). */
   publisher: TurnPublisher;
+  /** Called (not awaited) once a turn's reply is final. Used to get the result
+   *  of phone-started work back to the caller (../voice/notify.ts). */
+  onTurnComplete?: (info: {
+    conversationId: string;
+    userContent: string;
+    reply: string;
+    status: "complete" | "interrupted" | "error";
+  }) => unknown;
 }
 
 export async function handleSendMessage(
@@ -658,6 +666,13 @@ export async function handleSendMessage(
     // turn boundary is a race-free quiet point; checkpoint() is coalesced and
     // never throws (M1 volume still holds the bytes if an upload fails).
     await deps.memory.checkpoint();
+    if (deps.onTurnComplete) {
+      void Promise.resolve()
+        .then(() =>
+          deps.onTurnComplete?.({ conversationId, userContent: content, reply: visible, status: finalStatus }),
+        )
+        .catch((err) => log.warn("turn-complete hook failed", { err: String(err) }));
+    }
   }
 }
 
