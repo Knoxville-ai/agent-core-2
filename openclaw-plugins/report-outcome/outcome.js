@@ -100,6 +100,9 @@ const CONVERSATION_ID_TOOLS = [
   { suffix: ESCALATE_TO_HUMAN_SUFFIX, param: "conversation_id" },
   { suffix: SEND_EMAIL_SUFFIX, param: "conversation_id" },
   { suffix: SEND_CUSTOMER_EMAIL_SUFFIX, param: "conversation_id" },
+  // Escalations on a phone call (console 0218): the call's conversation scopes
+  // which escalations the agent may read and answer for the caller.
+  { suffix: /(^|[.:/]|__)(list_call_escalations|answer_call_escalation)$/, param: "conversation_id" },
   {
     suffix: /(^|[.:/]|__)start_conversation$/,
     param: "caller_conversation_id",

@@ -31,6 +31,12 @@ export function buildVoiceContext(info) {
       "(`self: true` to do it yourself, or the target agent to delegate) and reply with what you started. " +
       "The result is delivered to this call's conversation in the console when it lands.",
     "If you already started this same work earlier in this call, don't start it again: say it's already running.",
+    "When you start a task from this call, add to its instructions: \"Requested on a phone call: if you need a " +
+      "decision, ask one short question with two or three clear options.\"",
+    "If work started on this call is waiting on a decision or approval, read it with `list_call_escalations` and, " +
+      "once the caller has answered, record exactly their answer with `answer_call_escalation` — never decide for them. " +
+      "Approving also needs the caller's phone PIN (`pin`, the digits they said). Don't send them to the console, and " +
+      "don't use `escalate_to_human` to ask the person you're already talking to — ask them directly.",
     "Only say something was started or done if the tool call actually succeeded; if it failed, say so.",
   );
   return lines.join("\n");
@@ -65,5 +71,7 @@ export function buildPhoneRecordContext(info) {
       `. ${rec.live ? "They are still on the line." : "The call has ended."}`,
     `When work you started for them comes back here, write the result for them briefly and plainly — the platform delivers your reply: ${delivery}. ` +
       "You don't need to text, call or escalate it yourself, and don't say you can't reach them.",
+    "If this turn says work is waiting on them (`[escalation-raised]`), write the question for them: what's waiting and the " +
+      "choices, in a sentence or two — and, for an approval, that they'll need to say their phone PIN. Don't tell them to go to the console.",
   ].join("\n");
 }

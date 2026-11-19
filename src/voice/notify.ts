@@ -24,6 +24,9 @@ import { displayE164, type PhoneConversation } from "./call-mirror.js";
 
 /** The console's wake-up for a finished task (lib/tasks/callback.ts). */
 export const TASK_CALLBACK_PREFIX = "[task-callback]";
+/** The console's notice that work started on a call is waiting on the caller
+ *  (lib/escalations/phone.ts, 0218). */
+export const ESCALATION_RAISED_PREFIX = "[escalation-raised]";
 
 export interface TurnCompleteInfo {
   conversationId: string;
@@ -71,7 +74,9 @@ export class PhoneNotifier {
   async handle(info: TurnCompleteInfo): Promise<"spoken" | "texted" | "skipped" | "failed"> {
     try {
       if (info.status !== "complete") return "skipped";
-      if (!info.userContent.trimStart().startsWith(TASK_CALLBACK_PREFIX)) return "skipped";
+      const head = info.userContent.trimStart();
+      const question = head.startsWith(ESCALATION_RAISED_PREFIX);
+      if (!question && !head.startsWith(TASK_CALLBACK_PREFIX)) return "skipped";
       const reply = info.reply.trim();
       if (!reply) return "skipped";
       const call = this.deps.byConversation(info.conversationId);
@@ -80,8 +85,12 @@ export class PhoneNotifier {
       if (call.live) {
         const said = await this.deps.speak(
           call.callId,
-          "A result you were waiting on just came in. Tell the caller now, in one or two short spoken sentences, " +
-            `then ask if they need anything else:\n${plainText(reply, 1200)}`,
+          question
+            ? "Something you started for the caller is waiting on their decision. Ask them now, briefly, with the choices " +
+                "(for an approval, they also need to say their phone PIN), then consult the agent with their answer so it " +
+                `can record it:\n${plainText(reply, 1200)}`
+            : "A result you were waiting on just came in. Tell the caller now, in one or two short spoken sentences, " +
+                `then ask if they need anything else:\n${plainText(reply, 1200)}`,
         );
         if (said.ok) {
           await this.deps.note(info.conversationId, `Told ${call.who} on the call.`);
@@ -97,7 +106,10 @@ export class PhoneNotifier {
         return "skipped";
       }
       const name = this.deps.agentName.trim();
-      const sent = await this.deps.sms(call.party, `${name ? `${name}: ` : ""}${plainText(reply, 1000)}`);
+      const body = question
+        ? `${plainText(reply, 800)}\nCall back to answer, or answer it in the console.`
+        : plainText(reply, 1000);
+      const sent = await this.deps.sms(call.party, `${name ? `${name}: ` : ""}${body}`);
       if (sent.ok) {
         await this.deps.note(info.conversationId, `Texted the result to ${call.who} (${displayE164(call.party)}).`);
         log.info("phone result texted", { conversation_id: info.conversationId });

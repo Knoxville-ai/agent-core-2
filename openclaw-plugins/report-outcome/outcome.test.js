@@ -202,6 +202,13 @@ describe("isReportOutcomeTool", () => {
   });
 });
 
+describe("phone call escalation tools", () => {
+  it("get the call's conversation id stamped", () => {
+    expect(conversationIdParamFor("knoxville_platform__list_call_escalations")).toBe("conversation_id");
+    expect(conversationIdParamFor("knoxville_platform__answer_call_escalation")).toBe("conversation_id");
+  });
+});
+
 describe("conversationIdFromSessionKey", () => {
   it("never reads a phone call's session as a conversation id", () => {
     // voice:<digits> would otherwise stamp the caller's phone number as the id.

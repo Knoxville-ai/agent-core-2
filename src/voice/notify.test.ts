@@ -65,6 +65,17 @@ describe("PhoneNotifier", () => {
     expect(log.texts).toHaveLength(1);
   });
 
+  it("a question from the call's work is put to the caller live, or texted with how to answer", async () => {
+    const q = { ...RESULT, userContent: "[escalation-raised] Work started on this call is waiting on the caller.", reply: "Approve the quote?" };
+    const live = notifier({ call: { ...CALL, live: true } });
+    expect(await live.n.handle(q)).toBe("spoken");
+    expect(live.log.spoken[0]).toContain("waiting on their decision");
+    expect(live.log.spoken[0]).toContain("phone PIN");
+    const over = notifier();
+    expect(await over.n.handle(q)).toBe("texted");
+    expect(over.log.texts[0]![1]).toBe("Frank: Approve the quote?\nCall back to answer, or answer it in the console.");
+  });
+
   it("only task results, only phone conversations, only finished replies", async () => {
     expect(await notifier().n.handle({ ...RESULT, userContent: "hello" })).toBe("skipped");
     expect(await notifier({ call: null }).n.handle(RESULT)).toBe("skipped");

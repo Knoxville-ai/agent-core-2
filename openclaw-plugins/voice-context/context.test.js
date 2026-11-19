@@ -16,6 +16,8 @@ describe("knox-voice-context", () => {
     });
     expect(text).toContain("live phone call with Zach Tucker (+1 901-651-2542), a member of your organization.");
     expect(text).toContain("start_task");
+    expect(text).toContain("answer_call_escalation");
+    expect(text).toContain("phone PIN");
   });
 
   it("degrades to an unknown caller, then to nothing known", () => {
