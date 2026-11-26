@@ -118,6 +118,22 @@ export interface AgentMemoryRow {
   tags: string[] | null;
 }
 
+/**
+ * PostgREST `or` filter for memories the prompt may carry: no provenance
+ * recorded (saved before console 0266, or a lesson), saved from a trusted
+ * session, or confirmed by a person (decide_lesson stamps `decided_at`).
+ */
+export const TRUSTED_MEMORY_FILTER =
+  "origin_trust.is.null,origin_trust.eq.trusted,decided_at.not.is.null";
+
+/** True for the error a pre-0266 database gives for the `origin_trust` filter. */
+export function isMissingProvenanceColumn(error: { code?: string; message?: string }): boolean {
+  return (
+    (error.code === "42703" || error.code === "PGRST204" || /column/i.test(error.message ?? "")) &&
+    /origin_trust/.test(error.message ?? "")
+  );
+}
+
 export interface CallerContextQuery {
   targetAgentUid: string;
   callerAgentUid?: string | null;
@@ -281,25 +297,40 @@ export class MessagingDB implements ToolCallDB {
    * The agent's most recently written durable memories, for the per-turn
    * `# RECENT` injection — the live path for memory written mid-session, since
    * SOUL's `# MEMORY` digest is only a boot snapshot. Not conversation-scoped:
-   * memories written via the `remember` tool are unlinked (an openclaw turn only
-   * knows the engine session id, not a public.conversations row), so recency is
-   * keyed on the agent, newest first. Fail-open like getCallerContext.
+   * recency is keyed on the agent, newest first. Fail-open like
+   * getCallerContext (an error yields no memories, never a broken turn).
+   *
+   * Only memories in force AND of trusted origin are returned:
+   *   - `status = 'active'` (console 0125/0130): a proposed lesson or memory is
+   *     waiting on a person and must not shape the agent before it is confirmed.
+   *   - provenance (console 0266, SEC-027): a memory saved from a session the
+   *     console did not judge trusted (`origin_trust` untrusted / unknown) is
+   *     returned only once a person has decided on it (`decided_at` set by the
+   *     confirm). Rows from before 0266 have no provenance (null) and pass.
+   * A database that predates 0266 has no `origin_trust` column; the query is
+   * then retried without the provenance predicate — such a database holds no
+   * provenance-tagged rows, so nothing it filters can be lost. (Remove the
+   * retry once every console database is past 0266.)
    */
   async getRecentMemories(
     agentUid: string,
     limit = 5,
   ): Promise<AgentMemoryRow[]> {
-    try {
-      const { data, error } = await this.client
+    const query = (withProvenance: boolean) => {
+      let q = this.client
         .from("agent_memories")
         .select("title,body,kind,tags")
         .eq("agent_uid", agentUid)
         .is("superseded_by", null)
-        // Only lessons in force (console 0125): a PROPOSED lesson is waiting on
-        // a human and must not steer the agent before it is confirmed.
-        .eq("status", "active")
-        .order("created_at", { ascending: false })
-        .limit(limit);
+        .eq("status", "active");
+      if (withProvenance) q = q.or(TRUSTED_MEMORY_FILTER);
+      return q.order("created_at", { ascending: false }).limit(limit);
+    };
+    try {
+      let { data, error } = await query(true);
+      if (error && isMissingProvenanceColumn(error)) {
+        ({ data, error } = await query(false));
+      }
       if (error) {
         log.warn("getRecentMemories failed", { err: error.message });
         return [];

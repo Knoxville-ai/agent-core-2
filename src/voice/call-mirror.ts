@@ -21,8 +21,9 @@ import { LLM_COMPLETE_PATH } from "../shim/conversation-title.js";
  *   2. once the call ends, writes the transcript into that conversation, asks
  *      the agent's own model for a short summary (the knox-llm-complete route),
  *      posts it, and saves it as an episodic memory (`remember_memory`, the RPC
- *      behind the platform's `remember` tool) so the agent recalls the call in
- *      chat, on later calls and in tasks.
+ *      behind the platform's `remember` tool). A call's content comes from
+ *      outside the org, so the memory is held for a member to confirm (console
+ *      0266) before the agent recalls it in chat, on later calls and in tasks.
  *
  * It also answers, for the report-outcome plugin, "which conversation is this
  * voice session's call?" (see {@link VoiceConversationIndex}), which is how a
@@ -699,8 +700,20 @@ export class SupabaseCallMirrorStore implements CallMirrorStore {
     if (error) throw new Error(`insert phone message: ${error.message}`);
   }
 
+  /**
+   * Save the call summary as an episodic memory, with the provenance the
+   * console's `remember` tool would record for a phone session (console 0266,
+   * SEC-027): a call's words come from outside the org, so the memory is held
+   * as a proposal a member confirms before it reaches recall, the boot digest
+   * or the per-turn prompt. The transcript and summary stay in the call's
+   * conversation either way.
+   *
+   * A database that predates 0266 has only the old ten-argument
+   * remember_memory; the call is then repeated in that form (an active memory,
+   * as before). Remove the fallback once every console database is past 0266.
+   */
   async remember(input: { conversationId: string; body: string; tags: string[] }): Promise<void> {
-    const { error } = await this.client.rpc("remember_memory", {
+    const legacy = {
       p_org_id: this.env.AGENT_ORG,
       p_agent_uid: this.env.AGENT_UID,
       p_body: input.body,
@@ -711,9 +724,30 @@ export class SupabaseCallMirrorStore implements CallMirrorStore {
       p_pinned: false,
       p_conversation_id: input.conversationId,
       p_expires_at: null,
+    };
+    let { error } = await this.client.rpc("remember_memory", {
+      ...legacy,
+      ...PHONE_MEMORY_PROVENANCE,
     });
+    if (error && isMissingRpcSignature(error)) {
+      ({ error } = await this.client.rpc("remember_memory", legacy));
+    }
     if (error) throw new Error(`remember_memory: ${error.message}`);
   }
+}
+
+/** remember_memory's provenance arguments for a phone-call memory (0266). */
+export const PHONE_MEMORY_PROVENANCE = {
+  p_status: "proposed",
+  p_origin_trust: "untrusted",
+  p_origin_kind: "phone",
+  p_note:
+    "Saved from a phone call's summary. Confirm it before it shapes the agent's other conversations.",
+} as const;
+
+/** True for PostgREST's "no function with these arguments" (a pre-0266 database). */
+function isMissingRpcSignature(error: { code?: string; message?: string }): boolean {
+  return error.code === "PGRST202" || /could not find the function/i.test(error.message ?? "");
 }
 
 /** Summaries come from the agent's own model via the knox-llm-complete route. */

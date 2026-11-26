@@ -5,6 +5,7 @@ import {
   conversationIdFromSessionKey,
   conversationIdParamFor,
   isReminderSessionTool,
+  isRememberTool,
   isEscalateToHumanTool,
   isLearningLinkTool,
   isSendCustomerEmailTool,
@@ -44,7 +45,7 @@ export default definePluginEntry({
   id: "knox-report-outcome",
   name: "Knox Conversation Id Injector",
   description:
-    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, send_customer_email, ask_question, submit_for_review, create_reminder and publish_artifact MCP calls so the model never has to know or type it; attach the file a publish_artifact call names.",
+    "Stamp the platform conversation id onto the agent's report_outcome, start_task, escalate_to_human, send_email, send_customer_email, ask_question, submit_for_review, create_reminder, publish_artifact and remember MCP calls so the model never has to know or type it; attach the file a publish_artifact call names.",
   register(api) {
     api.on(
       "before_tool_call",
@@ -141,12 +142,14 @@ function stampSession(event, ctx) {
   // task_id-in-a-task-session link so the console shows where they came from.
   // create_reminder (0137) takes it to find who the reminder reports to,
   // resolve_reminder to decide whether this call may close the reminder, and
-  // publish_artifact (0138) to find whose page it is.
+  // publish_artifact (0138) to find whose page it is, and remember (0266) to
+  // judge whether the memory may take effect without a person confirming it.
   if (
     isEscalateToHumanTool(toolName) ||
     isSendCustomerEmailTool(toolName) ||
     isLearningLinkTool(toolName) ||
     isReminderSessionTool(toolName) ||
+    isRememberTool(toolName) ||
     isPublishArtifactTool(toolName)
   ) {
     const taskId = taskIdFromSessionKey(ctx?.sessionKey);

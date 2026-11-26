@@ -91,8 +91,18 @@ const REMINDER_SESSION_SUFFIX = /(^|[.:/]|__)(create_reminder|resolve_reminder)$
  *  publishes and belongs to the org's owner. */
 const PUBLISH_ARTIFACT_SUFFIX = /(^|[.:/]|__)publish_artifact$/;
 
+/** The platform's memory writer (console 0266, SEC-027). The session decides
+ *  whether a memory takes effect at once (a member's own session or a routine
+ *  run) or waits for a person to confirm it (any other session). Same stamping
+ *  rule as the learning tools: `task_id` in a task session, `conversation_id`
+ *  otherwise. Unstamped, the platform cannot tell where the memory came from
+ *  and holds every one for confirmation; a console that predates 0266 ignores
+ *  the extra keys. The model must not choose either id. */
+const REMEMBER_SUFFIX = /(^|[.:/]|__)remember$/;
+
 const CONVERSATION_ID_TOOLS = [
   { suffix: LEARNING_LINK_SUFFIX, param: "conversation_id" },
+  { suffix: REMEMBER_SUFFIX, param: "conversation_id" },
   { suffix: REMINDER_SESSION_SUFFIX, param: "conversation_id" },
   { suffix: PUBLISH_ARTIFACT_SUFFIX, param: "conversation_id" },
   { suffix: REPORT_OUTCOME_SUFFIX, param: "conversation_id" },
@@ -143,6 +153,11 @@ export function isSendCustomerEmailTool(toolName) {
 /** True when `toolName` is ask_question or submit_for_review (0125). */
 export function isLearningLinkTool(toolName) {
   return typeof toolName === "string" && LEARNING_LINK_SUFFIX.test(toolName);
+}
+
+/** True when `toolName` is the platform `remember` tool (0266). */
+export function isRememberTool(toolName) {
+  return typeof toolName === "string" && REMEMBER_SUFFIX.test(toolName);
 }
 
 /** True when `toolName` is create_reminder or resolve_reminder (0137). */

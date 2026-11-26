@@ -182,3 +182,65 @@ describe("MessagingDB.setConversationTitleIfUnset", () => {
     expect(await db.setConversationTitleIfUnset("c1", "X")).toBe(false);
   });
 });
+
+describe("MessagingDB.getRecentMemories (status + provenance)", () => {
+  type Call = { method: string; args: unknown[] };
+  /** Records every builder call per query; `results` answers each query in turn. */
+  function memoryClient(results: Array<{ data: unknown; error: { code?: string; message: string } | null }>) {
+    const queries: Call[][] = [];
+    const client = {
+      from: (table: string) => {
+        const calls: Call[] = [{ method: "from", args: [table] }];
+        queries.push(calls);
+        const builder: Record<string, unknown> = {};
+        for (const m of ["select", "eq", "is", "or", "order"]) {
+          builder[m] = (...args: unknown[]) => {
+            calls.push({ method: m, args });
+            return builder;
+          };
+        }
+        builder.limit = (...args: unknown[]) => {
+          calls.push({ method: "limit", args });
+          return Promise.resolve(results.shift() ?? { data: [], error: null });
+        };
+        return builder;
+      },
+    };
+    return { client, queries };
+  }
+
+  it("selects only active, non-superseded memories of trusted or confirmed origin", async () => {
+    const rows = [{ title: "t", body: "b", kind: "fact", tags: [] }];
+    const { client, queries } = memoryClient([{ data: rows, error: null }]);
+    const out = await new MessagingDB(env, client as never).getRecentMemories("agent-1");
+    expect(out).toEqual(rows);
+    expect(queries).toHaveLength(1);
+    const calls = queries[0]!;
+    expect(calls).toContainEqual({ method: "eq", args: ["agent_uid", "agent-1"] });
+    expect(calls).toContainEqual({ method: "eq", args: ["status", "active"] });
+    expect(calls).toContainEqual({ method: "is", args: ["superseded_by", null] });
+    const or = calls.find((c) => c.method === "or");
+    expect(or?.args[0]).toBe("origin_trust.is.null,origin_trust.eq.trusted,decided_at.not.is.null");
+    // Untrusted / unknown origins are not admitted by any branch of the filter.
+    expect(String(or?.args[0])).not.toMatch(/untrusted|unknown/);
+  });
+
+  it("retries without the provenance filter on a database that predates the column", async () => {
+    const rows = [{ title: null, body: "b", kind: null, tags: null }];
+    const { client, queries } = memoryClient([
+      { data: null, error: { code: "42703", message: "column agent_memories.origin_trust does not exist" } },
+      { data: rows, error: null },
+    ]);
+    const out = await new MessagingDB(env, client as never).getRecentMemories("agent-1");
+    expect(out).toEqual(rows);
+    expect(queries).toHaveLength(2);
+    expect(queries[1]!.some((c) => c.method === "or")).toBe(false);
+    expect(queries[1]).toContainEqual({ method: "eq", args: ["status", "active"] });
+  });
+
+  it("returns nothing (no unfiltered retry) on any other error", async () => {
+    const { client, queries } = memoryClient([{ data: null, error: { code: "57014", message: "statement timeout" } }]);
+    expect(await new MessagingDB(env, client as never).getRecentMemories("agent-1")).toEqual([]);
+    expect(queries).toHaveLength(1);
+  });
+});
