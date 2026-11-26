@@ -61,6 +61,10 @@ export interface BundleAssignment {
     name: string;
     listingStatus: string;
     availability: string;
+    /** The listing's org, when the console sends it. Optional on the wire;
+     *  an entry of another org is ignored (bundle/org-scope.ts). */
+    orgId?: string | null;
+    sourceOrgId?: string | null;
   };
   capability: BundleCapability;
 }
@@ -76,6 +80,9 @@ export interface DelegationConnection {
   displayName: string;
   label?: string | null;
   instructions: string;
+  /** The org that owns this connection, when the console sends it. Optional
+   *  on the wire; a connection of another org is ignored (bundle/org-scope.ts). */
+  orgId?: string | null;
 }
 
 /**
