@@ -154,6 +154,16 @@ gateway starts), `nudge` (`POST /skills/sync`), `poll` (`SKILL_SYNC_POLL_MS`).
    `.skills-trash`, staging → `skills/<slug>`, trash removed, lock updated.
    Size limits and description length are the console's publishing policy and
    are never a reason for the vessel to refuse a skill.
+   **`install.uv` grammar.** Each entry must be `name[extras] <op> version, …`
+   (PEP 508 without direct references or markers: `mcp>=1.9.0`,
+   `playwright[chromium]>=1.40,<2`, `requests (>=2.28)`). An entry that is an
+   option (`-e`, `--index-url`, …), a URL / VCS / `name @ …` reference, a local
+   path or archive, or carries a `;` marker makes the skill `failed`
+   (`refused install.uv requirement(s): …`) and nothing is installed; the
+   legacy union install drops just that entry. Installs use one package index —
+   `SKILL_DEPS_INDEX_URL` (https only), else an image-set `UV_DEFAULT_INDEX` /
+   `UV_INDEX_URL` / `PIP_INDEX_URL`, else PyPI — with extra-index / find-links
+   env and uv/pip config files ignored.
 3. Lock entries the plan dropped (and that aren't in `legacy`) are removed.
 4. `legacy` entries are installed with `openclaw skills install` (ClawHub) when
    not already at that version, locked as `source: "clawhub"` with
