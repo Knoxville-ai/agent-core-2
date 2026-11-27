@@ -514,11 +514,33 @@ describe("buildOpenclawConfig mcp.servers block", () => {
     expect(mcpServers(buildOpenclawConfig(makeEnv({}), "/ws"))).toEqual({});
   });
 
-  it("PLATFORM_MCP_URL → knoxville_platform with bearer auth", () => {
+  it("PLATFORM_MCP_URL → knoxville_platform through the shim's session-header forwarder", () => {
     const config = buildOpenclawConfig(
       makeEnv({
         PLATFORM_MCP_URL: "https://console.example/api/mcp",
         PLATFORM_API_TOKEN: "knox_agent_x",
+      }),
+      "/ws",
+    );
+    expect(mcpServers(config)).toEqual({
+      knoxville_platform: {
+        url: "http://127.0.0.1:8080/internal/platform-mcp",
+        transport: "streamable-http",
+        headers: { Authorization: "Bearer 0123456789abcdef" },
+      },
+    });
+    // The platform token stays in the shim; openclaw.json never holds it.
+    expect(JSON.stringify(config)).not.toContain("knox_agent_x");
+    const plugins = config.plugins as { entries: Record<string, { config?: unknown }> };
+    expect(plugins.entries["knox-session-policy"]).toEqual({ enabled: true, config: { stampSessions: true } });
+  });
+
+  it("AGENT_PLATFORM_MCP_FORWARD=false → knoxville_platform straight at the console with bearer auth", () => {
+    const config = buildOpenclawConfig(
+      makeEnv({
+        PLATFORM_MCP_URL: "https://console.example/api/mcp",
+        PLATFORM_API_TOKEN: "knox_agent_x",
+        AGENT_PLATFORM_MCP_FORWARD: false,
       }),
       "/ws",
     );
@@ -529,6 +551,15 @@ describe("buildOpenclawConfig mcp.servers block", () => {
         headers: { Authorization: "Bearer knox_agent_x" },
       },
     });
+    const plugins = config.plugins as { entries: Record<string, { config?: unknown }> };
+    expect(plugins.entries["knox-session-policy"]).toEqual({ enabled: true, config: { stampSessions: false } });
+  });
+
+  it("the session-policy plugin rides every vessel, even with no platform MCP", () => {
+    const config = buildOpenclawConfig(makeEnv({}), "/ws");
+    const plugins = config.plugins as { load: { paths: string[] }; entries: Record<string, unknown> };
+    expect(plugins.entries["knox-session-policy"]).toEqual({ enabled: true, config: { stampSessions: false } });
+    expect(plugins.load.paths.some((p) => p.endsWith("openclaw-plugins/session-policy"))).toBe(true);
   });
 
   it("OPENCLAW_MCP_SERVERS is merged alongside knoxville_platform", () => {
@@ -567,7 +598,7 @@ describe("buildOpenclawConfig mcp.servers block", () => {
       "/ws",
     );
     expect((mcpServers(config).knoxville_platform as { url: string }).url).toBe(
-      "https://console.example/api/mcp",
+      "http://127.0.0.1:8080/internal/platform-mcp",
     );
   });
 

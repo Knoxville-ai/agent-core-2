@@ -278,6 +278,14 @@ export class VoiceConversationIndex {
     return { conversation_id: conversationId, caller };
   }
 
+  /** The live call behind a voice session: its conversation and the member it
+   *  is filed under (null for an unknown number). For the phone step-up. */
+  call(sessionKey: string | null | undefined, now = Date.now()): { conversationId: string; userId: string | null } | null {
+    const conversationId = this.get(sessionKey, now);
+    if (!conversationId) return null;
+    return { conversationId, userId: this.mirror?.byConversation(conversationId)?.userId ?? null };
+  }
+
   /** The call ended: keep the link a little longer for a consult still running. */
   release(sessionKey: string, now = Date.now()): void {
     const link = this.links.get(sessionKey);

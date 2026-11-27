@@ -11,6 +11,7 @@ import type { AgentBundle } from "../bundle/types.js";
 import type { AgentEnv } from "../env.js";
 import { log } from "../log.js";
 import { assembleSystemPrompt, parseEscalatedTools } from "../prompt/assemble.js";
+import { bootMemoryDigest } from "../shim/session-policy.js";
 import { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { fetchOpenRouterCatalog, outputCapsFor } from "../provision/openrouter-output-caps.js";
 import { fetchPinnableModelIds } from "../provision/pinnable-models.js";
@@ -213,6 +214,11 @@ export async function bootstrap(
   // `recall` tool). Fail-open: on any error the `# MEMORY` section is omitted
   // and boot proceeds — the volume/Storage layers are unaffected.
   const memoryDigest = await fetchMemoryDigest(env);
+  // While the session rules are enforced the digest is kept out of SOUL.md,
+  // which every session shares, and added to trusted sessions' system prompt
+  // only (SEC-023; knox-session-policy plugin).
+  const digestInSoul = (env.AGENT_SESSION_TOOL_POLICY ?? "enforce") !== "enforce";
+  bootMemoryDigest.current = digestInSoul ? null : memoryDigest;
 
   const systemPrompt = assembleSystemPrompt({
     constitution,
@@ -220,7 +226,7 @@ export async function bootstrap(
     charter: blobs.base,
     bundle,
     operatorNotes: blobs.playbookSeed,
-    memoryDigest,
+    memoryDigest: digestInSoul ? memoryDigest : null,
     playbook,
     escalatedTools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
   });

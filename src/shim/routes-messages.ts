@@ -36,6 +36,8 @@ import {
   type UsageAccumulator,
 } from "./usage-telemetry.js";
 import type { ToolCallHub } from "./tool-telemetry.js";
+import type { SessionPolicyService } from "./session-policy-service.js";
+import { isUntrustedChannel } from "./session-policy.js";
 import {
   StreamingRowWriter,
   TurnBroadcaster,
@@ -122,6 +124,9 @@ export interface MessagesDeps {
   turns: TurnLocks;
   /** Where token deltas are broadcast (turn-live.ts). */
   publisher: TurnPublisher;
+  /** Who is driving this session (session-policy.ts). An untrusted session's
+   *  dynamic context leaves out the agent's recent memories. Absent → trusted. */
+  sessionPolicy?: SessionPolicyService;
   /** Called (not awaited) once a turn's reply is final. Used to get the result
    *  of phone-started work back to the caller (../voice/notify.ts). */
   onTurnComplete?: (info: {
@@ -420,11 +425,18 @@ export async function handleSendMessage(
     // without a code release, if a model is found to weight a trailing system
     // block differently.
     try {
+      // A new turn may change who the session's latest sender is (email), so
+      // judge it afresh.
+      deps.sessionPolicy?.forgetConversation(conversationId);
+      const session = deps.sessionPolicy ? await deps.sessionPolicy.session(sessionKey) : null;
+      const untrusted =
+        !!session && isUntrustedChannel(session.channel) && deps.sessionPolicy?.mode === "enforce";
       const dynamic = await buildDynamicContext(
         db,
         env,
         principal,
         parseAdvisoryCaller(req.headers),
+        { includeMemory: !untrusted },
       );
       if (dynamic) {
         const msg = { role: "system" as const, content: dynamic };

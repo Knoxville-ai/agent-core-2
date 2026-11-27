@@ -196,6 +196,31 @@ const Schema = z.object({
   //                            the same gate as an approval-gated capability.
   OPENCLAW_TOOLS_ESCALATE: z.string().optional(),
 
+  // Per-session tool rules (SEC-021 / SEC-023, src/shim/session-policy.ts): a
+  // session driven by someone outside the org (public chat, SMS, anonymous
+  // MCP, a stranger's email) or a phone caller who hasn't said their PIN keeps
+  // a minimal, read-only toolset. "audit" logs what would be refused and
+  // allows it; "off" turns the rules off (the boot memory digest then stays in
+  // SOUL.md). Trusted sessions are unaffected in every mode.
+  AGENT_SESSION_TOOL_POLICY: z.enum(["enforce", "audit", "off"]).default("enforce"),
+  // Operator opt-ins for those sessions, beyond the minimal set and the
+  // console's per-agent opt-ins (0280): comma-separated tool names, each
+  // optionally prefixed with its channel (`public:exec`, `email:write`,
+  // `phone:start_task`); a bare name applies to every untrusted channel.
+  AGENT_UNTRUSTED_SESSION_TOOLS: z.string().optional(),
+  // Route openclaw's console MCP traffic through the shim, which adds the
+  // console's per-session headers (X-Agent-Session-Conversation / -Task) to
+  // each platform tool call. Default on; false points openclaw straight at
+  // the console again (no session headers).
+  AGENT_PLATFORM_MCP_FORWARD: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((v) => {
+      const s = v.trim().toLowerCase();
+      return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }),
+
   // Where the per-turn `# DYNAMIC CONTEXT` system block goes in the outgoing
   // message array. Default "tail" (appended after the history).
   //

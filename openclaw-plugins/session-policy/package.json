@@ -1,0 +1,8 @@
+{
+  "name": "knox-session-policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "OpenClaw plugin: check every tool call against the shim's session policy, stamp platform tool calls with their session, and offer phone callers PIN verification."
+}

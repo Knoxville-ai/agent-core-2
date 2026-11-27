@@ -131,10 +131,12 @@ export class BundleClient {
   ): Promise<DelegatedCredentials> {
     let result: ToolCallResult;
     try {
-      result = await this.call<ToolCallResult>("tools/call", {
-        name: "get_delegated_credentials",
-        arguments: { conversation_id: conversationId },
-      });
+      // The session header (console SEC-023): this read is for that session.
+      result = await this.call<ToolCallResult>(
+        "tools/call",
+        { name: "get_delegated_credentials", arguments: { conversation_id: conversationId } },
+        { "X-Agent-Session-Conversation": conversationId },
+      );
     } catch (err) {
       log.warn("delegated credentials fetch failed; proceeding without", {
         err: String(err),
@@ -189,11 +191,11 @@ export class BundleClient {
    * Throws on transport, auth, HTTP or JSON-RPC failure. Used by SkillSync for
    * the broker tools (`get_skill_sync_plan`, `report_skill_sync`).
    */
-  async callTool(name: string, args: unknown): Promise<ToolCallResult> {
-    return await this.call<ToolCallResult>("tools/call", { name, arguments: args });
+  async callTool(name: string, args: unknown, headers?: Record<string, string>): Promise<ToolCallResult> {
+    return await this.call<ToolCallResult>("tools/call", { name, arguments: args }, headers);
   }
 
-  private async call<T>(method: string, params: unknown): Promise<T> {
+  private async call<T>(method: string, params: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const req: JsonRpcRequest = {
       jsonrpc: "2.0",
       id: Date.now(),
@@ -207,6 +209,7 @@ export class BundleClient {
       res = await fetch(this.url, {
         method: "POST",
         headers: {
+          ...extraHeaders,
           "Content-Type": "application/json",
           Accept: "application/json",
           Authorization: `Bearer ${this.token}`,

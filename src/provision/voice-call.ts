@@ -199,7 +199,8 @@ export function buildRealtimeInstructions(
     if (inboundPolicy === "allowlist" && callers.length === 1) {
       parts.push(
         `Only ${callers[0]!.name} can reach this line, so every caller is ${callers[0]!.name} (${displayPhone(callers[0]!.phone)}). ` +
-          "Greet them by name and treat their requests as theirs.",
+          "Greet them by name. Caller ID can be faked, so before the agent does anything for them beyond answering " +
+          "questions, ask for their phone PIN and pass it to openclaw_agent_consult to verify.",
       );
     } else if (inboundPolicy === "allowlist") {
       parts.push(`Only these people can reach this line: ${list}. If you're not sure which of them is calling, ask.`);
@@ -278,6 +279,10 @@ export function resolveVoiceCall(
      *  mid-call handoffs with OpenClaw's built-in default model (seen live:
      *  openai/gpt-5.5), not the agent's — wrong model, wrong bill. */
     responseModel?: string;
+    /** The session rules gate each call's tools until the caller passes the PIN
+     *  step-up (AGENT_SESSION_TOOL_POLICY=enforce, ../shim/session-policy.ts).
+     *  Without that, a call never gets the owner's tools by default. */
+    stepUpEnforced?: boolean;
   } = {},
 ): { render: VoiceCallRender | null; reason: string | null } {
   if (!raw || !raw.trim()) return { render: null, reason: null };
@@ -340,9 +345,14 @@ export function resolveVoiceCall(
     return { render: null, reason: `phone disabled: ${problems.join("; ")}` };
   }
 
-  // Full agent tools mid-call only when every caller is a known number.
+  // Caller ID alone never opens the owner's tools (SEC-021). With the session
+  // rules enforced, an allowlisted line gets "owner" here and the knox
+  // session-policy plugin holds each call to a restricted, read-only set until
+  // the caller says their phone PIN (verify_caller_pin). Without them, a call
+  // stays read-only unless the spec explicitly asks for more.
   const toolPolicy =
-    spec.realtime?.toolPolicy ?? (inboundPolicy === "allowlist" ? "owner" : "safe-read-only");
+    spec.realtime?.toolPolicy ??
+    (inboundPolicy === "allowlist" && opts.stepUpEnforced === true ? "owner" : "safe-read-only");
   const callPrompt = spec.callPrompt?.trim();
   const outboundOn = spec.outbound?.enabled === true;
 

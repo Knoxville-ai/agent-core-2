@@ -68,6 +68,7 @@ export async function buildDynamicContext(
   env: AgentEnv,
   principal: Principal,
   advisory: AdvisoryCaller,
+  opts: { includeMemory?: boolean } = {},
 ): Promise<string | null> {
   let callerOrgId: string | null = null;
   let callerAgentUid: string | null = null;
@@ -134,7 +135,9 @@ export async function buildDynamicContext(
   // Recent memory — the live view of anything the agent wrote lately (SOUL's
   // # MEMORY is only a boot snapshot). Agent-scoped: model-written memories are
   // not conversation-linked (see MessagingDB.getRecentMemories).
-  const recent = await db.getRecentMemories(env.AGENT_UID);
+  // Left out of a session driven by someone outside the org (SEC-023): the
+  // agent's memories come from every session, not just theirs.
+  const recent = opts.includeMemory === false ? [] : await db.getRecentMemories(env.AGENT_UID);
   if (recent.length > 0) {
     const lines: string[] = ["## Recent memory"];
     for (const m of recent) {

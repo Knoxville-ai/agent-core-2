@@ -987,9 +987,18 @@ bricks an agent.
   (AI-voice outbound needs prior consent under the TCPA). Operators can still
   test with `openclaw voicecall smoke`.
 * **Realtime** (default on): `realtime.agentContext` injects `AGENTS.md` (the
-  identity), and `toolPolicy` defaults to `owner` (full agent tools via
-  `openclaw_agent_consult`) when inbound is allowlist-only, `safe-read-only`
-  otherwise.
+  identity). `toolPolicy` defaults to `owner` only when inbound is
+  allowlist-only **and** the session tool policy is enforced (below); the
+  session policy then holds every call to a restricted set until the caller
+  passes the PIN step-up. Otherwise it defaults to `safe-read-only`.
+* **Caller ID is not identity** (SEC-021): a number on the allowlist or a
+  member's profile only says who the call is *probably* from. Until the caller
+  says their phone PIN (the console's `user_phone_pins`, 0218, with the
+  per-user lockout of 0270 shared through `claim_phone_pin_attempt`) and the
+  agent confirms it with `verify_caller_pin`, a call keeps only read-only
+  built-ins and the console's minimal platform set plus
+  `list_call_escalations` / `answer_call_escalation`. Verification belongs to
+  that call's conversation (a new one per call) and lives in the shim's memory.
 
 ### Calls in the console, callers, background work
 
@@ -998,9 +1007,10 @@ bricks an agent.
   built-in default model.
 * **Known callers** (`callers`, the Phone tab's member picker): their numbers
   join the allowlist, the voice is told who is calling (with one allowlisted
-  caller: "every caller is <name>"), and `knox-voice-context` prepends "live
-  phone call with <name>, a member of your organization" to every mid-call
-  consult (`before_prompt_build`, looked up via `GET /internal/voice-conversation`).
+  caller: greeted by name, then asked for their PIN), and `knox-voice-context`
+  tells every mid-call consult which member the number matches and that the
+  PIN comes first (`before_prompt_build`, looked up via
+  `GET /internal/voice-conversation`).
 * **Call records** (`src/voice/call-mirror.ts`): each answered call becomes a
   conversation (origin `phone`, owned by the caller's `userId` or the member
   whose profile phone matches), then gets the transcript, a summary and a
@@ -1025,6 +1035,42 @@ bricks an agent.
    runuser -u agent -- openclaw voicecall setup --json
    runuser -u agent -- openclaw voicecall smoke --to +1… --yes
    ```
+
+## Session tool policy (SEC-021 / SEC-023)
+
+The console limits its MCP tools by who is driving a session (console
+`src/lib/tool-access/session-trust.ts`). The vessel applies the same rule to
+what runs in the container, and sends the console the session on every call.
+
+* **Session headers.** openclaw's console MCP traffic goes through the shim
+  (`knoxville_platform` → `http://127.0.0.1:8080/internal/platform-mcp`,
+  gateway-token authed). The `knox-session-policy` plugin stamps each platform
+  tool call with its session key (`_knox_session`, set in place, overwriting
+  anything the model wrote); the shim strips it and forwards with
+  `X-Agent-Session-Conversation` / `X-Agent-Session-Task` and the platform
+  token, streaming the reply back. openclaw.json no longer holds the platform
+  token. `AGENT_PLATFORM_MCP_FORWARD=false` restores the direct path.
+* **Container-side tools.** Before every tool call the plugin asks
+  `POST /internal/tool-policy`. Sessions are classified like the console:
+  `public` (listing web chat or MCP with nobody from the org, SMS, an
+  unconnected agent from another org), `email` (open address, assistant's
+  guest), `phone` (a call — or its record — before the PIN step-up). There the
+  agent keeps the console's minimal platform set, `read` inside the workspace
+  but not `playbook.md` / `notes/`, `web_search`, `web_fetch`, `image`, `pdf`,
+  `update_plan` — no `exec`, no file writes, no `sessions_*`, no connector MCP
+  servers — plus opt-ins from the console's `agent_untrusted_session_tools`
+  (0280; any tool name, e.g. `exec`) and `AGENT_UNTRUSTED_SESSION_TOOLS`
+  (`exec, public:write, phone:start_task`). Failed lookups are untrusted; an
+  unreachable shim blocks the call. Untrusted sessions also lose the recent
+  memories in `# DYNAMIC CONTEXT`, and the boot `# MEMORY` digest moves out of
+  SOUL.md into trusted sessions' system prompt only.
+  `AGENT_SESSION_TOOL_POLICY=audit` logs refusals without enforcing; `off`
+  disables the rules (the digest returns to SOUL.md). Trusted sessions are
+  unaffected in every mode.
+Transition: when the console reads a per-session token instead of the
+headers, or exposes the PIN check over MCP (so the container no longer needs
+service-role reads of `user_phone_pins`), switch these paths over and drop the
+direct reads.
 
 ## Migration strategy
 

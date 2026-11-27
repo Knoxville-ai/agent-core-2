@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { costProxyBaseUrl, costTrackingEnabled } from "../shim/cost-proxy.js";
+import { PLATFORM_MCP_FORWARD_PATH } from "../shim/platform-mcp-forward.js";
 import { readLockSkillEntries, type SkillEntries } from "../skills/lock.js";
 import { AgentStorage } from "./supabase-storage.js";
 import { logVoiceCall, resolveVoiceCall, VOICE_CALL_PLUGIN_ID } from "./voice-call.js";
@@ -73,6 +74,15 @@ const TOOL_TELEMETRY_PLUGIN_DIR = fileURLToPath(
 export const LLM_COMPLETE_PLUGIN_ID = "knox-llm-complete";
 const LLM_COMPLETE_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/llm-complete", import.meta.url),
+);
+
+/** Session policy: checks every tool call against the shim's per-session tool
+ *  rules, stamps platform tool calls with their session (for
+ *  the console's session headers) and offers phone callers PIN verification
+ *  (see `openclaw-plugins/session-policy`). Rides every vessel. */
+export const SESSION_POLICY_PLUGIN_ID = "knox-session-policy";
+const SESSION_POLICY_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/session-policy", import.meta.url),
 );
 
 /** Phone-call context: who is on the line, injected before each mid-call
@@ -513,14 +523,24 @@ export function buildOpenclawConfig(
   outputCaps: Readonly<Record<string, number>> = {},
 ): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
+  // The console MCP goes through the shim's loopback forwarder when it can
+  // (../shim/platform-mcp-forward.ts), which adds the console's per-session
+  // headers and the platform token; openclaw only holds the gateway token.
+  const forwardPlatformMcp = platformMcpForwarded(env);
   if (env.PLATFORM_MCP_URL) {
-    mcpServers.knoxville_platform = {
-      url: env.PLATFORM_MCP_URL,
-      transport: "streamable-http",
-      headers: env.PLATFORM_API_TOKEN
-        ? { Authorization: `Bearer ${env.PLATFORM_API_TOKEN}` }
-        : {},
-    };
+    mcpServers.knoxville_platform = forwardPlatformMcp
+      ? {
+          url: `http://127.0.0.1:${env.AGENT_HTTP_PORT}${PLATFORM_MCP_FORWARD_PATH}`,
+          transport: "streamable-http",
+          headers: { Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}` },
+        }
+      : {
+          url: env.PLATFORM_MCP_URL,
+          transport: "streamable-http",
+          headers: env.PLATFORM_API_TOKEN
+            ? { Authorization: `Bearer ${env.PLATFORM_API_TOKEN}` }
+            : {},
+        };
   }
 
   // Operator-configured MCP servers (any number, any agent) delivered from the
@@ -548,6 +568,7 @@ export function buildOpenclawConfig(
     // Mid-call handoffs run on the agent's own model (and, for OpenRouter,
     // through the cost proxy), not OpenClaw's built-in default.
     responseModel: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
+    stepUpEnforced: (env.AGENT_SESSION_TOOL_POLICY ?? "enforce") === "enforce",
   });
   logVoiceCall(voice);
 
@@ -845,6 +866,22 @@ export function buildOpenclawConfig(
     config.plugins = plugins;
   }
 
+  // Session policy rides EVERY vessel: it gates tool calls by who is driving the
+  // session (SEC-021/023) and stamps platform tool calls for the forwarder above.
+  {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, SESSION_POLICY_PLUGIN_DIR] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    entries[SESSION_POLICY_PLUGIN_ID] = {
+      enabled: true,
+      config: { stampSessions: forwardPlatformMcp },
+    };
+    plugins.entries = entries;
+    config.plugins = plugins;
+  }
+
   // Phone calls: the official voice-call plugin, baked into the image as an npm
   // dependency (see package.json + Dockerfile) and loaded from its package dir
   // like the knox plugins above. Its webhook server binds VOICE_CALL_PORT
@@ -1049,4 +1086,11 @@ Available tool surfaces:
 
 Skills installed under \`workspace/skills/\` will appear here once present.
 `;
+}
+
+/** Whether openclaw reaches the console MCP through the shim (AGENT_PLATFORM_MCP_FORWARD, default on). */
+export function platformMcpForwarded(
+  env: Pick<AgentEnv, "PLATFORM_MCP_URL" | "PLATFORM_API_TOKEN" | "AGENT_PLATFORM_MCP_FORWARD">,
+): boolean {
+  return Boolean(env.PLATFORM_MCP_URL && env.PLATFORM_API_TOKEN && env.AGENT_PLATFORM_MCP_FORWARD !== false);
 }

@@ -50,6 +50,8 @@ import {
 import { sendJson } from "./util.js";
 import { voiceConversations } from "../voice/call-mirror.js";
 import { phoneNotify } from "../voice/notify.js";
+import { createPolicyRuntime, logPolicyRuntime, routePolicy, sessionIdsFor, type PolicyRuntime } from "./routes-policy.js";
+import { handlePlatformMcpForward, PLATFORM_MCP_FORWARD_PATH } from "./platform-mcp-forward.js";
 
 interface ServerHandle {
   close: () => Promise<void>;
@@ -109,6 +111,11 @@ export async function startShim(
   // Long-running task executor. Detached from every HTTP request: the task
   // routes hand work to it and return 202, and it reports back to the platform
   // on its own schedule (see task-runner.ts).
+  // Per-session tool rules, the approval gate on direct connector tools and
+  // the phone step-up (SEC-019/021/023), asked by the knox-session-policy
+  // plugin over the /internal/tool-policy loopback route.
+  const policyRuntime = createPolicyRuntime(env);
+  logPolicyRuntime(env);
   const taskRunner = new TaskRunner({
     env,
     db,
@@ -145,6 +152,7 @@ export async function startShim(
       toolCalls,
       skills,
       turns,
+      policyRuntime,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -213,6 +221,7 @@ async function route(
   toolCalls: ToolCallHub,
   skills: SkillsRouteDeps,
   turns: TurnDeps,
+  policy: PolicyRuntime,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -264,6 +273,20 @@ async function route(
   // (start_task, report_outcome, ...) gets that conversation stamped on, so a
   // background task's card and result land in the call's thread. Same loopback
   // + gateway-token trust anchor as the routes above. See ../voice/call-mirror.ts.
+  // Session tool policy, phone step-up and the session context for prompt
+  // building (knox-session-policy plugin). Same loopback + gateway-token trust
+  // anchor as the routes above. See routes-policy.ts.
+  if (await routePolicy(path, method, url, req, res, env, policy)) return;
+
+  // openclaw's console MCP traffic, forwarded with the console's per-session
+  // headers (platform-mcp-forward.ts). Gateway-token authed.
+  if (path === PLATFORM_MCP_FORWARD_PATH) {
+    return handlePlatformMcpForward(req, res, {
+      env,
+      resolveSession: (sessionKey) => sessionIdsFor(policy, sessionKey),
+    });
+  }
+
   if (path === "/internal/voice-conversation") {
     if (method !== "GET") throw new HttpError(405, "method not allowed");
     requireGatewayToken(req.headers.authorization, env);
@@ -316,6 +339,7 @@ async function route(
         usage,
         toolCalls,
         ...turns,
+        sessionPolicy: policy.policy,
         onTurnComplete: (info) => phoneNotify.current?.handle(info),
       });
     }

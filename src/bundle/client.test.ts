@@ -56,6 +56,19 @@ describe("BundleClient.fetchDelegatedCredentials", () => {
     });
   });
 
+  it("names the session it reads for with the console's session header (SEC-023)", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { structuredContent: { credentials: {} } } }), {
+        status: 200,
+      }),
+    );
+    const client = new BundleClient({ url: "https://mcp.example/api", token: "t" });
+    await client.fetchDelegatedCredentials("conv-1");
+    const headers = (spy.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Agent-Session-Conversation"]).toBe("conv-1");
+    expect(headers.Authorization).toBe("Bearer t");
+  });
+
   it("returns {} and never throws when the MCP call rejects (broker hiccup)", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
     const client = new BundleClient({ url: "https://mcp.example/api", token: "t", timeoutMs: 500 });

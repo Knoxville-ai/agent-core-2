@@ -24,11 +24,12 @@ const SPEC = {
   allowFrom: ["+18655550100"],
 };
 
-function resolve(spec: unknown, env: Record<string, string | undefined> = TELNYX_ENV) {
+function resolve(spec: unknown, env: Record<string, string | undefined> = TELNYX_ENV, stepUpEnforced = true) {
   return resolveVoiceCall(JSON.stringify(spec), {
     publicUrl: PUBLIC,
     envSource: env,
     pluginDir: "/app/node_modules/@openclaw/voice-call",
+    stepUpEnforced,
   });
 }
 
@@ -81,6 +82,21 @@ describe("resolveVoiceCall", () => {
     const json = JSON.stringify(c);
     for (const v of Object.values(TELNYX_ENV)) expect(json).not.toContain(v);
     expect(c).not.toHaveProperty("telnyx");
+  });
+
+  it("without the PIN step-up, an allowlisted line's consult tools stay read-only", () => {
+    // Caller ID alone never opens the owner's tools (SEC-021).
+    const { render } = resolve(SPEC, TELNYX_ENV, false);
+    expect((render!.entry.config.realtime as { toolPolicy: string }).toolPolicy).toBe("safe-read-only");
+    expect(resolveVoiceCall(JSON.stringify(SPEC), { publicUrl: PUBLIC, envSource: TELNYX_ENV, pluginDir: "/x" }).render!
+      .entry.config.realtime).toMatchObject({ toolPolicy: "safe-read-only" });
+  });
+
+  it("a single allowlisted caller is still asked for their PIN", () => {
+    const { render } = resolve({ ...SPEC, callers: [{ phone: "+18655550100", name: "Zach" }] });
+    const instructions = (render!.entry.config.realtime as { instructions: string }).instructions;
+    expect(instructions).toContain("Caller ID can be faked");
+    expect(instructions).not.toContain("treat their requests as theirs");
   });
 
   it("open inbound defaults the consult tools to read-only", () => {

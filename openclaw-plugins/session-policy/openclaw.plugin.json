@@ -1,0 +1,18 @@
+{
+  "id": "knox-session-policy",
+  "name": "Knox Session Policy",
+  "description": "Check every tool call against the agent's session policy (over loopback to the shim), stamp platform tool calls with the session they run in, and offer phone callers PIN verification.",
+  "contracts": {
+    "tools": ["verify_caller_pin"]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "stampSessions": { "type": "boolean" }
+    }
+  }
+}
