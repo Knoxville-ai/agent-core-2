@@ -6,7 +6,7 @@ import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import { persistOAuthStore } from "../provision/oauth-store.js";
 import { switchConfigFileToOAuth } from "../provision/render-workspace.js";
 import { openWhenGatewayReady, serializeConfigWrite, type RefreshGate } from "../skills/refresh.js";
-import { HttpError, type Principal } from "./auth.js";
+import { AGENT_CONTROL_SCOPE, HttpError, isPlatformOnly, type Principal } from "./auth.js";
 import type { OAuthSessionManager } from "./oauth-session.js";
 import type { MessagingDB } from "./supabase-db.js";
 import { readJsonBody, sendJson } from "./util.js";
@@ -21,7 +21,10 @@ import { readJsonBody, sendJson } from "./util.js";
  *   GET  /api/v1/auth/oauth/status   -> { mode, provider, connected }
  *
  * Only org members (user sessions) may run these; agent-to-agent tokens are
- * rejected — minting a subscription credential is an operator action.
+ * rejected — minting a subscription credential is an operator action. Under
+ * AGENT_BEARER_POLICY=platform-only the token must also carry the
+ * `agent-control` scope, which the console mints only after checking the user
+ * may manage this agent.
  */
 
 const SUPPORTED_PROVIDERS = new Set(["openai-codex"]);
@@ -45,6 +48,9 @@ async function requireOrgUser(
 ): Promise<void> {
   if (principal.kind !== "user") {
     throw new HttpError(403, "an operator (user) session is required");
+  }
+  if (isPlatformOnly(env) && principal.scope !== AGENT_CONTROL_SCOPE) {
+    throw new HttpError(403, "an agent-control token is required");
   }
   const member = await db.userInOrg(principal.userId, env.AGENT_ORG);
   if (!member) throw new HttpError(403, "forbidden");

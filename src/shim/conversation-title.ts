@@ -101,7 +101,7 @@ export function shouldAutoTitle(
   env: AgentEnv,
 ): boolean {
   if (!env.AGENT_AUTO_TITLE) return false;
-  if (principal.kind === "agent") return false;
+  if (principal.kind !== "user") return false;
   if (conversation.kind !== "user_agent") return false;
   return !(conversation.title ?? "").trim();
 }

@@ -92,8 +92,11 @@ console boot list (`config/skills.json`) at boot. See `CONSOLE_INTEGRATION.md`
 
 ## HTTP surface (port 8080)
 
-All authenticated endpoints require `Authorization: Bearer <Supabase
-session.access_token>`, verified against `SUPABASE_JWT_SECRET`.
+All authenticated endpoints require `Authorization: Bearer <platform token>`:
+an ES256 token the console mints for this agent, verified against the
+console's JWKS. Older consoles' Supabase session tokens are accepted only
+under `AGENT_BEARER_POLICY=legacy-org-check` (the default) and only for
+members of the agent's org. See `CONSOLE_INTEGRATION.md` *Bearer policy*.
 
 | Method + path | Purpose |
 | --- | --- |
