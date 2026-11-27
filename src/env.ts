@@ -14,6 +14,21 @@ const Schema = z.object({
   // Console JWKS for platform tokens. Defaults to the PLATFORM_MCP_URL origin
   // + /api/agent-auth/jwks when unset (see shim/auth.ts platformJwksUrl).
   PLATFORM_JWKS_URL: z.string().url().optional(),
+  // Which bearers the shim's HTTP surface accepts (see shim/auth.ts).
+  //   legacy-org-check (default) — platform tokens, plus the pre-platform
+  //     forms an older console still sends: a Supabase session token (only
+  //     for a member of AGENT_ORG, on every route) and the legacy HS256
+  //     shared-secret tokens (while SUPABASE_JWT_SECRET is set). Task routes
+  //     also take a platform token that is not bound to the task.
+  //   platform-only — console-minted platform tokens only, and the task
+  //     start/cancel routes need a token bound to that task. The console
+  //     writes this on the fleet once it mints platform tokens for every call.
+  // Removal: once every console sends platform tokens (AGENT_TOKEN_SIGNING_KEY
+  // set and the fleet re-synced), make platform-only the default and delete
+  // the legacy verifiers in shim/auth.ts.
+  AGENT_BEARER_POLICY: z
+    .enum(["legacy-org-check", "platform-only"])
+    .default("legacy-org-check"),
   MESSAGING_ENABLED: z
     .string()
     .optional()

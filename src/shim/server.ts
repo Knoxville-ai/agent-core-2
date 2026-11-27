@@ -5,6 +5,7 @@ import type { AgentEnv } from "../env.js";
 import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, verifyBearer } from "./auth.js";
+import { classifyRoute, enforceBearerPolicy } from "./bearer-policy.js";
 import { CancelRegistry } from "./cancel-registry.js";
 import { OAuthSessionManager } from "./oauth-session.js";
 import {
@@ -279,8 +280,10 @@ async function route(
     return routeSkills(path, method, req, res, skills);
   }
 
-  // Everything below requires a valid bearer JWT.
+  // Everything below requires a valid bearer JWT, and the route-level rules
+  // for what that token may reach (bearer-policy.ts).
   const principal = await verifyBearer(req.headers.authorization, env);
+  await enforceBearerPolicy(principal, classifyRoute(path, method), env, db);
 
   // Model-provider OAuth control surface (operator-only; see routes-oauth).
   if (path === "/api/v1/auth/oauth/status") {
