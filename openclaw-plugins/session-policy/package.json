@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "main": "index.js",
-  "description": "OpenClaw plugin: check every tool call against the shim's session policy, stamp platform tool calls with their session, and offer phone callers PIN verification."
+  "description": "OpenClaw plugin: check every tool call against the shim's session policy and approval gate, stamp platform tool calls with their session, and offer phone callers PIN verification."
 }

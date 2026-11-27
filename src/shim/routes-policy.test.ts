@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentEnv } from "../env.js";
 import { PhoneStepUp } from "../voice/step-up.js";
@@ -9,6 +9,7 @@ import { HttpError } from "./auth.js";
 import { routePolicy, sessionIdsFor, type PolicyRuntime } from "./routes-policy.js";
 import { bootMemoryDigest } from "./session-policy.js";
 import { SessionPolicyService, type ConversationRow, type SessionTrustStore } from "./session-policy-service.js";
+import { ToolApprovalGate } from "./tool-approvals.js";
 
 const AGENT = "0123456789abcdef";
 const TOKEN = "gateway-token-0123456789";
@@ -36,6 +37,15 @@ function runtime(): PolicyRuntime {
   return {
     phone,
     policy: new SessionPolicyService({ agentUid: AGENT, agentOrg: "acme", store, phone, servers: ["odoo"], workspaceDir: "/ws" }),
+    approvals: new ToolApprovalGate({
+      agentUid: AGENT,
+      escalated: ["odoo__create_bill"],
+      servers: ["odoo"],
+      consoleHosted: new Set(),
+      key: "k",
+      store: { find: async () => [], claim: async () => true },
+      asker: { ask: vi.fn(async () => "esc-9") },
+    }),
   };
 }
 
@@ -83,6 +93,14 @@ describe("POST /internal/tool-policy", () => {
       expect(r.body.reason).toMatch(/outside your organization/);
       expect((await ask(base, { session_key: "webchat:mine", tool_name: tool, params: {} })).body.allow).toBe(true);
     }
+  });
+
+  it("holds an approval-gated direct connector tool even in a trusted session", async () => {
+    const rt = runtime();
+    const base = await start(rt);
+    const r = await ask(base, { session_key: "webchat:mine", tool_name: "odoo__create_bill", params: { amount: 5 } });
+    expect(r.body.allow).toBe(false);
+    expect(r.body.reason).toMatch(/esc-9/);
   });
 
   it("a phone caller who hasn't said their PIN can't start work", async () => {

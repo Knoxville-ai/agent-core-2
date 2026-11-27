@@ -13,7 +13,8 @@ import {
 
 /**
  * Knox session policy — the OpenClaw half of the agent's per-session tool
- * rules (src/shim/session-policy.ts).
+ * rules (src/shim/session-policy.ts) and of "requires approval" on connector
+ * tools the agent reaches directly (src/shim/tool-approvals.ts).
  *
  *   before_tool_call   runs first (highest priority) on every tool call and
  *                      asks the shim whether this session may make it. The
@@ -33,7 +34,7 @@ export default definePluginEntry({
   id: "knox-session-policy",
   name: "Knox Session Policy",
   description:
-    "Check every tool call against the agent's session policy, stamp platform tool calls with their session, and offer phone callers PIN verification.",
+    "Check every tool call against the agent's session policy and approval gate, stamp platform tool calls with their session, and offer phone callers PIN verification.",
   register(api) {
     const stampSessions = api.pluginConfig?.stampSessions === true;
 

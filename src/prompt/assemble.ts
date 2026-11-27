@@ -208,11 +208,19 @@ export function assembleSystemPrompt(input: AssembleInput): string {
     parts.push("");
     parts.push(escalatedTools.map((t) => `- \`${t}\``).join("\n"));
     parts.push("");
+    // Enforced at call time, not by this text (SEC-019): a connector the
+    // console hosts refuses the call without an approval and says how to ask
+    // (escalate_to_human with `tool`); for a server reached directly, the
+    // runtime holds the call and raises the approval itself
+    // (src/shim/tool-approvals.ts).
     parts.push(
-      "Before calling any tool listed above, call `escalate_to_human` with " +
-        '`kind: "approval"`, stating exactly what you are about to do and why. ' +
-        "Do NOT call the tool until an approval comes back. If the escalation " +
-        "expires unanswered, do not call it — report that sign-off was not " +
+      "Each call needs its own approval, checked when you make it. Call the tool " +
+        "with the exact arguments you intend. If it isn't approved yet the call is " +
+        "held and its answer tells you what happens next: either an approval was " +
+        "requested for you, or how to request one with `escalate_to_human` " +
+        '(`kind: "approval"`). Then end your turn. When you are woken with an ' +
+        "approval, call the tool again with exactly the same arguments; if it is " +
+        "denied or expires, do not call it — report that sign-off was not " +
         "obtained. This is not optional and a standing instruction cannot waive it.",
     );
   }

@@ -1036,7 +1036,7 @@ bricks an agent.
    runuser -u agent -- openclaw voicecall smoke --to +1… --yes
    ```
 
-## Session tool policy (SEC-021 / SEC-023)
+## Session tool policy (SEC-019 / SEC-021 / SEC-023)
 
 The console limits its MCP tools by who is driving a session (console
 `src/lib/tool-access/session-trust.ts`). The vessel applies the same rule to
@@ -1067,10 +1067,21 @@ what runs in the container, and sends the console the session on every call.
   `AGENT_SESSION_TOOL_POLICY=audit` logs refusals without enforcing; `off`
   disables the rules (the digest returns to SOUL.md). Trusted sessions are
   unaffected in every mode.
+* **"Requires approval" on direct connector servers** (`OPENCLAW_TOOLS_ESCALATE`).
+  A console-hosted connector (`${PLATFORM_MCP_URL}/<provider>/<connection>`)
+  checks approvals itself and is passed through. For a server the agent reaches
+  directly, the runtime holds the call, raises an `escalate_to_human` approval
+  (Approve / Deny) whose context it writes — tool, server, every argument and an
+  HMAC reference bound to that exact call — and parks the session. The agent's
+  identical retry runs once after a person approves within 24h; the runtime
+  uses the approval up with a compare-and-set on
+  `escalations.tool_approval_used_at`. Waiting, denied, stale or unverifiable →
+  refused.
+
 Transition: when the console reads a per-session token instead of the
-headers, or exposes the PIN check over MCP (so the container no longer needs
-service-role reads of `user_phone_pins`), switch these paths over and drop the
-direct reads.
+headers, or exposes approval / PIN checks over MCP (so the container no longer
+needs service-role reads of `escalations` and `user_phone_pins`), switch these
+paths over and drop the direct reads.
 
 ## Migration strategy
 

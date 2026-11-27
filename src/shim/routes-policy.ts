@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { parseEscalatedTools } from "../prompt/assemble.js";
 import { voiceConversations } from "../voice/call-mirror.js";
 import { PhoneStepUp, SupabasePinStore } from "../voice/step-up.js";
 import { HttpError } from "./auth.js";
@@ -13,6 +14,13 @@ import {
   SupabaseSessionTrustStore,
   workspaceDirOf,
 } from "./session-policy-service.js";
+import {
+  approvalKey,
+  consoleHostedServers,
+  PlatformApprovalAsker,
+  SupabaseApprovalStore,
+  ToolApprovalGate,
+} from "./tool-approvals.js";
 import { readJsonBody, sendJson } from "./util.js";
 
 /**
@@ -20,7 +28,8 @@ import { readJsonBody, sendJson } from "./util.js";
  *
  *   POST /internal/tool-policy     { session_key, tool_name, params }
  *        -> { allow: true } | { allow: false, reason }
- *        The session rules (session-policy.ts).
+ *        The session rules (session-policy.ts), then the approval gate on
+ *        direct connector tools (tool-approvals.ts).
  *   POST /internal/voice-step-up   { session_key, pin } -> { ok, text }
  *        The phone caller's PIN (../voice/step-up.ts).
  *   GET  /internal/session-context?session_key=
@@ -32,6 +41,7 @@ import { readJsonBody, sendJson } from "./util.js";
 
 export interface PolicyRuntime {
   policy: SessionPolicyService;
+  approvals: ToolApprovalGate;
   phone: PhoneStepUp;
 }
 
@@ -53,7 +63,16 @@ export function createPolicyRuntime(env: AgentEnv): PolicyRuntime {
     envOptIns: env.AGENT_UNTRUSTED_SESSION_TOOLS ?? null,
     mode: policyMode(env),
   });
-  return { policy, phone };
+  const approvals = new ToolApprovalGate({
+    agentUid: env.AGENT_UID,
+    escalated: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
+    servers,
+    consoleHosted: consoleHostedServers(env.OPENCLAW_MCP_SERVERS, env.PLATFORM_MCP_URL),
+    key: approvalKey(env.OPENCLAW_GATEWAY_TOKEN),
+    store: new SupabaseApprovalStore(env),
+    asker: env.PLATFORM_MCP_URL && env.PLATFORM_API_TOKEN ? new PlatformApprovalAsker(env) : null,
+  });
+  return { policy, approvals, phone };
 }
 
 /** The console session a stamped session key names (for the console MCP route). */
@@ -85,8 +104,10 @@ export async function handleToolPolicy(
   const sessionKey = typeof body.session_key === "string" ? body.session_key : null;
   const toolName = typeof body.tool_name === "string" ? body.tool_name.trim() : "";
   if (!toolName) return sendJson(res, 200, { allow: false, reason: "A tool call with no tool name can't run." });
-  const { decision } = await runtime.policy.decide(sessionKey, toolName, body.params);
-  return sendJson(res, 200, decision);
+  const { decision, session } = await runtime.policy.decide(sessionKey, toolName, body.params);
+  if (!decision.allow) return sendJson(res, 200, decision);
+  const approval = await runtime.approvals.check(toolName, body.params, session);
+  return sendJson(res, 200, approval);
 }
 
 export async function handleVoiceStepUp(
@@ -156,6 +177,7 @@ export function logPolicyRuntime(env: AgentEnv): void {
   log.info("session tool policy", {
     mode: policyMode(env),
     direct_servers: directServerNames(env.OPENCLAW_MCP_SERVERS).length,
+    approval_gated_tools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE).length,
     console_mcp_session_headers: env.AGENT_PLATFORM_MCP_FORWARD,
   });
 }

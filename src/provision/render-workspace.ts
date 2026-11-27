@@ -77,7 +77,7 @@ const LLM_COMPLETE_PLUGIN_DIR = fileURLToPath(
 );
 
 /** Session policy: checks every tool call against the shim's per-session tool
- *  rules, stamps platform tool calls with their session (for
+ *  rules and approval gate, stamps platform tool calls with their session (for
  *  the console's session headers) and offers phone callers PIN verification
  *  (see `openclaw-plugins/session-policy`). Rides every vessel. */
 export const SESSION_POLICY_PLUGIN_ID = "knox-session-policy";
@@ -867,7 +867,8 @@ export function buildOpenclawConfig(
   }
 
   // Session policy rides EVERY vessel: it gates tool calls by who is driving the
-  // session (SEC-021/023) and stamps platform tool calls for the forwarder above.
+  // session (SEC-021/023), enforces "requires approval" on direct connector
+  // tools (SEC-019) and stamps platform tool calls for the forwarder above.
   {
     const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
     const load = (plugins.load as { paths?: unknown } | undefined) ?? {};

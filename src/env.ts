@@ -189,11 +189,13 @@ const Schema = z.object({
   // `tools` explicitly.
   OPENCLAW_TOOL_SEARCH: z.enum(["off", "tools", "code"]).default("off"),
   //   OPENCLAW_TOOLS_ESCALATE — comma/space-separated tool ids the console flagged
-  //                            as requiring human approval before use. Rendered
-  //                            into SOUL.md as a `# TOOL APPROVALS` instruction
-  //                            (see prompt/assemble.ts) that routes each flagged
-  //                            tool through `escalate_to_human` (console 0048) —
-  //                            the same gate as an approval-gated capability.
+  //                            as requiring human approval before use. Listed in
+  //                            SOUL.md's `# TOOL APPROVALS` (prompt/assemble.ts)
+  //                            and enforced at call time: a console-hosted
+  //                            connector checks the approval itself; a server
+  //                            reached directly is held by the runtime until a
+  //                            person approves that exact call
+  //                            (shim/tool-approvals.ts, SEC-019).
   OPENCLAW_TOOLS_ESCALATE: z.string().optional(),
 
   // Per-session tool rules (SEC-021 / SEC-023, src/shim/session-policy.ts): a

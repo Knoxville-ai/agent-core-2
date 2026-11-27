@@ -93,6 +93,10 @@ describe("assembleSystemPrompt — TOOL APPROVALS (0048)", () => {
     expect(out).toContain("`odoo_production__ap_create_vendor_bill`");
     expect(out).toContain("escalate_to_human");
     expect(out).toContain('kind: "approval"');
+    // Enforced when the tool is called: the agent calls it, and retries the
+    // exact same call once approved (SEC-019).
+    expect(out).toContain("checked when you make it");
+    expect(out).toContain("exactly the same arguments");
   });
 
   it("adds no section when no tools are flagged", () => {
