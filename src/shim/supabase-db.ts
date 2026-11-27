@@ -2,6 +2,8 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { agentDataClientFromEnv } from "../agent-data/client.js";
+import { ScopedMessaging } from "../agent-data/messaging.js";
 import type {
   InsertToolCallRow,
   ToolCallDB,
@@ -18,9 +20,13 @@ const CHAT_ATTACHMENTS_BUCKET = "chat-attachments";
 /**
  * Thin Supabase client for the messaging layer.
  *
- * Bypasses RLS (service-role key), so every method assumes the caller
- * has already validated the bearer JWT and run an org-membership /
- * agent-connection check.
+ * Two backends, chosen at boot (agent-data/client.ts resolveDataAccess):
+ *   - the console's agent data API, scoped on the server to this agent's own
+ *     conversations (ScopedMessaging, agent-data/messaging.ts), whenever the
+ *     console provides it;
+ *   - otherwise the service-role key, which bypasses RLS.
+ * Either way every method assumes the caller has already validated the bearer
+ * JWT and run an org-membership / agent-connection check.
  *
  * Port of app/messaging/supabase_db.py from the original (Python)
  * agent-core. Only the methods the shim actually uses are ported here;
@@ -126,19 +132,30 @@ export interface CallerContextQuery {
 }
 
 export class MessagingDB implements ToolCallDB {
-  private readonly client: SupabaseClient;
+  private readonly legacy: SupabaseClient | null;
+  private readonly scoped: ScopedMessaging | null;
 
-  // `client` is injectable purely for tests (the query builder is otherwise a
-  // live network call); production always constructs from env.
-  constructor(env: AgentEnv, client?: SupabaseClient) {
-    this.client =
+  // `client` / `scoped` are injectable purely for tests (the query builder is
+  // otherwise a live network call); production always constructs from env.
+  constructor(env: AgentEnv, client?: SupabaseClient, scoped?: ScopedMessaging) {
+    const api = client || scoped ? null : agentDataClientFromEnv(env);
+    this.scoped = scoped ?? (api ? new ScopedMessaging(api) : null);
+    this.legacy =
       client ??
-      createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      });
+      (this.scoped
+        ? null
+        : createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+            auth: { persistSession: false, autoRefreshToken: false },
+          }));
+  }
+
+  private get client(): SupabaseClient {
+    if (!this.legacy) throw new Error("MessagingDB: no database client on the scoped path");
+    return this.legacy;
   }
 
   async userInOrg(userId: string, orgId: string): Promise<boolean> {
+    if (this.scoped) return this.scoped.userInOrg(userId, orgId);
     const { data, error } = await this.client
       .from("org_members")
       .select("user_id")
@@ -153,6 +170,7 @@ export class MessagingDB implements ToolCallDB {
   }
 
   async getConversation(conversationId: string): Promise<Conversation | null> {
+    if (this.scoped) return this.scoped.getConversation(conversationId);
     const { data, error } = await this.client
       .from("conversations")
       .select(
@@ -175,6 +193,7 @@ export class MessagingDB implements ToolCallDB {
    * still wins. Returns whether the title was written.
    */
   async setConversationTitleIfUnset(conversationId: string, title: string): Promise<boolean> {
+    if (this.scoped) return this.scoped.setConversationTitleIfUnset(conversationId, title);
     const { data, error } = await this.client
       .from("conversations")
       .update({ title })
@@ -189,6 +208,7 @@ export class MessagingDB implements ToolCallDB {
   }
 
   async listMessages(conversationId: string, limit = 500): Promise<MessageRow[]> {
+    if (this.scoped) return this.scoped.listMessages(conversationId, limit);
     // Take the NEWEST `limit` messages, then restore chronological order for the
     // model. This used to be `created_at ASC LIMIT 500`, which returns the
     // OLDEST 500 — so once a conversation passed 500 rows it silently dropped
@@ -228,6 +248,7 @@ export class MessagingDB implements ToolCallDB {
    * turn never breaks because caller memory isn't available yet.
    */
   async getCallerContext(q: CallerContextQuery): Promise<CallerPreferenceRow[]> {
+    if (this.scoped) return this.scoped.getCallerContext(q);
     const limit = q.limit ?? 8;
     const sel =
       "note,key,relationship,tags,salience,pinned,last_interaction_at";
@@ -289,6 +310,7 @@ export class MessagingDB implements ToolCallDB {
     agentUid: string,
     limit = 5,
   ): Promise<AgentMemoryRow[]> {
+    if (this.scoped) return this.scoped.getRecentMemories(agentUid, limit);
     try {
       const { data, error } = await this.client
         .from("agent_memories")
@@ -312,6 +334,7 @@ export class MessagingDB implements ToolCallDB {
   }
 
   async insertMessage(opts: InsertMessageOptions): Promise<string | null> {
+    if (this.scoped) return this.scoped.insertMessage(opts);
     const row: Record<string, unknown> = {
       conversation_id: opts.conversationId,
       role: opts.role,
@@ -338,6 +361,7 @@ export class MessagingDB implements ToolCallDB {
     messageId: string,
     opts: UpdateMessageOptions,
   ): Promise<boolean> {
+    if (this.scoped) return this.scoped.updateMessage(messageId, opts);
     const payload: Record<string, unknown> = {};
     if (opts.content !== undefined) payload.content = opts.content;
     if (opts.status !== undefined) payload.status = opts.status;
@@ -361,6 +385,7 @@ export class MessagingDB implements ToolCallDB {
    * or interrupted — is a no-op rather than overwriting the final content.
    */
   async saveStreamingContent(messageId: string, content: string): Promise<boolean> {
+    if (this.scoped) return this.scoped.saveStreamingContent(messageId, content);
     const { error } = await this.client
       .from("messages")
       .update({ content })
@@ -383,6 +408,7 @@ export class MessagingDB implements ToolCallDB {
    * many rows were closed (0 on error — this must never block boot).
    */
   async failOrphanedTurns(agentUid: string): Promise<number> {
+    if (this.scoped) return this.scoped.failOrphanedTurns(agentUid);
     const { data, error } = await this.client
       .from("messages")
       .update({ status: "interrupted", completed_at: new Date().toISOString() })
@@ -401,6 +427,7 @@ export class MessagingDB implements ToolCallDB {
   async insertAttachments(
     rows: InsertAttachmentRow[],
   ): Promise<AttachmentRow[]> {
+    if (this.scoped) return this.scoped.insertAttachments(rows);
     if (rows.length === 0) return [];
     const { data, error } = await this.client
       .from("message_attachments")
@@ -426,6 +453,7 @@ export class MessagingDB implements ToolCallDB {
    * caller can degrade gracefully to text-only rather than failing the turn.
    */
   async downloadAttachmentBase64(storagePath: string): Promise<string | null> {
+    if (this.scoped) return this.scoped.downloadAttachmentBase64(storagePath);
     const { data, error } = await this.client.storage
       .from(CHAT_ATTACHMENTS_BUCKET)
       .download(storagePath);
@@ -451,6 +479,7 @@ export class MessagingDB implements ToolCallDB {
   async listAttachmentsForMessages(
     messageIds: string[],
   ): Promise<AttachmentRow[]> {
+    if (this.scoped) return this.scoped.listAttachmentsForMessages(messageIds);
     if (messageIds.length === 0) return [];
     const { data, error } = await this.client
       .from("message_attachments")
@@ -477,6 +506,7 @@ export class MessagingDB implements ToolCallDB {
    * null on failure (logged, never thrown — telemetry must not break a turn).
    */
   async insertToolCall(row: InsertToolCallRow): Promise<string | null> {
+    if (this.scoped) return this.scoped.insertToolCall(row);
     const insert: Record<string, unknown> = {
       org_id: row.orgId,
       agent_uid: row.agentUid,
@@ -507,6 +537,7 @@ export class MessagingDB implements ToolCallDB {
   /** Enrich a tool-call row with its outcome (status / error / duration) once the
    *  `after_tool_call` hook reports it. Best-effort. */
   async updateToolCall(id: string, patch: UpdateToolCallRow): Promise<boolean> {
+    if (this.scoped) return this.scoped.updateToolCall(id, patch);
     const payload: Record<string, unknown> = {};
     if (patch.status !== undefined) payload.status = patch.status;
     if (patch.error !== undefined) payload.error = patch.error;

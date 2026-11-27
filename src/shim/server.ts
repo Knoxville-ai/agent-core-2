@@ -42,9 +42,8 @@ import {
 } from "./routes-oauth.js";
 import { MessagingDB } from "./supabase-db.js";
 import {
-  noopPublisher,
-  RealtimeRestPublisher,
   TurnLocks,
+  turnPublisher,
   type TurnPublisher,
 } from "./turn-live.js";
 import { sendJson } from "./util.js";
@@ -82,7 +81,7 @@ export async function startShim(
   // following the conversation.
   const turns: TurnDeps = {
     turns: new TurnLocks(),
-    publisher: env.AGENT_TURN_BROADCAST ? new RealtimeRestPublisher(env) : noopPublisher,
+    publisher: turnPublisher(env),
   };
   // A turn lives in this process only, so any row a previous process left
   // `streaming` (or queued as `pending`) will never finish. Close those out
