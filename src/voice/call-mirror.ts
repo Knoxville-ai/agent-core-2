@@ -5,7 +5,9 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { agentDataClientFromEnv, type AgentDataClient } from "../agent-data/client.js";
 import { LLM_COMPLETE_PATH } from "../shim/conversation-title.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 
 /**
  * Phone calls → the console.
@@ -21,8 +23,9 @@ import { LLM_COMPLETE_PATH } from "../shim/conversation-title.js";
  *   2. once the call ends, writes the transcript into that conversation, asks
  *      the agent's own model for a short summary (the knox-llm-complete route),
  *      posts it, and saves it as an episodic memory (`remember_memory`, the RPC
- *      behind the platform's `remember` tool) so the agent recalls the call in
- *      chat, on later calls and in tasks.
+ *      behind the platform's `remember` tool). A call's content comes from
+ *      outside the org, so the memory is held for a member to confirm (console
+ *      0266) before the agent recalls it in chat, on later calls and in tasks.
  *
  * It also answers, for the report-outcome plugin, "which conversation is this
  * voice session's call?" (see {@link VoiceConversationIndex}), which is how a
@@ -276,6 +279,19 @@ export class VoiceConversationIndex {
       if (m) caller = this.known.get(m[1]!) ?? { name: null, phone: displayE164(`+${m[1]}`), member: false };
     }
     return { conversation_id: conversationId, caller };
+  }
+
+  /** The live call behind a voice session: its conversation and the member it
+   *  is filed under (null for an unknown number). For the phone step-up. */
+  call(sessionKey: string | null | undefined, now = Date.now()): { conversationId: string; userId: string | null } | null {
+    const conversationId = this.get(sessionKey, now);
+    if (!conversationId) return null;
+    return { conversationId, userId: this.mirror?.byConversation(conversationId)?.userId ?? null };
+  }
+
+  /** A console conversation this process's call mirror opened for a call. */
+  isCallConversation(conversationId: string): boolean {
+    return !!this.mirror?.byConversation(conversationId);
   }
 
   /** The call ended: keep the link a little longer for a consult still running. */
@@ -619,8 +635,82 @@ export class CallLogTail {
   }
 }
 
+/** A CallMirrorStore that also names the agent (for the phone notifier). */
+export interface NamedCallMirrorStore extends CallMirrorStore {
+  agentDisplayName(): Promise<string | null>;
+}
+
+/** The store this container should use: the console's agent data API when it
+ *  provides one, else the service-role key. */
+export function callMirrorStoreFromEnv(env: AgentEnv): NamedCallMirrorStore {
+  const api = agentDataClientFromEnv(env);
+  return api ? new ScopedCallMirrorStore(api) : new SupabaseCallMirrorStore(env);
+}
+
+/** The store over the agent data API: the console fills in this agent's org and
+ *  uid and checks every conversation is its own. */
+export class ScopedCallMirrorStore implements NamedCallMirrorStore {
+  constructor(private readonly api: AgentDataClient) {}
+
+  async findMemberByPhone(digits: string): Promise<{ userId: string; name: string | null } | null> {
+    if (digits.length < 7) return null;
+    const { member } = await this.api.call<{ member: { user_id: string; name: string | null } | null }>(
+      "members.find_by_phone",
+      { digits: digits.slice(-15) },
+    );
+    return member ? { userId: member.user_id, name: member.name } : null;
+  }
+
+  async agentDisplayName(): Promise<string | null> {
+    const { display_name } = await this.api.call<{ display_name: string | null }>("agent.display_name");
+    return display_name?.trim() || null;
+  }
+
+  async createConversation(input: { userId: string | null; title: string }): Promise<string> {
+    try {
+      const { id } = await this.api.call<{ id: string }>("conversation.create_phone", {
+        user_id: input.userId,
+        title: input.title,
+      });
+      return id;
+    } catch (err) {
+      throw new Error(`create phone conversation: ${String(err)}`);
+    }
+  }
+
+  async insertMessage(input: Parameters<CallMirrorStore["insertMessage"]>[0]): Promise<void> {
+    try {
+      await this.api.call("messages.insert", {
+        conversation_id: input.conversationId,
+        role: input.role,
+        content: input.content,
+        status: "complete",
+        system_generated: input.systemGenerated ?? false,
+        sender_kind: input.senderKind,
+        sender_id: input.senderId || null,
+        created_at:
+          typeof input.at === "number" && Number.isFinite(input.at) ? new Date(input.at).toISOString() : null,
+      });
+    } catch (err) {
+      throw new Error(`insert phone message: ${String(err)}`);
+    }
+  }
+
+  async remember(input: { conversationId: string; body: string; tags: string[] }): Promise<void> {
+    try {
+      await this.api.call("memories.remember", {
+        conversation_id: input.conversationId,
+        body: input.body,
+        tags: input.tags,
+      });
+    } catch (err) {
+      throw new Error(`remember_memory: ${String(err)}`);
+    }
+  }
+}
+
 /** The Supabase-backed store (service role, same as the shim's MessagingDB). */
-export class SupabaseCallMirrorStore implements CallMirrorStore {
+export class SupabaseCallMirrorStore implements NamedCallMirrorStore {
   private readonly client: SupabaseClient;
 
   constructor(
@@ -699,8 +789,20 @@ export class SupabaseCallMirrorStore implements CallMirrorStore {
     if (error) throw new Error(`insert phone message: ${error.message}`);
   }
 
+  /**
+   * Save the call summary as an episodic memory, with the provenance the
+   * console's `remember` tool would record for a phone session (console 0266,
+   * SEC-027): a call's words come from outside the org, so the memory is held
+   * as a proposal a member confirms before it reaches recall, the boot digest
+   * or the per-turn prompt. The transcript and summary stay in the call's
+   * conversation either way.
+   *
+   * A database that predates 0266 has only the old ten-argument
+   * remember_memory; the call is then repeated in that form (an active memory,
+   * as before). Remove the fallback once every console database is past 0266.
+   */
   async remember(input: { conversationId: string; body: string; tags: string[] }): Promise<void> {
-    const { error } = await this.client.rpc("remember_memory", {
+    const legacy = {
       p_org_id: this.env.AGENT_ORG,
       p_agent_uid: this.env.AGENT_UID,
       p_body: input.body,
@@ -711,9 +813,30 @@ export class SupabaseCallMirrorStore implements CallMirrorStore {
       p_pinned: false,
       p_conversation_id: input.conversationId,
       p_expires_at: null,
+    };
+    let { error } = await this.client.rpc("remember_memory", {
+      ...legacy,
+      ...PHONE_MEMORY_PROVENANCE,
     });
+    if (error && isMissingRpcSignature(error)) {
+      ({ error } = await this.client.rpc("remember_memory", legacy));
+    }
     if (error) throw new Error(`remember_memory: ${error.message}`);
   }
+}
+
+/** remember_memory's provenance arguments for a phone-call memory (0266). */
+export const PHONE_MEMORY_PROVENANCE = {
+  p_status: "proposed",
+  p_origin_trust: "untrusted",
+  p_origin_kind: "phone",
+  p_note:
+    "Saved from a phone call's summary. Confirm it before it shapes the agent's other conversations.",
+} as const;
+
+/** True for PostgREST's "no function with these arguments" (a pre-0266 database). */
+function isMissingRpcSignature(error: { code?: string; message?: string }): boolean {
+  return error.code === "PGRST202" || /could not find the function/i.test(error.message ?? "");
 }
 
 /** Summaries come from the agent's own model via the knox-llm-complete route. */
@@ -723,7 +846,7 @@ export function llmCompleteSummarizer(env: AgentEnv, fetchImpl: typeof fetch = f
       const res = await fetchImpl(`http://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}${LLM_COMPLETE_PATH}`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`,
+          Authorization: `Bearer ${gatewayAuthToken(env)}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(request),

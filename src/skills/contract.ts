@@ -198,6 +198,10 @@ export interface SyncPlanLegacySkill {
   slug: string;
   version: string | null;
   required: boolean;
+  /** Optional expected content digest of the installed ClawHub folder
+   *  (`manifestDigest`, ClawHub metadata dirs excluded). Vessel-side
+   *  extension: a console that doesn't send it gets trust-on-first-use pins. */
+  integrity_sha256?: string | null;
 }
 
 export interface SyncPlan {

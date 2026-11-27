@@ -14,7 +14,11 @@ describe("knox-voice-context", () => {
       conversation_id: "c",
       caller: { name: "Zach Tucker", phone: "+1 901-651-2542", member: true },
     });
-    expect(text).toContain("live phone call with Zach Tucker (+1 901-651-2542), a member of your organization.");
+    expect(text).toContain("live phone call from +1 901-651-2542 that matches Zach Tucker, a member of your organization.");
+    // Caller ID is a hint, not proof: the PIN step-up comes first.
+    expect(text).toContain("Caller ID can be faked");
+    expect(text).toContain("verify_caller_pin");
+    expect(text.indexOf("verify_caller_pin")).toBeLessThan(text.indexOf("treat the request as coming from them"));
     expect(text).toContain("start_task");
     expect(text).toContain("answer_call_escalation");
     expect(text).toContain("phone PIN");

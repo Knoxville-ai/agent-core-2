@@ -10,6 +10,7 @@ import {
   isSendCustomerEmailTool,
   isLearningLinkTool,
   isReminderSessionTool,
+  isRememberTool,
   conversationIdParamFor,
   isStartTaskTool,
   needsConversationId,
@@ -352,5 +353,35 @@ describe("publish_artifact stamping (0138)", () => {
   it("leaves the read-only artifact tools alone", () => {
     expect(conversationIdParamFor("get_artifact")).toBe(null);
     expect(conversationIdParamFor("list_my_artifacts")).toBe(null);
+  });
+});
+
+describe("remember stamping (0266)", () => {
+  it("matches remember, bare and prefixed", () => {
+    expect(isRememberTool("remember")).toBe(true);
+    expect(isRememberTool("knoxville_platform__remember")).toBe(true);
+    expect(isRememberTool("knoxville_platform.remember")).toBe(true);
+    expect(isRememberTool("knoxville_platform:remember")).toBe(true);
+  });
+
+  it("does not match the other memory tools or neighbours", () => {
+    for (const name of ["recall", "create_reminder", "resolve_reminder", "remember_memory", "unremember", null]) {
+      expect(isRememberTool(name), String(name)).toBe(false);
+    }
+  });
+
+  it("stamps conversation_id outside a task session, overriding a model-typed one", () => {
+    expect(conversationIdParamFor("knoxville_platform__remember")).toBe("conversation_id");
+    const conv = conversationIdFromSessionKey("webchat:conv-1");
+    expect(buildOutcomeParams({ body: "b", conversation_id: "made-up" }, conv, "conversation_id")).toEqual({
+      body: "b",
+      conversation_id: "conv-1",
+    });
+  });
+
+  it("takes task_id in a task session (the platform resolves its work conversation)", () => {
+    const taskId = taskIdFromSessionKey("task:t-9");
+    expect(conversationIdFromSessionKey("task:t-9")).toBe(null);
+    expect(buildOutcomeParams({ body: "b" }, taskId, "task_id")).toEqual({ body: "b", task_id: "t-9" });
   });
 });

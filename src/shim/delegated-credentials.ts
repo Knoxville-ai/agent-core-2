@@ -185,47 +185,6 @@ export class DelegatedCredentialStore {
   }
 
   /**
-   * Creds of the SINGLE currently-live delegated turn, or `{}` when zero — or
-   * more than one — are staged.
-   *
-   * The exec-shim (see `docker/knox-python3-shim.py`) needs this because
-   * openclaw does not expose the session key to a skill's `exec` subprocess, so
-   * a shim running inside that subprocess can't ask for its own session by name.
-   * These agents serialize their turns (openclaw's main lane), so in practice
-   * there is exactly one live delegated turn when a skill runs, and returning it
-   * is correct. The ">1 → {}" rule is a deliberate FAIL-CLOSED guard: if two
-   * delegated turns ever overlap we return nothing (the skill surfaces its own
-   * auth error) rather than risk handing one caller's credential to another.
-   */
-  currentSingle(): DelegatedCredentials {
-    const live: DelegatedCredentials[] = [];
-    const liveKeys: string[] = [];
-    for (const [key, entry] of this.entries) {
-      if (entry.expiresAt <= this.now()) this.entries.delete(key);
-      else {
-        live.push(entry.creds);
-        liveKeys.push(key);
-      }
-    }
-    if (live.length > 1) {
-      // Fail-closed, but say so. Before long-running tasks this was a
-      // vanishingly rare race between two overlapping delegated turns; a
-      // `task:` session can now be live for an hour, so an overlap is a real
-      // possibility and its symptom (a skill suddenly reporting no credentials)
-      // is otherwise completely mysterious. The task runner serializes
-      // credential-carrying TASKS for exactly this reason — what remains is a
-      // delegated message turn landing while a delegated task runs.
-      // Names only, never values.
-      console.error(
-        `[delegated-credentials] ${live.length} delegated turns live at once ` +
-          `(${liveKeys.join(", ")}) — returning NOTHING rather than risk handing ` +
-          `one caller's credential to another. The skill will report an auth error.`,
-      );
-    }
-    return live.length === 1 ? live[0]! : {};
-  }
-
-  /**
    * Drop a session's creds — called when the turn that staged them ends.
    * Idempotent.
    *

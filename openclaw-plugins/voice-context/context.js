@@ -16,9 +16,12 @@ export function buildVoiceContext(info) {
   const lines = ["## Live phone call"];
   if (caller?.name) {
     lines.push(
-      `You are on a live phone call with ${caller.name}${caller.phone ? ` (${caller.phone})` : ""}` +
+      `You are on a live phone call from ${caller.phone || "a number"} that matches ${caller.name}` +
         (caller.member ? ", a member of your organization." : ".") +
-        " Treat the request as coming from them.",
+        " Caller ID can be faked, so it doesn't prove who is speaking: until they confirm their phone PIN you can " +
+        "answer questions and help with what the call is already waiting on, but not act for them. As soon as they " +
+        "want something done, ask for their phone PIN and call `verify_caller_pin` with the digits they say. " +
+        "Once it's confirmed, treat the request as coming from them.",
     );
   } else if (caller?.phone) {
     lines.push(`You are on a live phone call with an unknown caller at ${caller.phone}.`);

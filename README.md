@@ -48,9 +48,11 @@ list):
 | Var | Purpose |
 | --- | --- |
 | `AGENT_UID` / `AGENT_ORG` / `AGENT_ROLE` | identity; `AGENT_ROLE=generic` for vessel agents |
-| `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Storage access for workspace + manifest |
+| `SUPABASE_URL` | Supabase project URL |
+| `PLATFORM_AGENT_DATA_URL` | the console's agent data API; with `PLATFORM_API_TOKEN`, all database and Storage access goes through it, scoped to this agent (see CONSOLE_INTEGRATION.md, Platform data access) |
+| `SUPABASE_SERVICE_ROLE_KEY` | transitional: only used while the console does not provide `PLATFORM_AGENT_DATA_URL` |
 | `SUPABASE_JWT_SECRET` | HS256 secret used to verify the console's bearer JWTs |
-| `OPENCLAW_GATEWAY_TOKEN` | shared secret between shim and local openclaw gateway |
+| `OPENCLAW_GATEWAY_TOKEN` | the console's bearer for the operator routes (`/files`, `/skills`). Stays in the shim: the gateway gets a token derived from it (`src/openclaw/gateway-auth.ts`) |
 | `LLM_PROVIDER` / `LLM_MODEL` / `LLM_API_KEY` | written into `openclaw.json` as the primary model |
 | `LLM_BASE_URL` | optional provider endpoint override (`models.providers.<provider>.baseURL`). Point at a cheap external OpenAI-compatible endpoint (Groq/DeepSeek/self-hosted Ollama box), or leave unset for `LLM_PROVIDER=ollama` to run a small model in-container (weights pulled on first boot, ollama agents only) |
 | `PLATFORM_MCP_URL` / `PLATFORM_API_TOKEN` | optional; attaches the platform MCP server for A2A discovery and is used at boot to call `get_my_bundle` for capability assignments, and by SkillSync for the skill plan |
@@ -92,8 +94,11 @@ console boot list (`config/skills.json`) at boot. See `CONSOLE_INTEGRATION.md`
 
 ## HTTP surface (port 8080)
 
-All authenticated endpoints require `Authorization: Bearer <Supabase
-session.access_token>`, verified against `SUPABASE_JWT_SECRET`.
+All authenticated endpoints require `Authorization: Bearer <platform token>`:
+an ES256 token the console mints for this agent, verified against the
+console's JWKS. Older consoles' Supabase session tokens are accepted only
+under `AGENT_BEARER_POLICY=legacy-org-check` (the default) and only for
+members of the agent's org. See `CONSOLE_INTEGRATION.md` *Bearer policy*.
 
 | Method + path | Purpose |
 | --- | --- |

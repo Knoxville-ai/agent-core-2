@@ -122,3 +122,24 @@ describe("OAuth complete → in-process gateway restart holds skills refreshes",
     await vi.waitFor(() => expect(gate.isOpen).toBe(true));
   });
 });
+
+describe("OAuth routes under AGENT_BEARER_POLICY=platform-only", () => {
+  const strictDeps = (gateway: { restart: () => Promise<void>; waitUntilReady: () => Promise<boolean> }) => {
+    const d = deps(gateway);
+    return { ...d, env: { ...d.env, AGENT_BEARER_POLICY: "platform-only" } as AgentEnv };
+  };
+  const gateway = { restart: async () => {}, waitUntilReady: async () => true };
+
+  it("refuses a user token without the agent-control scope", async () => {
+    await expect(
+      handleOAuthComplete(USER, req({ callbackUrl: "http://localhost:1455/cb?code=x" }), res().res, strictDeps(gateway)),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("accepts an agent-control token", async () => {
+    const control = { ...USER, scope: "agent-control" } as Principal;
+    const { res: r, status } = res();
+    await handleOAuthComplete(control, req({ callbackUrl: "http://localhost:1455/cb?code=x" }), r, strictDeps(gateway));
+    expect(status()).toBe(200);
+  });
+});

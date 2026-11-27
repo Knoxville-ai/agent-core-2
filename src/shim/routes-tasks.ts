@@ -23,7 +23,11 @@ import { readJsonBody, sendJson } from "./util.js";
  *
  * Auth is the same bearer gate as the messaging routes (a platform-minted user
  * JWT, or an A2A agent token on a delegated call), so a task start is
- * authorized exactly like the synchronous turn it replaces.
+ * authorized exactly like the synchronous turn it replaces. The console also
+ * binds the token to the task (`task_id`, `task_org_id`, `task_callback_url`
+ * claims): such a token works only for that task's start and cancel, only in
+ * this agent's org, and only with the callback URL it names. Under
+ * AGENT_BEARER_POLICY=platform-only the binding is required (bearer-policy.ts).
  */
 
 interface TaskStartBody {
@@ -80,6 +84,37 @@ export async function handleTaskStart(
   if (!callbackToken) throw new HttpError(400, "callback_token required");
 
   const conversationId = str(body.conversation_id);
+
+  if (principal.kind === "service") {
+    // bearer-policy.ts already keeps service tokens off this route.
+    throw new HttpError(403, "token is not valid for this route");
+  }
+
+  // A token minted for this task start: the task, its org (checked in
+  // bearer-policy.ts) and where it reports back are all part of the signed
+  // token, so none of them can be swapped in the body.
+  if (principal.task) {
+    if (principal.task.taskId !== taskId) {
+      throw new HttpError(403, "token is bound to another task");
+    }
+    if (!principal.task.callbackUrl || principal.task.callbackUrl !== callbackUrl) {
+      throw new HttpError(403, "callback_url does not match the task token");
+    }
+  } else {
+    // Transition (AGENT_BEARER_POLICY=legacy-org-check): an older console
+    // sends a token that is not bound to the task. A same-org agent may start
+    // one; a cross-org agent only inside a conversation that carries its
+    // drive-thru or delegation binding (authorizeTaskConversation). A user
+    // session token has passed the org-membership check in bearer-policy.ts.
+    if (principal.kind === "agent" && principal.orgId !== deps.env.AGENT_ORG && !conversationId) {
+      throw new HttpError(403, "cross-org task requires a conversation");
+    }
+    log.info("task start with an unbound token (older console)", {
+      task_id: taskId,
+      principal_kind: principal.kind,
+      source: principal.source,
+    });
+  }
 
   // Whether this task's turns are delegated decides which lane it runs in (see
   // TaskRunner), so we do not take the platform's word for it alone: the
@@ -213,11 +248,14 @@ async function authorizeTaskConversation(
 ): Promise<void> {
   const conversation = await deps.db.getConversation(conversationId);
   if (!conversation) throw new HttpError(404, "conversation not found");
-  if (conversation.agent_uid !== deps.env.AGENT_UID) {
+  if (conversation.agent_uid !== deps.env.AGENT_UID || conversation.org_id !== deps.env.AGENT_ORG) {
     throw new HttpError(403, "conversation belongs to another agent");
   }
   if (conversation.archived_at) throw new HttpError(409, "conversation archived");
 
+  if (principal.kind === "service") {
+    throw new HttpError(403, "token is not valid for this route");
+  }
   if (principal.kind === "agent") {
     const sameOrg = principal.orgId === deps.env.AGENT_ORG;
     if (!sameOrg && !crossOrgAgentAllowed(conversation)) {

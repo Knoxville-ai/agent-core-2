@@ -1,5 +1,6 @@
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { agentDataClientFromEnv, type AgentDataClient } from "../agent-data/client.js";
 import type { Mcq } from "./mcq.js";
 
 /**
@@ -215,10 +216,80 @@ export class RealtimeRestPublisher implements TurnPublisher {
   }
 }
 
+/**
+ * Publishes through the console's agent data API, which broadcasts on the
+ * conversation's topic only when the conversation is this agent's own. One
+ * request in flight per topic: events that arrive meanwhile go out together in
+ * the next one, so a slow round trip coalesces instead of queueing a request
+ * per tick. Only a batch carrying `done` waits for delivery (so a turn's
+ * final event is flushed before it returns); delivery failures are logged once
+ * per topic and dropped, like the REST publisher's.
+ */
+export class ConsoleTurnPublisher implements TurnPublisher {
+  private readonly queues = new Map<
+    string,
+    { events: TurnEvent[]; inflight: Promise<void> | null; warned: boolean }
+  >();
+
+  constructor(private readonly api: AgentDataClient) {}
+
+  publish(topic: string, events: TurnEvent[]): Promise<void> {
+    if (events.length === 0) return Promise.resolve();
+    const prefix = "conversation:";
+    if (!topic.startsWith(prefix)) return Promise.reject(new Error(`unsupported topic ${topic}`));
+    let q = this.queues.get(topic);
+    if (!q) {
+      q = { events: [], inflight: null, warned: false };
+      this.queues.set(topic, q);
+    }
+    q.events.push(...events);
+    const drained = this.drain(topic, topic.slice(prefix.length), q);
+    return events.some((e) => e.type === "done") ? drained : Promise.resolve();
+  }
+
+  private drain(
+    topic: string,
+    conversationId: string,
+    q: { events: TurnEvent[]; inflight: Promise<void> | null; warned: boolean },
+  ): Promise<void> {
+    if (q.inflight) return q.inflight;
+    q.inflight = (async () => {
+      try {
+        while (q.events.length > 0) {
+          const batch = q.events.splice(0, 200);
+          try {
+            await this.api.call("realtime.broadcast", { conversation_id: conversationId, events: batch });
+          } catch (err) {
+            if (!q.warned) {
+              q.warned = true;
+              log.warn("turn broadcast failed (row saves still deliver the reply)", {
+                topic,
+                err: String(err),
+              });
+            }
+          }
+        }
+      } finally {
+        q.inflight = null;
+        if (q.events.length === 0 && this.queues.get(topic) === q) this.queues.delete(topic);
+      }
+    })();
+    return q.inflight;
+  }
+}
+
 /** Publisher that drops everything (AGENT_TURN_BROADCAST=false, tests). */
 export const noopPublisher: TurnPublisher = {
   async publish() {},
 };
+
+/** This container's publisher: through the agent data API when the console
+ *  provides it, else Realtime REST with the database key. */
+export function turnPublisher(env: AgentEnv): TurnPublisher {
+  if (!env.AGENT_TURN_BROADCAST) return noopPublisher;
+  const api = agentDataClientFromEnv(env);
+  return api ? new ConsoleTurnPublisher(api) : new RealtimeRestPublisher(env);
+}
 
 /**
  * One turn's broadcast stream. Token deltas are coalesced for

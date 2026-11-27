@@ -6,9 +6,11 @@ import { fileURLToPath } from "node:url";
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { costProxyBaseUrl, costTrackingEnabled } from "../shim/cost-proxy.js";
+import { PLATFORM_MCP_FORWARD_PATH, platformMcpForwarded } from "../shim/platform-mcp-forward.js";
 import { readLockSkillEntries, type SkillEntries } from "../skills/lock.js";
 import { AgentStorage } from "./supabase-storage.js";
 import { logVoiceCall, resolveVoiceCall, VOICE_CALL_PLUGIN_ID } from "./voice-call.js";
+import { gatewayAuthToken, platformForwardToken } from "../openclaw/gateway-auth.js";
 
 /** Id + on-disk directory of the delegated-credentials OpenClaw plugin shipped in
  *  this repo (see `openclaw-plugins/`). Resolved relative to this module so it
@@ -75,6 +77,15 @@ const LLM_COMPLETE_PLUGIN_DIR = fileURLToPath(
   new URL("../../openclaw-plugins/llm-complete", import.meta.url),
 );
 
+/** Session policy: checks every tool call against the shim's per-session tool
+ *  rules and approval gate, stamps platform tool calls with their session (for
+ *  the console's session headers) and offers phone callers PIN verification
+ *  (see `openclaw-plugins/session-policy`). Rides every vessel. */
+export const SESSION_POLICY_PLUGIN_ID = "knox-session-policy";
+const SESSION_POLICY_PLUGIN_DIR = fileURLToPath(
+  new URL("../../openclaw-plugins/session-policy", import.meta.url),
+);
+
 /** Phone-call context: who is on the line, injected before each mid-call
  *  consult (see `openclaw-plugins/voice-context`). Wired only with a phone. */
 export const VOICE_CONTEXT_PLUGIN_ID = "knox-voice-context";
@@ -122,19 +133,6 @@ export async function loadConstitution(env: AgentEnv): Promise<string> {
  * the login-shell PATH). See docs/tools/exec.md "PATH handling".
  */
 const SKILLS_VENV_BIN = "/opt/skills-venv/bin";
-
-/**
- * Dir holding the delegated-credential exec shim (a `python3` that injects this
- * turn's brokered creds, then re-execs the real venv python3 — see Dockerfile +
- * docker/knox-python3-shim.py). It is prepended AHEAD of the venv so that on a
- * skill's `python3 ...` the exec tool resolves the shim first. This is the
- * runtime's per-turn credential-injection path for delegated A2A turns, which
- * openclaw's chat-completions run can't reach via `before_tool_call` plugins.
- * The shim itself re-execs `${SKILLS_VENV_BIN}/python3`, so `requests` etc. are
- * still on hand. Only `python3` is shadowed; `uv`/`pip`/other bins still resolve
- * to the venv. Scoped to the exec PATH only — boot-time python3 is unaffected.
- */
-const EXEC_SHIM_BIN = "/opt/knox-exec-shim";
 
 /**
  * Per-file cap for a workspace bootstrap file before openclaw truncates it in
@@ -513,14 +511,27 @@ export function buildOpenclawConfig(
   outputCaps: Readonly<Record<string, number>> = {},
 ): Record<string, unknown> {
   const mcpServers: Record<string, unknown> = {};
+  // The console MCP goes through the shim's loopback forwarder when it can
+  // (../shim/platform-mcp-forward.ts), which adds the console's per-session
+  // headers and the platform token; openclaw.json only holds a derived
+  // forward token (the git credential helper reads the same entry).
+  const forwardPlatformMcp = platformMcpForwarded(env);
   if (env.PLATFORM_MCP_URL) {
-    mcpServers.knoxville_platform = {
-      url: env.PLATFORM_MCP_URL,
-      transport: "streamable-http",
-      headers: env.PLATFORM_API_TOKEN
-        ? { Authorization: `Bearer ${env.PLATFORM_API_TOKEN}` }
-        : {},
-    };
+    mcpServers.knoxville_platform = forwardPlatformMcp
+      ? {
+          url: `http://127.0.0.1:${env.AGENT_HTTP_PORT}${PLATFORM_MCP_FORWARD_PATH}`,
+          transport: "streamable-http",
+          // Derived and accepted by the forward route only; it names no session
+          // (../openclaw/gateway-auth.ts platformForwardToken).
+          headers: { Authorization: `Bearer ${platformForwardToken(env)}` },
+        }
+      : {
+          url: env.PLATFORM_MCP_URL,
+          transport: "streamable-http",
+          headers: env.PLATFORM_API_TOKEN
+            ? { Authorization: `Bearer ${env.PLATFORM_API_TOKEN}` }
+            : {},
+        };
   }
 
   // Operator-configured MCP servers (any number, any agent) delivered from the
@@ -548,6 +559,7 @@ export function buildOpenclawConfig(
     // Mid-call handoffs run on the agent's own model (and, for OpenRouter,
     // through the cost proxy), not OpenClaw's built-in default.
     responseModel: `${env.LLM_PROVIDER}/${env.LLM_MODEL}`,
+    stepUpEnforced: (env.AGENT_SESSION_TOOL_POLICY ?? "enforce") === "enforce",
   });
   logVoiceCall(voice);
 
@@ -639,7 +651,10 @@ export function buildOpenclawConfig(
       // reachable only from the shim in the same container.
       mode: "local",
       bind: "loopback",
-      auth: { mode: "token", token: env.OPENCLAW_GATEWAY_TOKEN },
+      // Derived from, never equal to, the console's OPENCLAW_GATEWAY_TOKEN:
+      // this file is readable by every process of the agent uid. See
+      // ../openclaw/gateway-auth.ts.
+      auth: { mode: "token", token: gatewayAuthToken(env) },
       // Apply every runtime edit of this file in-process, never by restarting.
       // SkillSync (and the deprecated /skills/install) change skills by bumping
       // `skills.entries.<key>.config.rev` here; openclaw hot-reloads any
@@ -659,16 +674,12 @@ export function buildOpenclawConfig(
     mcp: {
       servers: mcpServers,
     },
-    // Prepend, in order: (1) the delegated-credential exec shim, then (2) the
-    // skills venv. openclaw rebuilds the exec PATH from a minimal login shell
-    // and ignores per-call env.PATH, so `tools.exec.pathPrepend` is the only way
-    // to control what a skill's bare `python3 scripts/foo.py` resolves to. The
-    // shim goes first so it can inject this turn's brokered credentials (the
-    // delegated A2A path openclaw's chat-completions run can't reach via
-    // before_tool_call plugins) and then re-exec the venv python3 — which is why
-    // the venv still needs to be on PATH right behind it (for `requests` and for
-    // `uv`/`pip`, which the shim doesn't shadow). Applies to every agent; on a
-    // non-delegated turn the shim finds nothing staged and is a no-op.
+    // Prepend the skills venv. openclaw rebuilds the exec PATH from a minimal
+    // login shell and ignores per-call env.PATH, so `tools.exec.pathPrepend` is
+    // the only way to control what a skill's bare `python3 scripts/foo.py`
+    // resolves to (the venv's, with `requests` etc.). Delegated credentials
+    // reach exec through the knox-delegated-credentials before_tool_call
+    // plugin, keyed by session; nothing on PATH fetches them.
     //
     // Optional per-agent tool policy (OPENCLAW_TOOLS_PROFILE / _DENY): default
     // unset → openclaw's own default (no restriction). Ops can set these on a
@@ -681,7 +692,7 @@ export function buildOpenclawConfig(
     cron: { enabled: false },
     tools: {
       exec: {
-        pathPrepend: [EXEC_SHIM_BIN, SKILLS_VENV_BIN],
+        pathPrepend: [SKILLS_VENV_BIN],
       },
       ...(env.OPENCLAW_TOOLS_PROFILE ? { profile: env.OPENCLAW_TOOLS_PROFILE } : {}),
       ...(toolsAllow.length > 0 ? { allow: toolsAllow } : {}),
@@ -841,6 +852,28 @@ export function buildOpenclawConfig(
     plugins.load = { ...load, paths: [...paths, LLM_COMPLETE_PLUGIN_DIR] };
     const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
     entries[LLM_COMPLETE_PLUGIN_ID] = { enabled: true };
+    plugins.entries = entries;
+    config.plugins = plugins;
+  }
+
+  // Session policy rides EVERY vessel: it gates tool calls by who is driving the
+  // session (SEC-021/023), enforces "requires approval" on direct connector
+  // tools (SEC-019) and stamps platform tool calls for the forwarder above.
+  {
+    const plugins = (config.plugins as Record<string, unknown> | undefined) ?? {};
+    const load = (plugins.load as { paths?: unknown } | undefined) ?? {};
+    const paths = Array.isArray(load.paths) ? (load.paths as string[]) : [];
+    plugins.load = { ...load, paths: [...paths, SESSION_POLICY_PLUGIN_DIR] };
+    const entries = (plugins.entries as Record<string, unknown> | undefined) ?? {};
+    entries[SESSION_POLICY_PLUGIN_ID] = {
+      enabled: true,
+      // failOpen: with the rules switched off, an unreachable shim no longer
+      // blocks every tool call (the kill switch).
+      config: {
+        stampSessions: forwardPlatformMcp,
+        ...((env.AGENT_SESSION_TOOL_POLICY ?? "enforce") === "off" ? { failOpen: true } : {}),
+      },
+    };
     plugins.entries = entries;
     config.plugins = plugins;
   }

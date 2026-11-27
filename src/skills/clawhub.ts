@@ -1,9 +1,12 @@
 import { spawn } from "node:child_process";
-import { dirname } from "node:path";
+import { rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { SkillRequirement } from "../bundle/types.js";
+import { childEnv } from "../openclaw/child-env.js";
 import { ensureOpenclawTempDir } from "../openclaw/temp-dir.js";
+import { clawhubIntegrityMode, verifyClawhubInstall, type ClawhubIntegrityMode } from "./clawhub-integrity.js";
 import type { InstalledSkill, SkillResolver } from "./resolver.js";
 
 /**
@@ -18,9 +21,16 @@ import type { InstalledSkill, SkillResolver } from "./resolver.js";
  * The local pre-staged resolver in ./local.ts is no longer chained in
  * here; it stays around for dev workflows but doesn't paper over a
  * clawhub outage in production.
+ *
+ * Every install is content-checked before it is returned (./clawhub-integrity.ts):
+ * the folder's manifest digest must match the requirement's `integrityHash`
+ * when one is given, and otherwise the trust-on-first-use pin for that slug and
+ * version (or, with CLAWHUB_INTEGRITY=require, an unhashed install is refused).
+ * A refused install's folder is removed before the error propagates.
  */
 
 const INSTALL_TIMEOUT_MS = 120_000;
+const CLAWHUB_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 
 export interface ClawhubResolverOptions {
   /** Mirrors the env we hand to the gateway in `openclaw/gateway-process.ts`
@@ -30,15 +40,19 @@ export interface ClawhubResolverOptions {
   stateDir: string;
   /** Binary name or absolute path. Defaults to `openclaw` on PATH. */
   binary?: string;
+  /** Default: from CLAWHUB_INTEGRITY (see clawhub-integrity.ts). */
+  integrityMode?: ClawhubIntegrityMode;
 }
 
 export class ClawhubSkillResolver implements SkillResolver {
   private readonly stateDir: string;
   private readonly binary: string;
+  private readonly integrityMode: ClawhubIntegrityMode;
 
   constructor(opts: ClawhubResolverOptions) {
     this.stateDir = opts.stateDir;
     this.binary = opts.binary ?? "openclaw";
+    this.integrityMode = opts.integrityMode ?? clawhubIntegrityMode();
   }
 
   async install(
@@ -49,6 +63,11 @@ export class ClawhubSkillResolver implements SkillResolver {
       throw new Error(
         `ClawhubSkillResolver only handles source=clawhub; got "${req.source}" for ${req.ref}@${req.version}`,
       );
+    }
+    // The same slug rule `openclaw skills install` applies; checked here too
+    // because the folder path below is derived from it.
+    if (!CLAWHUB_SLUG_RE.test(req.ref)) {
+      throw new Error(`invalid clawhub skill slug: ${JSON.stringify(req.ref.slice(0, 80))}`);
     }
     const args = ["skills", "install", req.ref];
     // Pin the version when the requirement carries one (bundle skills always
@@ -62,15 +81,35 @@ export class ClawhubSkillResolver implements SkillResolver {
     // volumes survive container restarts).
     args.push("--force");
     await this.run(args, req);
+    const dest = join(workspaceSkillsDir, req.ref);
+    let verdict;
+    try {
+      verdict = await verifyClawhubInstall({
+        req,
+        dir: dest,
+        stateDir: this.stateDir,
+        mode: this.integrityMode,
+      });
+    } catch (err) {
+      await rm(dest, { recursive: true, force: true }).catch(() => undefined);
+      log.error("clawhub skill refused by the integrity check (folder removed)", {
+        ref: req.ref,
+        version: req.version || "(latest)",
+        err: String(err),
+      });
+      throw err;
+    }
     log.info("skill installed (clawhub)", {
       ref: req.ref,
       version: req.version,
-      dest: `${workspaceSkillsDir}/${req.ref}`,
+      dest,
+      digest: verdict.digest,
+      integrity: verdict.basis,
     });
     return {
       ref: req.ref,
       version: req.version,
-      path: `${workspaceSkillsDir}/${req.ref}`,
+      path: dest,
       source: "clawhub",
     };
   }
@@ -83,13 +122,12 @@ export class ClawhubSkillResolver implements SkillResolver {
     const tempDir = ensureOpenclawTempDir(this.stateDir);
     return await new Promise((resolve, reject) => {
       const child = spawn(this.binary, args, {
-        env: {
-          ...process.env,
+        env: childEnv({
           HOME: userHome,
           OPENCLAW_HOME: userHome,
           OPENCLAW_STATE_DIR: this.stateDir,
           TMPDIR: tempDir,
-        },
+        }),
         stdio: ["ignore", "pipe", "pipe"],
       });
       let stdout = "";

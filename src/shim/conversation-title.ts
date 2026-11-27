@@ -7,6 +7,7 @@ import type {
   MessageRow,
   MessagingDB,
 } from "./supabase-db.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 
 /**
  * Conversation titles: naming a new direct conversation the way chat apps do.
@@ -101,7 +102,7 @@ export function shouldAutoTitle(
   env: AgentEnv,
 ): boolean {
   if (!env.AGENT_AUTO_TITLE) return false;
-  if (principal.kind === "agent") return false;
+  if (principal.kind !== "user") return false;
   if (conversation.kind !== "user_agent") return false;
   return !(conversation.title ?? "").trim();
 }
@@ -185,7 +186,7 @@ export async function requestModelTitle(
     res = await fetchImpl(`http://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}${LLM_COMPLETE_PATH}`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`,
+        Authorization: `Bearer ${gatewayAuthToken(env)}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(buildTitleRequest(opening)),

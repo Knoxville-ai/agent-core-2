@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { bundleClientFromEnv } from "../bundle/client.js";
+import { scopeBundleToOrg } from "../bundle/org-scope.js";
 import {
   BundleEnvValidationError,
   logResolvedEnv,
@@ -11,6 +12,7 @@ import type { AgentBundle } from "../bundle/types.js";
 import type { AgentEnv } from "../env.js";
 import { log } from "../log.js";
 import { assembleSystemPrompt, parseEscalatedTools } from "../prompt/assemble.js";
+import { bootMemoryDigest } from "../shim/session-policy.js";
 import { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { fetchOpenRouterCatalog, outputCapsFor } from "../provision/openrouter-output-caps.js";
 import { fetchPinnableModelIds } from "../provision/pinnable-models.js";
@@ -213,6 +215,11 @@ export async function bootstrap(
   // `recall` tool). Fail-open: on any error the `# MEMORY` section is omitted
   // and boot proceeds — the volume/Storage layers are unaffected.
   const memoryDigest = await fetchMemoryDigest(env);
+  // While the session rules are enforced the digest is kept out of SOUL.md,
+  // which every session shares, and added to trusted sessions' system prompt
+  // only (SEC-023; knox-session-policy plugin).
+  const digestInSoul = (env.AGENT_SESSION_TOOL_POLICY ?? "enforce") !== "enforce";
+  bootMemoryDigest.current = digestInSoul ? null : memoryDigest;
 
   const systemPrompt = assembleSystemPrompt({
     constitution,
@@ -220,9 +227,10 @@ export async function bootstrap(
     charter: blobs.base,
     bundle,
     operatorNotes: blobs.playbookSeed,
-    memoryDigest,
+    memoryDigest: digestInSoul ? memoryDigest : null,
     playbook,
     escalatedTools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
+    agentOrg: env.AGENT_ORG,
   });
   await renderWorkspace({ env, assembledSoul: systemPrompt, blobs, extraModelIds, outputCaps });
 
@@ -312,7 +320,9 @@ async function fetchBundle(env: AgentEnv): Promise<AgentBundle | null> {
   const client = bundleClientFromEnv(env);
   if (!client) return null;
   try {
-    const bundle = await client.fetchBundle();
+    // Entries another org configured never reach this agent's prompt or skill
+    // install (SEC-012); a console that sends no entry org filters nothing here.
+    const bundle = scopeBundleToOrg(await client.fetchBundle(), env.AGENT_ORG);
     log.info("bundle fetched", {
       agent: bundle.agent.uid,
       assignments: bundle.assignments.length,

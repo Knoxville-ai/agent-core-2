@@ -5,6 +5,7 @@ import type { AgentEnv } from "../env.js";
 import type { GatewayProcess } from "../openclaw/gateway-process.js";
 import type { MemoryCheckpoint } from "../provision/agent-memory.js";
 import { HttpError, verifyBearer } from "./auth.js";
+import { classifyRoute, enforceBearerPolicy } from "./bearer-policy.js";
 import { CancelRegistry } from "./cancel-registry.js";
 import { OAuthSessionManager } from "./oauth-session.js";
 import {
@@ -28,6 +29,7 @@ import {
   handleDelegatedCredentialsLookup,
   handleLlmUsageIngest,
   handleToolCallIngest,
+  requirePluginToken,
 } from "./routes-internal.js";
 import { UsageAccumulator } from "./usage-telemetry.js";
 import { ToolCallHub } from "./tool-telemetry.js";
@@ -42,14 +44,15 @@ import {
 } from "./routes-oauth.js";
 import { MessagingDB } from "./supabase-db.js";
 import {
-  noopPublisher,
-  RealtimeRestPublisher,
   TurnLocks,
+  turnPublisher,
   type TurnPublisher,
 } from "./turn-live.js";
 import { sendJson } from "./util.js";
 import { voiceConversations } from "../voice/call-mirror.js";
 import { phoneNotify } from "../voice/notify.js";
+import { createPolicyRuntime, logPolicyRuntime, routePolicy, sessionIdsFor, type PolicyRuntime } from "./routes-policy.js";
+import { handlePlatformMcpForward, isPlatformMcpForwardPath } from "./platform-mcp-forward.js";
 
 interface ServerHandle {
   close: () => Promise<void>;
@@ -82,7 +85,7 @@ export async function startShim(
   // following the conversation.
   const turns: TurnDeps = {
     turns: new TurnLocks(),
-    publisher: env.AGENT_TURN_BROADCAST ? new RealtimeRestPublisher(env) : noopPublisher,
+    publisher: turnPublisher(env),
   };
   // A turn lives in this process only, so any row a previous process left
   // `streaming` (or queued as `pending`) will never finish. Close those out
@@ -109,6 +112,11 @@ export async function startShim(
   // Long-running task executor. Detached from every HTTP request: the task
   // routes hand work to it and return 202, and it reports back to the platform
   // on its own schedule (see task-runner.ts).
+  // Per-session tool rules, the approval gate on direct connector tools and
+  // the phone step-up (SEC-019/021/023), asked by the knox-session-policy
+  // plugin over the /internal/tool-policy loopback route.
+  const policyRuntime = createPolicyRuntime(env, db);
+  logPolicyRuntime(env);
   const taskRunner = new TaskRunner({
     env,
     db,
@@ -116,6 +124,7 @@ export async function startShim(
     delegatedCreds,
     usage,
     toolCalls,
+    sessionPolicy: policyRuntime.policy,
   });
   const oauth: OAuthDeps = {
     env,
@@ -145,6 +154,7 @@ export async function startShim(
       toolCalls,
       skills,
       turns,
+      policyRuntime,
     ).catch((err) => {
       if (err instanceof HttpError) {
         // Don't try to send JSON after an SSE stream has started.
@@ -213,6 +223,7 @@ async function route(
   toolCalls: ToolCallHub,
   skills: SkillsRouteDeps,
   turns: TurnDeps,
+  policy: PolicyRuntime,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -235,23 +246,24 @@ async function route(
   }
 
   // Loopback credential lookup for the gateway's before_tool_call plugin.
-  // Gateway-token authed like /files; returns the delegated creds staged for a
-  // session's current turn so the plugin can inject them into the skill env.
-  // The only caller is the in-container gateway plugin over loopback.
+  // Authed with the plugin loopback token (only the gateway process holds it)
+  // and bound to an exact session key; returns the delegated creds staged for
+  // that session's current turn so the plugin can inject them into its exec
+  // call. The only caller is the in-container gateway plugin over loopback.
   if (path === "/internal/delegated-credentials") {
     if (method !== "GET") throw new HttpError(405, "method not allowed");
     return handleDelegatedCredentialsLookup(url, req, res, env, delegatedCreds);
   }
 
   // Per-model-call token usage from the knox-usage-telemetry openclaw plugin.
-  // Same loopback + gateway-token trust anchor as the credential lookup above.
+  // Same plugin loopback token as the credential lookup above.
   if (path === "/internal/llm-usage") {
     if (method !== "POST") throw new HttpError(405, "method not allowed");
     return handleLlmUsageIngest(req, res, env, usage);
   }
 
   // Per-tool-call telemetry from the knox-tool-telemetry openclaw plugin. Same
-  // loopback + gateway-token trust anchor as the usage ingest above. Records
+  // plugin loopback token as the usage ingest above. Records
   // each tool call the agent makes to `agent_tool_calls` for in-session
   // surfacing, audit, and per-tool-call billing.
   if (path === "/internal/tool-call") {
@@ -259,14 +271,36 @@ async function route(
     return handleToolCallIngest(req, res, env, toolCalls);
   }
 
+  // Session tool policy, phone step-up and the session context for prompt
+  // building (knox-session-policy plugin). Same plugin loopback token as the
+  // routes above. See routes-policy.ts.
+  if (await routePolicy(path, method, url, req, res, env, policy)) return;
+
+  // openclaw's console MCP traffic, forwarded with the console's per-session
+  // headers (platform-mcp-forward.ts), and the git credential helper's
+  // GitHub connector request. Authed with the derived console MCP forward
+  // token from openclaw.json; session headers only from plugin-issued tickets.
+  if (isPlatformMcpForwardPath(path)) {
+    return handlePlatformMcpForward(
+      req,
+      res,
+      {
+        env,
+        tickets: policy.tickets,
+        resolveSession: (sessionKey) => sessionIdsFor(policy, sessionKey),
+      },
+      path,
+    );
+  }
+
   // Which console conversation a live phone call's voice session belongs to,
   // for the knox-report-outcome plugin: a platform tool called mid-call
   // (start_task, report_outcome, ...) gets that conversation stamped on, so a
-  // background task's card and result land in the call's thread. Same loopback
-  // + gateway-token trust anchor as the routes above. See ../voice/call-mirror.ts.
+  // background task's card and result land in the call's thread. Same plugin
+  // loopback token as the routes above. See ../voice/call-mirror.ts.
   if (path === "/internal/voice-conversation") {
     if (method !== "GET") throw new HttpError(405, "method not allowed");
-    requireGatewayToken(req.headers.authorization, env);
+    requirePluginToken(req.headers.authorization);
     return sendJson(res, 200, voiceConversations.lookup(url.searchParams.get("session_key")));
   }
 
@@ -279,8 +313,10 @@ async function route(
     return routeSkills(path, method, req, res, skills);
   }
 
-  // Everything below requires a valid bearer JWT.
+  // Everything below requires a valid bearer JWT, and the route-level rules
+  // for what that token may reach (bearer-policy.ts).
   const principal = await verifyBearer(req.headers.authorization, env);
+  await enforceBearerPolicy(principal, classifyRoute(path, method), env, db);
 
   // Model-provider OAuth control surface (operator-only; see routes-oauth).
   if (path === "/api/v1/auth/oauth/status") {
@@ -316,6 +352,7 @@ async function route(
         usage,
         toolCalls,
         ...turns,
+        sessionPolicy: policy.policy,
         onTurnComplete: (info) => phoneNotify.current?.handle(info),
       });
     }

@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { childEnv } from "../openclaw/child-env.js";
 import { displayE164, type PhoneConversation } from "./call-mirror.js";
 
 /**
@@ -135,14 +136,13 @@ export function cliSpeaker(env: AgentEnv) {
         ["voicecall", "speak", "--call-id", callId, "--message", text],
         {
           timeout: 30_000,
-          env: {
-            ...process.env,
+          env: childEnv({
             HOME: dirname(stateDir),
             OPENCLAW_HOME: dirname(stateDir),
             OPENCLAW_STATE_DIR: stateDir,
             OPENCLAW_CONFIG_PATH: join(stateDir, "openclaw.json"),
             TMPDIR: join(stateDir, "tmp"),
-          },
+          }),
         },
         (err, stdout) => {
           if (err) return resolve({ ok: false, error: String(err.message).slice(0, 300) });

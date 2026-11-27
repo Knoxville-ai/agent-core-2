@@ -43,11 +43,15 @@ It resolves `openclaw/plugin-sdk` because `openclaw` is a direct dependency of
 agent-core (`package.json`), so it's present in `node_modules` next to the plugin
 at runtime.
 
-## Runtime inputs (from the gateway process env, inherited from the shim)
+## Runtime inputs
 
-- `AGENT_HTTP_PORT` — shim port for the loopback lookup (default `8080`).
-- `OPENCLAW_GATEWAY_TOKEN` — bearer for the loopback route (same trust anchor as
-  `/files`, `/skills`).
+- `AGENT_HTTP_PORT` (gateway env) — shim port for the loopback lookup (default
+  `8080`).
+- The plugin loopback token — bearer for the loopback route. Not an env var: the
+  shim passes it to the gateway over an inherited pipe and the gateway's preload
+  keeps it in `process[Symbol.for("knox.pluginLoopbackToken")]` (see
+  `src/openclaw/gateway-auth.ts`), so exec commands cannot read it. The route
+  also requires the exact `session_key`; there is no session-less lookup.
 
 ## Guarantees
 
