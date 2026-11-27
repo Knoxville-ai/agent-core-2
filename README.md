@@ -50,7 +50,7 @@ list):
 | `AGENT_UID` / `AGENT_ORG` / `AGENT_ROLE` | identity; `AGENT_ROLE=generic` for vessel agents |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Storage access for workspace + manifest |
 | `SUPABASE_JWT_SECRET` | HS256 secret used to verify the console's bearer JWTs |
-| `OPENCLAW_GATEWAY_TOKEN` | shared secret between shim and local openclaw gateway |
+| `OPENCLAW_GATEWAY_TOKEN` | the console's bearer for the operator routes (`/files`, `/skills`). Stays in the shim: the gateway gets a token derived from it (`src/openclaw/gateway-auth.ts`) |
 | `LLM_PROVIDER` / `LLM_MODEL` / `LLM_API_KEY` | written into `openclaw.json` as the primary model |
 | `LLM_BASE_URL` | optional provider endpoint override (`models.providers.<provider>.baseURL`). Point at a cheap external OpenAI-compatible endpoint (Groq/DeepSeek/self-hosted Ollama box), or leave unset for `LLM_PROVIDER=ollama` to run a small model in-container (weights pulled on first boot, ollama agents only) |
 | `PLATFORM_MCP_URL` / `PLATFORM_API_TOKEN` | optional; attaches the platform MCP server for A2A discovery and is used at boot to call `get_my_bundle` for capability assignments, and by SkillSync for the skill plan |

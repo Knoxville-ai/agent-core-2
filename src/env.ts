@@ -298,16 +298,12 @@ const BaseSchema = z.object({
   //     so every concurrent task gets exactly its own caller's secrets. This is
   //     what an SME agent whose whole job is accepting delegations needs.
   //
-  //   serial — at most ONE credential-carrying task at a time. The fallback for
-  //     a deployment where the plugin path is not available (an openclaw old
-  //     enough that the embedded run skips before_tool_call, a tools.profile
-  //     that strips plugins, an exec host that bypasses the wrapper). There the
-  //     only injector is the exec shim, which openclaw gives no session key and
-  //     which therefore fails closed whenever two delegated turns overlap —
-  //     correct, but it caps delegated throughput at 1.
+  //   serial — at most ONE credential-carrying task at a time, for operators
+  //     who want delegated work serialized. Credentials are still injected only
+  //     by the plugin, per session; there is no session-less fallback.
   //
-  // Flip to `serial` if skills start reporting missing credentials under load;
-  // that is the signature of the plugin path not firing. See
+  // If skills report missing credentials, the plugin path is not firing (check
+  // the `[knox-delegated-credentials] exec hook` log lines). See
   // CONSOLE_INTEGRATION.md "Credentials on a delegated task".
   AGENT_DELEGATED_TASK_MODE: z
     .enum(["parallel", "serial"])

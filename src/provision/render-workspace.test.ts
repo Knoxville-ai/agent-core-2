@@ -24,6 +24,7 @@ import {
   resolveHeartbeatEvery,
   writeOpenclawConfig,
 } from "./render-workspace.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 
 /** Minimal AgentEnv with sane defaults; override per-case. */
 function makeEnv(overrides: Partial<AgentEnv>): AgentEnv {
@@ -759,6 +760,18 @@ describe("buildOpenclawConfig platform plugins", () => {
   });
 });
 
+describe("buildOpenclawConfig gateway.auth", () => {
+  it("writes a token derived from, never equal to, the console's gateway token", () => {
+    const env = makeEnv({});
+    const auth = (buildOpenclawConfig(env, "/ws").gateway as { auth: { mode: string; token: string } })
+      .auth;
+    expect(auth.mode).toBe("token");
+    expect(auth.token).toBe(gatewayAuthToken(env));
+    expect(auth.token).not.toBe(env.OPENCLAW_GATEWAY_TOKEN);
+    expect(auth.token).not.toContain(env.OPENCLAW_GATEWAY_TOKEN);
+  });
+});
+
 describe("buildOpenclawConfig tools.exec.pathPrepend", () => {
   function pathPrepend(config: Record<string, unknown>): string[] {
     return (
@@ -767,11 +780,9 @@ describe("buildOpenclawConfig tools.exec.pathPrepend", () => {
     );
   }
 
-  it("prepends the exec shim then the skills venv (order matters)", () => {
-    // The shim must resolve FIRST (it injects delegated creds then re-execs the
-    // venv python3); the venv sits right behind it for requests/uv/pip.
+  it("prepends only the skills venv (nothing on PATH fetches credentials)", () => {
     const config = buildOpenclawConfig(makeEnv({}), "/ws");
-    expect(pathPrepend(config)).toEqual(["/opt/knox-exec-shim", "/opt/skills-venv/bin"]);
+    expect(pathPrepend(config)).toEqual(["/opt/skills-venv/bin"]);
   });
 
   it("is present even with the platform MCP + delegation plugin wired", () => {
@@ -782,7 +793,7 @@ describe("buildOpenclawConfig tools.exec.pathPrepend", () => {
       }),
       "/ws",
     );
-    expect(pathPrepend(config)).toEqual(["/opt/knox-exec-shim", "/opt/skills-venv/bin"]);
+    expect(pathPrepend(config)).toEqual(["/opt/skills-venv/bin"]);
   });
 });
 
@@ -795,7 +806,7 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
     const t = tools(buildOpenclawConfig(makeEnv({}), "/ws"));
     expect(t.profile).toBeUndefined();
     expect(t.deny).toEqual(["cron"]);
-    // …but the exec shim/venv PATH is always present.
+    // …but the venv PATH is always present.
     expect(t.exec).toBeDefined();
   });
 
@@ -818,10 +829,7 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
     const t = tools(
       buildOpenclawConfig(makeEnv({ OPENCLAW_TOOLS_DENY: "group:sessions" }), "/ws"),
     );
-    expect((t.exec as { pathPrepend?: string[] }).pathPrepend).toEqual([
-      "/opt/knox-exec-shim",
-      "/opt/skills-venv/bin",
-    ]);
+    expect((t.exec as { pathPrepend?: string[] }).pathPrepend).toEqual(["/opt/skills-venv/bin"]);
     expect(t.deny).toEqual(["cron", "group:sessions"]);
   });
 
@@ -914,10 +922,7 @@ describe("buildOpenclawConfig tool policy (OPENCLAW_TOOLS_PROFILE / _DENY)", () 
         "/ws",
       ),
     );
-    expect((t.exec as { pathPrepend?: string[] }).pathPrepend).toEqual([
-      "/opt/knox-exec-shim",
-      "/opt/skills-venv/bin",
-    ]);
+    expect((t.exec as { pathPrepend?: string[] }).pathPrepend).toEqual(["/opt/skills-venv/bin"]);
     expect(t.allow).toEqual(["group:openclaw"]);
     expect(t.deny).toEqual(["cron", "group:sessions"]);
     expect(t.toolSearch).toEqual({ enabled: true, mode: "tools" });

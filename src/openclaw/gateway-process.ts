@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import type { Writable } from "node:stream";
 import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { childEnv, withheldNames } from "./child-env.js";
+import { PLUGIN_TOKEN_FD, PLUGIN_TOKEN_FD_ENV, pluginLoopbackToken } from "./gateway-auth.js";
 import { nodeOptionsWithPreload } from "./preload-options.js";
 import { ensureOpenclawTempDir } from "./temp-dir.js";
 
@@ -32,6 +34,10 @@ import { ensureOpenclawTempDir } from "./temp-dir.js";
  * preload ./knox-gateway-preload.ts (via NODE_OPTIONS) makes the gateway
  * non-dumpable before openclaw loads, so those commands can't read the
  * gateway's environment or memory through /proc either.
+ *
+ * The knox plugins' loopback token (./gateway-auth.ts) goes to the gateway
+ * over an extra stdio pipe (fd 3), which the preload reads and closes — never
+ * through the environment.
  *
  * We deliberately do NOT implement crash-restart in-process: Railway already
  * restarts the container on exit, and a gateway crash usually means the
@@ -74,10 +80,16 @@ export class GatewayProcess {
         OPENCLAW_CONFIG_PATH: configPath,
         TMPDIR: tempDir,
         NODE_OPTIONS: nodeOptionsWithPreload(process.env.NODE_OPTIONS),
+        [PLUGIN_TOKEN_FD_ENV]: String(PLUGIN_TOKEN_FD),
       }),
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
     });
     this.child = child;
+    // Hand over the plugin loopback token and close our end; the preload reads
+    // to EOF before openclaw starts.
+    const tokenPipe = child.stdio[PLUGIN_TOKEN_FD] as Writable | null | undefined;
+    tokenPipe?.on("error", (err) => log.warn("plugin token pipe error", { err: String(err) }));
+    tokenPipe?.end(pluginLoopbackToken());
 
     child.stdout?.on("data", (chunk: Buffer) => {
       process.stdout.write(`[openclaw] ${chunk.toString("utf8")}`);

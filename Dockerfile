@@ -220,20 +220,6 @@ RUN apt-get update \
       'requests>=2.28' 'pypdf>=4.0' 'rapidocr-onnxruntime>=1.3' \
  && /opt/skills-venv/bin/python -c "import cv2, rapidocr_onnxruntime, pypdf; from PIL import features; assert features.check_codec('jpg_2000'), 'Pillow lacks JPEG 2000 support'"
 
-# --- Delegated-credential exec shim ------------------------------------------
-# openclaw's chat-completions/embedded run (the path a platform-brokered A2A
-# turn takes) does NOT fire the `before_tool_call` plugin, so per-turn delegated
-# credentials can't be injected into a skill's `python3` subprocess that way.
-# This tiny shim closes the gap from the runtime side: it is placed FIRST on the
-# EXEC tool's PATH (via `tools.exec.pathPrepend`, see
-# src/provision/render-workspace.ts — NOT the container PATH, so boot-time
-# python3 is unaffected), pulls the current delegated turn's credentials from the
-# shim loopback using the gateway token already in the exec env, exports them,
-# and re-execs the real venv python3. Strictly fail-open; never logs values. See
-# docker/knox-python3-shim.py for the full rationale.
-COPY --chown=agent:agent docker/knox-python3-shim.py /opt/knox-exec-shim/python3
-RUN chmod 0755 /opt/knox-exec-shim/python3
-
 # rembg downloads its ~170 MB u2net model on first use. Point its cache at the
 # Railway persistence volume (OPENCLAW_STATE_DIR) so the one-time download
 # survives restarts/redeploys instead of re-fetching into an ephemeral $HOME.

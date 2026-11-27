@@ -33,8 +33,9 @@ openclaw agentic loop
                       └─ messages.token_usage  (drained when the turn finalizes)
 ```
 
-Authed with `OPENCLAW_GATEWAY_TOKEN` over loopback — the same trust anchor as
-`/files`, `/skills`, and `/internal/delegated-credentials`.
+Authed over loopback with the plugin loopback token, which only the gateway
+process holds (see `src/openclaw/gateway-auth.ts`) — the same as every
+`/internal/*` route.
 
 ## Granularity
 

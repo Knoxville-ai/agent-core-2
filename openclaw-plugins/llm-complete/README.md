@@ -23,7 +23,7 @@ plugin puts it on a gateway HTTP route.
 
 ```
 POST http://127.0.0.1:<OPENCLAW_GATEWAY_PORT>/knox/llm-complete
-Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+Authorization: Bearer <gateway.auth.token from openclaw.json>
 
 { "system": "…", "messages": [{ "role": "user", "content": "…" }],
   "max_tokens": 1024, "timeout_ms": 30000, "purpose": "knox-conversation-title" }

@@ -69,6 +69,7 @@ describe("childEnv", () => {
     const env = childEnv({}, CONTAINER_ENV);
     for (const name of [
       "PLATFORM_API_TOKEN",
+      "OPENCLAW_GATEWAY_TOKEN",
       "PLATFORM_MCP_URL",
       "PLATFORM_JWKS_URL",
       "MESSAGING_ENABLED",
@@ -111,6 +112,11 @@ describe("childEnv", () => {
     for (const name of CHILD_PLATFORM_ALLOW) {
       if (CONTAINER_ENV[name] !== undefined) expect(env[name], name).toBe(CONTAINER_ENV[name]);
     }
+  });
+
+  it("keeps the console's gateway token out of every child (the gateway included)", () => {
+    expect(isWithheldFromChildren("OPENCLAW_GATEWAY_TOKEN")).toBe(true);
+    expect(childEnv({}, CONTAINER_ENV).OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
   });
 
   it("withholds any variable shaped like a database service secret, whatever its prefix", () => {

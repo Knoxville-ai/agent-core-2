@@ -2,11 +2,25 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { isPluginLoopbackAuth } from "../openclaw/gateway-auth.js";
+import { HttpError } from "./auth.js";
 import { credentialKeyNames, type DelegatedCredentialStore } from "./delegated-credentials.js";
-import { requireGatewayToken } from "./routes-files.js";
 import { parseUsageSample, type UsageAccumulator } from "./usage-telemetry.js";
 import type { ToolCallHub } from "./tool-telemetry.js";
 import { readJsonBody, sendJson } from "./util.js";
+
+/**
+ * Auth for every `/internal/*` route: the plugin loopback token, which only
+ * the openclaw gateway process holds (see ../openclaw/gateway-auth.ts). Not
+ * the console's gateway token, and not the gateway auth token in
+ * openclaw.json — both of those are reachable from places the knox plugins
+ * are not, and these routes serve nobody else.
+ */
+export function requirePluginToken(authorization: string | undefined): void {
+  if (!isPluginLoopbackAuth(authorization)) {
+    throw new HttpError(401, "invalid loopback token");
+  }
+}
 
 /**
  * Loopback credential lookup for the openclaw `before_tool_call` plugin.
@@ -15,39 +29,35 @@ import { readJsonBody, sendJson } from "./util.js";
  *     -> { credentials: { ENV_KEY: value, ... } }   (empty object when none)
  *
  * This is the ONE place the shim hands the raw delegated secret values out, and
- * it does so only to the in-container skill-execution layer (the gateway plugin
- * over loopback) — never to the model. Authed with the gateway token, the same
- * trust anchor as `/files` and `/skills`; the token only ever lives on the
- * console server and inside this container, so it gates access to the values.
+ * it does so only to the knox-delegated-credentials plugin inside the gateway,
+ * which looks them up by the `ctx.sessionKey` openclaw gives the tool call and
+ * merges them into that one exec call's env — never to the model.
  *
- * Two caller shapes:
- *   - `?session_key=<key>`  -> creds staged for exactly that session (the
- *     openclaw before_tool_call plugin, which knows `ctx.sessionKey`).
- *   - no `session_key`      -> creds of the single currently-live delegated turn
- *     (the exec-shim `docker/knox-python3-shim.py`, which runs inside a skill's
- *     `exec` subprocess where openclaw exposes no session key; see
- *     `DelegatedCredentialStore.currentSingle`).
+ * Both parts are required: the plugin loopback token (401 without it) and the
+ * exact `session_key` (400 without it). There is no "whichever turn is live"
+ * lookup: a caller only ever receives the credentials staged for the session
+ * it names.
  *
  * NEVER logs the values — but it DOES log a redacted hit/miss line (session key,
  * whether the store held an entry, the credential NAMES, and the live store size)
  * so the handoff is traceable end-to-end. Returns `{}` for an unknown/expired
- * session (or ambiguous concurrent turns) so the caller simply injects no env.
+ * session so the caller simply injects no env.
  */
 export function handleDelegatedCredentialsLookup(
   url: URL,
   req: IncomingMessage,
   res: ServerResponse,
-  env: AgentEnv,
+  _env: AgentEnv,
   store: DelegatedCredentialStore,
 ): void {
-  requireGatewayToken(req.headers.authorization, env);
+  requirePluginToken(req.headers.authorization);
   const sessionKey = url.searchParams.get("session_key") ?? "";
-  const credentials = sessionKey ? store.get(sessionKey) : store.currentSingle();
+  if (!sessionKey) throw new HttpError(400, "session_key required");
+  const credentials = store.get(sessionKey);
   // Redacted trace: proves the plugin reached the route and whether the store
   // had this session's creds staged. Names + counts only — never the values.
   log.info("delegated credentials lookup", {
-    mode: sessionKey ? "by_session" : "current_single",
-    session_key: sessionKey || null,
+    session_key: sessionKey,
     hit: Object.keys(credentials).length > 0,
     keys: credentialKeyNames(credentials),
     store_size: store.size(),
@@ -71,8 +81,8 @@ export function handleDelegatedCredentialsLookup(
  * `prompt_tokens = input + cacheRead` and drops the split, so the SSE `usage`
  * frame the shim already reads cannot distinguish a cache hit from a miss.
  *
- * Authed with the gateway token, the same trust anchor as `/files`, `/skills`,
- * and `/internal/delegated-credentials`. Carries token COUNTS only — never
+ * Authed with the plugin loopback token, like `/internal/delegated-credentials`.
+ * Carries token COUNTS only — never
  * prompt text, assistant text, or tool arguments.
  *
  * Always 200s. Telemetry must never be able to fail a turn, so an unparseable
@@ -85,7 +95,7 @@ export async function handleLlmUsageIngest(
   env: AgentEnv,
   usage: UsageAccumulator,
 ): Promise<void> {
-  requireGatewayToken(req.headers.authorization, env);
+  requirePluginToken(req.headers.authorization);
   const body = await readJsonBody<Record<string, unknown>>(req).catch(() => null);
   const sessionKey = typeof body?.session_key === "string" ? body.session_key : "";
   // openclaw's session id off the llm_output event — the key the cost proxy
@@ -120,7 +130,7 @@ export async function handleLlmUsageIngest(
  * (attributed to the live turn's conversation/task/assistant message); the `end`
  * phase enriches it with the outcome. See tool-telemetry.ts.
  *
- * Same loopback + gateway-token trust anchor as `/internal/llm-usage`.
+ * Same plugin loopback token as `/internal/llm-usage`.
  * `args_preview` was already redacted + size-bounded by the plugin, inside the
  * gateway, before it crossed this route — no secret and no raw prompt text is
  * ever meant to arrive here.
@@ -134,7 +144,7 @@ export async function handleToolCallIngest(
   env: AgentEnv,
   hub: ToolCallHub,
 ): Promise<void> {
-  requireGatewayToken(req.headers.authorization, env);
+  requirePluginToken(req.headers.authorization);
   if (!hub.enabled) {
     sendJson(res, 200, { ok: true, recorded: false });
     return;

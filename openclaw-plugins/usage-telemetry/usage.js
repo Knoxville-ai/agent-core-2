@@ -1,3 +1,11 @@
+// Bearer for the shim's /internal/* loopback routes: a per-boot token the
+// shim hands the gateway process through its preload (never an env var, so
+// exec commands cannot read it). See src/openclaw/gateway-auth.ts.
+function loopbackToken() {
+  const token = process[Symbol.for("knox.pluginLoopbackToken")];
+  return typeof token === "string" ? token : "";
+}
+
 /**
  * Pure helpers for the usage-telemetry plugin. Kept separate from `index.js` so
  * they can be unit-tested without loading the OpenClaw plugin SDK.
@@ -51,12 +59,11 @@ export function normalizeUsageEvent(event) {
 /**
  * Build the loopback ingest URL + auth for the shim's `/internal/llm-usage`
  * route. Read at CALL time rather than module load: OpenClaw evaluates plugin
- * modules in more than one realm during a run, and a realm evaluated before the
- * env was populated would otherwise bind an empty token forever. This mirrors
- * `loopbackConfig()` in the delegated-credentials plugin.
+ * modules in more than one realm during a run. This mirrors `loopbackConfig()`
+ * in the delegated-credentials plugin.
  */
 export function loopbackConfig() {
   const port = process.env.AGENT_HTTP_PORT || "8080";
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  const token = loopbackToken();
   return { port, token, url: `http://127.0.0.1:${port}/internal/llm-usage` };
 }

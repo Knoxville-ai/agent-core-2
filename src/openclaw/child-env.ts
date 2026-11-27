@@ -41,6 +41,10 @@ const EXTRA_PLATFORM_KEYS: readonly string[] = [
   "LLM_API_KEY_CREDENTIAL_ID",
   // Shim-only override of the gateway model route.
   "OPENCLAW_MODEL_ROUTE",
+  // Set by the shim for the gateway alone (./gateway-auth.ts); never inherited.
+  "KNOX_PLUGIN_TOKEN_FD",
+  // Console-managed bearer policy flag.
+  "AGENT_BEARER_POLICY",
 ];
 
 /** Namespaces only the platform (or Railway) writes. */
@@ -63,8 +67,6 @@ export const CHILD_PLATFORM_ALLOW: ReadonlySet<string> = new Set([
   // Seed openclaw derives the model OAuth store's encryption key from; the
   // gateway and `openclaw models auth login` read it from their env.
   "OPENCLAW_AUTH_PROFILE_SECRET_KEY",
-  // Bearer the knox openclaw plugins use on the shim's loopback routes.
-  "OPENCLAW_GATEWAY_TOKEN",
   // Non-secret identity, also stated in the agent's system prompt.
   "AGENT_UID",
   "AGENT_ORG",
