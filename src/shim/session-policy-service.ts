@@ -52,6 +52,8 @@ export interface SessionTrustStore {
 export interface PhoneVerification {
   conversationFor(sessionKey: string): string | null;
   isVerified(conversationId: string | null | undefined): boolean;
+  /** This process's call mirror made the conversation: a phone call's record. */
+  isPhoneConversation?(conversationId: string): boolean;
 }
 
 export type PolicyMode = "enforce" | "audit" | "off";
@@ -61,6 +63,13 @@ export interface SessionPolicyDeps {
   agentOrg: string;
   store: SessionTrustStore;
   phone?: PhoneVerification | null;
+  /**
+   * Scoped data mode (no database key): the store sees only what the agent
+   * data API returns (no origin, caller agent, inbound email or task rows), so
+   * a conversation whose latest turn came from someone outside the org (see
+   * noteCaller) is judged public whatever else it looks like.
+   */
+  scoped?: boolean;
   /** MCP servers the agent reaches directly (OPENCLAW_MCP_SERVERS keys). */
   servers: readonly string[];
   workspaceDir: string;
@@ -78,9 +87,15 @@ export class SessionPolicyService {
   private readonly optInCache = new Map<string, { names: Set<string>; at: number }>();
   private readonly envOptIns: Map<string, Set<string>>;
   private readonly tasks = new Map<string, { agentUid: string; conversationId: string | null }>();
+  private readonly outsideCallers = new Set<string>();
 
   constructor(private readonly deps: SessionPolicyDeps) {
     this.envOptIns = parseEnvOptIns(deps.envOptIns);
+  }
+
+  /** Scoped data mode (see SessionPolicyDeps.scoped). */
+  get scoped(): boolean {
+    return this.deps.scoped === true;
   }
 
   get mode(): PolicyMode {
@@ -98,6 +113,20 @@ export class SessionPolicyService {
   /** Drop what's cached for a conversation, e.g. when a new turn arrives on it. */
   forgetConversation(conversationId: string): void {
     this.channels.delete(`c:${conversationId}`);
+  }
+
+  /** The conversation a task runs in, as the task's start told the runner. */
+  rememberTask(taskId: string, conversationId: string | null): void {
+    this.tasks.set(taskId, { agentUid: this.deps.agentUid, conversationId });
+    if (this.tasks.size > 2000) this.tasks.delete(this.tasks.keys().next().value!);
+  }
+
+  /** Who sent a conversation's latest turn: an org member (or same-org agent) or not. */
+  noteCaller(conversationId: string, fromOrg: boolean): void {
+    if (fromOrg) this.outsideCallers.delete(conversationId);
+    else this.outsideCallers.add(conversationId);
+    if (this.outsideCallers.size > 5000) this.outsideCallers.delete(this.outsideCallers.values().next().value!);
+    this.forgetConversation(conversationId);
   }
 
   /** The session a key names, and the channel it is on. */
@@ -158,8 +187,13 @@ export class SessionPolicyService {
 
   private async classify(conversationId: string): Promise<SessionChannel> {
     const { store } = this.deps;
+    // A call this process mirrored is a phone call, whatever the store sees.
+    if (this.deps.phone?.isPhoneConversation?.(conversationId)) {
+      return this.deps.phone.isVerified(conversationId) ? "trusted" : "phone";
+    }
     const c = await store.conversation(conversationId);
     if (!c || c.agent_uid !== this.deps.agentUid) return "public";
+    if (this.deps.scoped && this.outsideCallers.has(c.id)) return "public";
     if (c.origin === "phone") {
       return this.deps.phone?.isVerified(c.id) ? "trusted" : "phone";
     }
@@ -349,6 +383,54 @@ export class SupabaseSessionTrustStore implements SessionTrustStore {
     if (error) return new Set();
     return new Set(((data ?? []) as Array<{ tool_name: string }>).map((r) => r.tool_name.toLowerCase()));
   }
+}
+
+/** What scopedSessionTrustStore reads through: the shim's MessagingDB on its scoped path. */
+export interface ScopedReads {
+  getConversation(id: string): Promise<{
+    id: string;
+    org_id: string;
+    agent_uid: string;
+    user_id: string | null;
+    drive_through_connection_id: string | null;
+    delegation_connection_id?: string | null;
+  } | null>;
+  userInOrg(userId: string, orgId: string): Promise<boolean>;
+}
+
+/**
+ * The reads in scoped data mode, through the console's agent data API
+ * (`conversation.get`, `org_member.check`). The API has no operation yet for a
+ * conversation's origin and caller agent, inbound email, task rows or the
+ * opt-in table, so: the origin is unknown (the turn's caller fills the gap,
+ * SessionPolicyService.noteCaller), a task is known only from the runner
+ * (rememberTask) and is otherwise untrusted, and there are no opt-ins.
+ */
+export function scopedSessionTrustStore(db: ScopedReads): SessionTrustStore {
+  return {
+    async conversation(id) {
+      const c = await db.getConversation(id);
+      if (!c) return null;
+      return {
+        id: c.id,
+        org_id: c.org_id,
+        agent_uid: c.agent_uid,
+        user_id: c.user_id,
+        origin: null,
+        caller_agent_uid: null,
+        delegation_connection_id: c.delegation_connection_id ?? null,
+        drive_through_connection_id: c.drive_through_connection_id,
+      };
+    },
+    isMember: (orgId, userId) => db.userInOrg(userId, orgId),
+    agentOrg: async () => null,
+    latestInboundEmail: async () => null,
+    userAddresses: async () => [],
+    task: async () => {
+      throw new Error("task lookup needs the database key or a console operation");
+    },
+    optIns: async () => new Set(),
+  };
 }
 
 /** The direct MCP server names from OPENCLAW_MCP_SERVERS (never the platform one). */

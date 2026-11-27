@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { childEnv } from "./child-env.js";
 
 /**
  * In-container Ollama lifecycle — the local-model data plane.
@@ -59,14 +60,13 @@ export class OllamaProcess {
     });
 
     const child = spawn("ollama", ["serve"], {
-      env: {
-        ...process.env,
+      env: childEnv({
         // Bind loopback only — reachable from the openclaw gateway in the same
         // container, never from outside.
         OLLAMA_HOST,
         // Persist weights on the Railway volume so the pull happens once.
         OLLAMA_MODELS: this.modelsDir,
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.child = child;
@@ -115,7 +115,7 @@ export class OllamaProcess {
       model,
     });
     const pull = spawn("ollama", ["pull", model], {
-      env: { ...process.env, OLLAMA_HOST, OLLAMA_MODELS: this.modelsDir },
+      env: childEnv({ OLLAMA_HOST, OLLAMA_MODELS: this.modelsDir }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     pull.stdout?.on("data", (c: Buffer) => process.stdout.write(`[ollama pull] ${c}`));

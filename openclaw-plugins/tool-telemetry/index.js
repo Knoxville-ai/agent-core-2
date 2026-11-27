@@ -2,6 +2,14 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 import { count, redactArgs, serverFromToolName, truncateError } from "./redact.js";
 
+// Bearer for the shim's /internal/* loopback routes: a per-boot token the
+// shim hands the gateway process through its preload (never an env var, so
+// exec commands cannot read it). See src/openclaw/gateway-auth.ts.
+function loopbackToken() {
+  const token = process[Symbol.for("knox.pluginLoopbackToken")];
+  return typeof token === "string" ? token : "";
+}
+
 /**
  * Knox tool-telemetry — surfaces and records every tool call the agent makes.
  *
@@ -18,7 +26,7 @@ import { count, redactArgs, serverFromToolName, truncateError } from "./redact.j
  * the chat stream, with the tool name and params intact — the same hook the
  * delegated-credentials / report-outcome / task-progress plugins already use.
  * We forward a small, REDACTED record of each call to the shim over the same
- * loopback + gateway-token channel the usage-telemetry plugin uses. The shim
+ * loopback channel (plugin loopback token) the usage-telemetry plugin uses. The shim
  * persists it to `agent_tool_calls` (keyed to the live turn's conversation /
  * task / assistant message) and the console renders it live via realtime — the
  * same "tool call card" treatment a coding assistant gives its own tools.
@@ -46,12 +54,11 @@ const POST_TIMEOUT_MS = 2000;
 
 /** Build the loopback ingest URL + auth for the shim's `/internal/tool-call`
  *  route. Read at CALL time, not module load: OpenClaw evaluates plugin modules
- *  in more than one realm during a run, and a realm evaluated before the env was
- *  populated would otherwise bind an empty token forever (mirrors the
- *  usage-telemetry and delegated-credentials plugins). */
+ *  in more than one realm during a run (mirrors the usage-telemetry and
+ *  delegated-credentials plugins). */
 function loopbackConfig() {
   const port = process.env.AGENT_HTTP_PORT || "8080";
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  const token = loopbackToken();
   return { token, url: `http://127.0.0.1:${port}/internal/tool-call` };
 }
 

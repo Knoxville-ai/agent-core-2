@@ -20,9 +20,11 @@ import {
  *                      asks the shim whether this session may make it. The
  *                      shim's refusal is returned as a block with its reason.
  *                      Fail-closed: no answer from the shim, no call. A
- *                      platform tool call that may run is stamped with its
- *                      session, for the shim's console MCP route to turn into
- *                      the console's session headers.
+ *                      platform tool call that may run is stamped with the
+ *                      single-use ticket the shim issued for its session, which
+ *                      the shim's console MCP route redeems for the console's
+ *                      session headers. Auth: the plugin loopback token from
+ *                      the gateway preload's process slot (policy.js).
  *   before_prompt_build  adds the boot memory digest to the system prompt of
  *                      sessions the shim says are trusted (an untrusted
  *                      session never gets it).
@@ -37,6 +39,7 @@ export default definePluginEntry({
     "Check every tool call against the agent's session policy and approval gate, stamp platform tool calls with their session, and offer phone callers PIN verification.",
   register(api) {
     const stampSessions = api.pluginConfig?.stampSessions === true;
+    const failOpen = api.pluginConfig?.failOpen === true;
 
     api.on(
       "before_tool_call",
@@ -48,12 +51,14 @@ export default definePluginEntry({
           tool_name: typeof toolName === "string" ? toolName : "",
           params: event?.params ?? {},
         });
-        const blocked = hookResult(answer);
+        const blocked = hookResult(answer, { failOpen });
         if (blocked) {
           console.error(`[knox-session-policy] refused ${String(toolName)} (session=${sessionKey ?? "none"})`);
           return blocked;
         }
-        if (stampSessions && isPlatformTool(toolName)) stampSession(event?.params, sessionKey);
+        // The shim's single-use ticket for this call's session (or, with no
+        // ticket, no stamp at all — a stamp the model wrote is removed).
+        if (isPlatformTool(toolName)) stampSession(event?.params, stampSessions ? answer?.session_ticket : null);
         return undefined;
       },
       { priority: 100 },

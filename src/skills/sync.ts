@@ -635,7 +635,11 @@ export class SkillSync {
         results.set(item.slug, { slug: item.slug, status: "failed", detail: { error: "unsupported legacy skill slug" } });
         continue;
       }
-      const marker = `clawhub:${item.version ?? "latest"}`;
+      // A hashed entry gets its own marker so adding/changing the hash for an
+      // installed version triggers one verified reinstall.
+      const marker = item.integrity_sha256
+        ? `clawhub:${item.version ?? "latest"}:${item.integrity_sha256}`
+        : `clawhub:${item.version ?? "latest"}`;
       const prev = lock.skills[item.slug];
       if (prev && prev.source === "clawhub" && prev.content_sha256 === marker && !ctx.damaged.has(item.slug)) {
         prev.required = item.required;
@@ -906,7 +910,12 @@ export class SkillSync {
       unmanaged.push(item.slug);
     }
     const installed = await this.legacyInstaller.install(
-      { source: "clawhub", ref: item.slug, version: item.version ?? "" },
+      {
+        source: "clawhub",
+        ref: item.slug,
+        version: item.version ?? "",
+        ...(item.integrity_sha256 ? { integrityHash: item.integrity_sha256 } : {}),
+      },
       this.dirs.skills,
     );
     const tDeps = Date.now();

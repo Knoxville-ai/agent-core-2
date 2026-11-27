@@ -28,9 +28,7 @@ import type { MemoryCheckpoint } from "../provision/agent-memory.js";
  *     injects credentials keyed by ctx.sessionKey, so each task gets its own
  *     caller's secrets.
  *
- *  2. In the SERIAL fallback mode — for a deployment where that plugin path is
- *     unavailable and the exec shim's fail-closed currentSingle() is the only
- *     injector — at most one credential-carrying task runs at a time, and
+ *  2. In SERIAL mode at most one credential-carrying task runs at a time, and
  *     ordinary tasks are still never stuck behind it.
  */
 

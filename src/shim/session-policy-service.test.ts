@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { isWithheldFromChildren } from "../openclaw/child-env.js";
+
 import {
   directServerNames,
   parseEnvOptIns,
@@ -141,6 +143,16 @@ describe("SessionPolicyService", () => {
     expect((await svc.session("voice:19015550199")).channel).toBe("phone");
   });
 
+  it("a conversation the call mirror made is a phone call whatever the store says", async () => {
+    const phone = {
+      conversationFor: () => null,
+      isVerified: () => false,
+      isPhoneConversation: (id: string) => id === "call-9",
+    };
+    const svc = service(store({ rows: { "call-9": conv({ id: "call-9", user_id: "member" }) } }), { phone });
+    expect((await svc.session("webchat:call-9")).channel).toBe("phone");
+  });
+
   it("sessions the runtime didn't open are the agent's own", async () => {
     const svc = service(store());
     expect((await svc.session("agent:main:main")).channel).toBe("trusted");
@@ -189,5 +201,13 @@ describe("env parsing", () => {
     expect(directServerNames(JSON.stringify({ odoo: {}, knoxville_platform: {} }))).toEqual(["odoo"]);
     expect(directServerNames("nope")).toEqual([]);
     expect(directServerNames(undefined)).toEqual([]);
+  });
+});
+
+describe("child environments", () => {
+  it("never get the policy's settings (declared in env.ts, so withheld)", () => {
+    for (const k of ["AGENT_SESSION_TOOL_POLICY", "AGENT_UNTRUSTED_SESSION_TOOLS", "AGENT_PLATFORM_MCP_FORWARD"]) {
+      expect(isWithheldFromChildren(k), k).toBe(true);
+    }
   });
 });

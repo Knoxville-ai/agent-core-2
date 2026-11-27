@@ -59,6 +59,8 @@ export interface PinStore {
 export interface CallLookup {
   /** The call's console conversation and the member it is filed under. */
   call(sessionKey: string): { conversationId: string; userId: string | null } | null;
+  /** A console conversation the mirror opened for a call. */
+  isCallConversation?(conversationId: string): boolean;
 }
 
 export type StepUpResult = { ok: boolean; text: string };
@@ -74,6 +76,11 @@ export class PhoneStepUp {
   /** Has the caller on this call's conversation confirmed their PIN? */
   isVerified(conversationId: string | null | undefined): boolean {
     return !!conversationId && this.verified.has(conversationId);
+  }
+
+  /** The conversation records a phone call (the mirror made it). */
+  isPhoneConversation(conversationId: string): boolean {
+    return this.deps.calls.isCallConversation?.(conversationId) === true;
   }
 
   /** The call conversation behind a voice session key, if the mirror has linked it. */
@@ -153,6 +160,19 @@ export class PhoneStepUp {
     return { ok: true, text: "PIN confirmed: the caller is verified for the rest of this call." };
   }
 }
+
+/**
+ * No database key (scoped data mode, ../agent-data): the console's agent data
+ * API has no PIN operation yet, so no PIN can be checked and callers stay on
+ * the restricted toolset (fail-closed).
+ */
+export const unavailablePinStore: PinStore = {
+  load: async () => {
+    throw new Error("phone PIN check needs the database key or a console PIN operation");
+  },
+  claimAttempt: async () => null,
+  clearFailures: async () => {},
+};
 
 /** The console's PIN tables, through the service role (same client as the call mirror). */
 export class SupabasePinStore implements PinStore {

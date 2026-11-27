@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import type { AgentEnv } from "../env.js";
 
 import {
   buildSummaryRequest,
@@ -12,7 +13,9 @@ import {
   consultSessionKey,
   dropRestatedPrefix,
   formatDuration,
+  PHONE_MEMORY_PROVENANCE,
   prettyPhone,
+  SupabaseCallMirrorStore,
   transcriptTurns,
   VoiceConversationIndex,
   voiceSessionTail,
@@ -328,5 +331,52 @@ describe("helpers", () => {
     idx.release("voice:1", 0);
     expect(idx.get("voice:1", 1)).toBe("c");
     expect(idx.get("voice:1", 16 * 60_000)).toBeNull();
+  });
+});
+
+describe("SupabaseCallMirrorStore.remember provenance", () => {
+  const env = { AGENT_ORG: "org-1", AGENT_UID: "agent-1" } as unknown as AgentEnv;
+  function fakeRpc(responses: Array<{ error: { code?: string; message: string } | null }>) {
+    const calls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+    const client = {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        calls.push({ fn, args });
+        return { data: null, ...(responses.shift() ?? { error: null }) };
+      },
+    };
+    return { client, calls };
+  }
+  const input = { conversationId: "conv-1", body: "Phone call from Sam: asked for a quote.", tags: ["phone-call"] };
+
+  it("saves the call memory as a proposal of untrusted phone origin, linked to the call", async () => {
+    const { client, calls } = fakeRpc([{ error: null }]);
+    await new SupabaseCallMirrorStore(env, client as never).remember(input);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.fn).toBe("remember_memory");
+    expect(calls[0]!.args).toMatchObject({
+      p_agent_uid: "agent-1",
+      p_conversation_id: "conv-1",
+      p_status: "proposed",
+      p_origin_trust: "untrusted",
+      p_origin_kind: "phone",
+    });
+    expect(PHONE_MEMORY_PROVENANCE.p_status).toBe("proposed");
+  });
+
+  it("repeats the call in the old form when the database predates the new signature", async () => {
+    const { client, calls } = fakeRpc([
+      { error: { code: "PGRST202", message: "Could not find the function public.remember_memory(...)" } },
+      { error: null },
+    ]);
+    await new SupabaseCallMirrorStore(env, client as never).remember(input);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.args).not.toHaveProperty("p_status");
+    expect(calls[1]!.args).toMatchObject({ p_conversation_id: "conv-1", p_kind: "episodic" });
+  });
+
+  it("does not retry other errors", async () => {
+    const { client, calls } = fakeRpc([{ error: { code: "23514", message: "check violation" } }]);
+    await expect(new SupabaseCallMirrorStore(env, client as never).remember(input)).rejects.toThrow(/check violation/);
+    expect(calls).toHaveLength(1);
   });
 });

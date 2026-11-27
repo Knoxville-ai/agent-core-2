@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { childEnv } from "../openclaw/child-env.js";
 import { ensureOpenclawTempDir } from "../openclaw/temp-dir.js";
 import { HttpError } from "./auth.js";
 
@@ -116,8 +117,7 @@ export class OAuthSessionManager {
     // -e return child exit code, -c run the command. /dev/null discards the
     // typescript log; we read the child's PTY output from script's stdout.
     const child = spawn("script", ["-qfec", cmd, "/dev/null"], {
-      env: {
-        ...process.env,
+      env: childEnv({
         HOME: userHome,
         OPENCLAW_HOME: userHome,
         OPENCLAW_STATE_DIR: stateDir,
@@ -129,7 +129,7 @@ export class OAuthSessionManager {
         // server. In-container that bind SUCCEEDS, so without this OpenClaw
         // would sit forever waiting for a browser callback it can't receive.
         REMOTE_CONTAINERS: "true",
-      },
+      }),
       stdio: ["pipe", "pipe", "pipe"],
     });
 

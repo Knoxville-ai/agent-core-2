@@ -12,7 +12,8 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "stampSessions": { "type": "boolean" }
+      "stampSessions": { "type": "boolean" },
+      "failOpen": { "type": "boolean" }
     }
   }
 }

@@ -29,20 +29,14 @@ describe("buildInjectedParams", () => {
     });
   });
 
-  it("stamps the marker so the exec shim stands down", () => {
-    // The shim is the fallback injector and is capped at one delegated turn at
-    // a time. When this plugin (which keys by session and is therefore safe
-    // with any number of concurrent turns) has already run, the shim must not
-    // second-guess it. The marker is that signal — and it carries only a count,
-    // never a value.
+  it("stamps the marker with a count, never a value", () => {
     const out = buildInjectedParams({ command: "x" }, { A: "1", B: "2" });
     expect(out.env[INJECTION_MARKER_ENV]).toBe("2");
     expect(out.env[INJECTION_MARKER_ENV]).not.toContain("1;");
   });
 
   it("does not stamp the marker when there was nothing to inject", () => {
-    // No creds → null → the tool call is left completely unchanged, so the shim
-    // still gets its chance on a turn this plugin could not serve.
+    // No creds → null → the tool call is left completely unchanged.
     expect(buildInjectedParams({ command: "x" }, {})).toBeNull();
   });
 

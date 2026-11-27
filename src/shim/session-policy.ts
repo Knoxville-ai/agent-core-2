@@ -56,7 +56,8 @@ export interface SessionVerdict {
 export const bootMemoryDigest: { current: string | null } = { current: null };
 
 /**
- * The runtime's own key on a platform tool call: the session it runs in,
+ * The runtime's own key on a platform tool call: a single-use ticket for the
+ * session it runs in (platform-mcp-forward.ts SessionTickets),
  * stamped by the knox-session-policy plugin and taken off by the shim's
  * console MCP route (platform-mcp-forward.ts) before the console sees it.
  */

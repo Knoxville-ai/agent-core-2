@@ -619,6 +619,28 @@ describe("SkillSync.reconcile — modes", () => {
     expect(gone.results).toEqual([{ slug: "old-tool", status: "removed" }]);
     expect(await exists(join(skillsDir(), "old-tool"))).toBe(false);
   });
+
+  it("legacy refs with integrity_sha256: passed to the installer and part of the lock marker", async () => {
+    const h = "b".repeat(64);
+    platform.legacy = [{ slug: "old-tool", version: "1.2.0", required: false }];
+    const sync = makeSync();
+    await goLive();
+    await sync.reconcile("nudge");
+    expect(legacy.calls).toHaveLength(1);
+
+    // Adding a hash for the installed version reinstalls once, verified.
+    platform.legacy = [{ slug: "old-tool", version: "1.2.0", required: false, integrity_sha256: h }];
+    platform.generation = 2;
+    await sync.reconcile("nudge");
+    expect(legacy.calls[1]).toEqual({ source: "clawhub", ref: "old-tool", version: "1.2.0", integrityHash: h });
+    expect((await readLock(stateDir)).lock.skills["old-tool"]).toMatchObject({
+      content_sha256: `clawhub:1.2.0:${h}`,
+    });
+
+    platform.generation = 3;
+    await sync.reconcile("nudge");
+    expect(legacy.calls).toHaveLength(2);
+  });
 });
 
 describe("SkillSync — eligibility, coalescing, nudges", () => {

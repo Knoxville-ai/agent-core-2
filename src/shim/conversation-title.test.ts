@@ -13,6 +13,7 @@ import {
   type TitleOutcome,
 } from "./conversation-title.js";
 import type { AgentEnv } from "../env.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 import type { Principal } from "./auth.js";
 import type { AttachmentRow, Conversation, MessageRow } from "./supabase-db.js";
 
@@ -237,7 +238,7 @@ describe("parseTitleReply", () => {
 });
 
 describe("requestModelTitle", () => {
-  it("posts the title request to the knox-llm-complete route with the gateway token", async () => {
+  it("posts the title request to the knox-llm-complete route with the gateway auth token", async () => {
     const { impl, calls } = fakeFetch(200, {
       text: "Reconcile June invoices",
       provider: "openrouter",
@@ -260,7 +261,7 @@ describe("requestModelTitle", () => {
     expect(calls[0]?.url).toBe("http://127.0.0.1:18789/knox/llm-complete");
     expect(calls[0]?.init.method).toBe("POST");
     expect((calls[0]?.init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer gateway-token-0123456789",
+      `Bearer ${gatewayAuthToken(env)}`,
     );
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual(
       buildTitleRequest([opening("can you reconcile June")]),

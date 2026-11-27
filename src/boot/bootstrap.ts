@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { bundleClientFromEnv } from "../bundle/client.js";
+import { scopeBundleToOrg } from "../bundle/org-scope.js";
 import {
   BundleEnvValidationError,
   logResolvedEnv,
@@ -229,6 +230,7 @@ export async function bootstrap(
     memoryDigest: digestInSoul ? memoryDigest : null,
     playbook,
     escalatedTools: parseEscalatedTools(env.OPENCLAW_TOOLS_ESCALATE),
+    agentOrg: env.AGENT_ORG,
   });
   await renderWorkspace({ env, assembledSoul: systemPrompt, blobs, extraModelIds, outputCaps });
 
@@ -318,7 +320,9 @@ async function fetchBundle(env: AgentEnv): Promise<AgentBundle | null> {
   const client = bundleClientFromEnv(env);
   if (!client) return null;
   try {
-    const bundle = await client.fetchBundle();
+    // Entries another org configured never reach this agent's prompt or skill
+    // install (SEC-012); a console that sends no entry org filters nothing here.
+    const bundle = scopeBundleToOrg(await client.fetchBundle(), env.AGENT_ORG);
     log.info("bundle fetched", {
       agent: bundle.agent.uid,
       assignments: bundle.assignments.length,

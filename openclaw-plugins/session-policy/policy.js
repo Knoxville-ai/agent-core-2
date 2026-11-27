@@ -1,7 +1,7 @@
 // Dependency-free logic for the knox-session-policy plugin, split out from
 // index.js so it can be unit-tested without loading the OpenClaw SDK.
 
-/** The runtime's session stamp on a platform tool call (src/shim/session-policy.ts). */
+/** The runtime's session ticket on a platform tool call (src/shim/platform-mcp-forward.ts). */
 export const SESSION_STAMP_PARAM = "_knox_session";
 
 /** The phone step-up tool (src/shim/session-policy.ts VERIFY_CALLER_TOOL). */
@@ -22,36 +22,48 @@ export function isVoiceSessionKey(sessionKey) {
 }
 
 /**
- * Stamp the session onto a platform tool call's params IN PLACE. openclaw
- * hands every before_tool_call handler the same params object and executes it
- * (merged under any handler's returned params), so an in-place stamp survives
- * the other injectors that return their own copy. The shim's platform MCP
- * route takes it off before the call reaches the console. Overwrites whatever
- * the model put there.
+ * Stamp the shim's session ticket onto a platform tool call's params IN
+ * PLACE. openclaw hands every before_tool_call handler the same params object
+ * and executes it (merged under any handler's returned params), so an
+ * in-place stamp survives the other injectors that return their own copy. The
+ * shim's platform MCP route takes it off before the call reaches the console.
+ * Overwrites whatever the model put there; with no ticket, removes it.
  */
-export function stampSession(params, sessionKey) {
+export function stampSession(params, ticket) {
   if (!params || typeof params !== "object" || Array.isArray(params)) return false;
-  if (typeof sessionKey !== "string" || !sessionKey) {
+  if (typeof ticket !== "string" || !ticket) {
     delete params[SESSION_STAMP_PARAM];
     return false;
   }
-  params[SESSION_STAMP_PARAM] = sessionKey;
+  params[SESSION_STAMP_PARAM] = ticket;
   return true;
 }
 
-/** The verdict to return to openclaw for the shim's answer (null = unreachable). */
-export function hookResult(answer) {
-  if (!answer || typeof answer !== "object") return { block: true, blockReason: UNCHECKED_REASON };
+/**
+ * The verdict to return to openclaw for the shim's answer (null = unreachable).
+ * Fail-closed, unless the operator turned the session rules off
+ * (AGENT_SESSION_TOOL_POLICY=off → `failOpen`), the kill switch for a gateway
+ * whose loopback token never arrived.
+ */
+export function hookResult(answer, { failOpen = false } = {}) {
+  if (!answer || typeof answer !== "object") {
+    return failOpen ? undefined : { block: true, blockReason: UNCHECKED_REASON };
+  }
   if (answer.allow === true) return undefined;
   const reason = typeof answer.reason === "string" && answer.reason.trim() ? answer.reason : UNCHECKED_REASON;
   return { block: true, blockReason: reason };
 }
 
+/** Where the gateway's preload keeps the shim's plugin loopback token
+ *  (src/openclaw/gateway-auth.ts PLUGIN_TOKEN_SLOT): process memory only,
+ *  never an environment variable, so exec commands cannot present it. */
+export const PLUGIN_TOKEN_SLOT = Symbol.for("knox.pluginLoopbackToken");
+
 /** Loopback base URL + auth, read at call time (see the other knox plugins). */
 export function loopback() {
   const port = process.env.AGENT_HTTP_PORT || "8080";
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
-  return { base: `http://127.0.0.1:${port}`, token };
+  const slot = process[PLUGIN_TOKEN_SLOT];
+  return { base: `http://127.0.0.1:${port}`, token: typeof slot === "string" ? slot : "" };
 }
 
 /** POST JSON to a shim loopback route; the parsed answer, or null on any failure. */

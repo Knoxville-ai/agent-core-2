@@ -4,16 +4,19 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { parseEscalatedTools } from "../prompt/assemble.js";
 import { voiceConversations } from "../voice/call-mirror.js";
-import { PhoneStepUp, SupabasePinStore } from "../voice/step-up.js";
+import { PhoneStepUp, SupabasePinStore, unavailablePinStore } from "../voice/step-up.js";
 import { HttpError } from "./auth.js";
-import { requireGatewayToken } from "./routes-files.js";
-import { bootMemoryDigest, isUntrustedChannel, parseSessionKey } from "./session-policy.js";
+import { requirePluginToken } from "./routes-internal.js";
+import { bootMemoryDigest, classifyTool, isUntrustedChannel, parseSessionKey } from "./session-policy.js";
 import {
   directServerNames,
+  scopedSessionTrustStore,
   SessionPolicyService,
   SupabaseSessionTrustStore,
   workspaceDirOf,
 } from "./session-policy-service.js";
+import { platformMcpForwarded, SessionTickets } from "./platform-mcp-forward.js";
+import { MessagingDB } from "./supabase-db.js";
 import {
   approvalKey,
   consoleHostedServers,
@@ -36,13 +39,17 @@ import { readJsonBody, sendJson } from "./util.js";
  *        -> { channel, memory_digest? }   the boot memory digest, for trusted
  *        sessions only.
  *
- * Gateway-token authed like the other /internal routes.
+ * Authed with the plugin loopback token, like every /internal route.
  */
 
 export interface PolicyRuntime {
   policy: SessionPolicyService;
   approvals: ToolApprovalGate;
   phone: PhoneStepUp;
+  /** Single-use session tickets for the console MCP forward route. */
+  tickets: SessionTickets;
+  /** Whether openclaw reaches the console MCP through the forward route. */
+  forwarding: boolean;
 }
 
 /** The policy mode the env asks for (default enforce). */
@@ -50,13 +57,27 @@ export function policyMode(env: Pick<AgentEnv, "AGENT_SESSION_TOOL_POLICY">): "e
   return env.AGENT_SESSION_TOOL_POLICY ?? "enforce";
 }
 
-export function createPolicyRuntime(env: AgentEnv): PolicyRuntime {
-  const phone = new PhoneStepUp({ store: new SupabasePinStore(env), calls: voiceConversations });
+/**
+ * The policy runtime. With the database key (service-key mode) it reads the
+ * console's tables directly. Without one (scoped mode, ../agent-data) only the
+ * agent data API's own operations are available, so: the session rules fall
+ * back to the conversation and the turn's caller (scopedSessionTrustStore),
+ * opt-ins are none, phone PINs can't be checked (callers stay restricted) and
+ * direct-server approvals are refused — each until the console offers an
+ * operation for it.
+ */
+export function createPolicyRuntime(env: AgentEnv, db?: MessagingDB): PolicyRuntime {
+  const serviceKey = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
+  const phone = new PhoneStepUp({
+    store: serviceKey ? new SupabasePinStore(env) : unavailablePinStore,
+    calls: voiceConversations,
+  });
   const servers = directServerNames(env.OPENCLAW_MCP_SERVERS);
   const policy = new SessionPolicyService({
     agentUid: env.AGENT_UID,
     agentOrg: env.AGENT_ORG,
-    store: new SupabaseSessionTrustStore(env),
+    store: serviceKey ? new SupabaseSessionTrustStore(env) : scopedSessionTrustStore(db ?? new MessagingDB(env)),
+    scoped: !serviceKey,
     phone,
     servers,
     workspaceDir: workspaceDirOf(env),
@@ -69,10 +90,10 @@ export function createPolicyRuntime(env: AgentEnv): PolicyRuntime {
     servers,
     consoleHosted: consoleHostedServers(env.OPENCLAW_MCP_SERVERS, env.PLATFORM_MCP_URL),
     key: approvalKey(env.OPENCLAW_GATEWAY_TOKEN),
-    store: new SupabaseApprovalStore(env),
+    store: serviceKey ? new SupabaseApprovalStore(env) : null,
     asker: env.PLATFORM_MCP_URL && env.PLATFORM_API_TOKEN ? new PlatformApprovalAsker(env) : null,
   });
-  return { policy, approvals, phone };
+  return { policy, approvals, phone, tickets: new SessionTickets(), forwarding: platformMcpForwarded(env) };
 }
 
 /** The console session a stamped session key names (for the console MCP route). */
@@ -99,7 +120,7 @@ export async function handleToolPolicy(
   env: AgentEnv,
   runtime: PolicyRuntime,
 ): Promise<void> {
-  requireGatewayToken(req.headers.authorization, env);
+  requirePluginToken(req.headers.authorization);
   const body = (await readJsonBody<ToolPolicyBody>(req)) ?? {};
   const sessionKey = typeof body.session_key === "string" ? body.session_key : null;
   const toolName = typeof body.tool_name === "string" ? body.tool_name.trim() : "";
@@ -107,7 +128,14 @@ export async function handleToolPolicy(
   const { decision, session } = await runtime.policy.decide(sessionKey, toolName, body.params);
   if (!decision.allow) return sendJson(res, 200, decision);
   const approval = await runtime.approvals.check(toolName, body.params, session);
-  return sendJson(res, 200, approval);
+  if (!approval.allow) return sendJson(res, 200, approval);
+  // A platform tool call that may run gets a ticket naming its session, for the
+  // console MCP forward route (platform-mcp-forward.ts).
+  const cls = classifyTool(toolName, []);
+  if (runtime.forwarding && sessionKey && cls.kind === "platform") {
+    return sendJson(res, 200, { allow: true, session_ticket: runtime.tickets.issue(sessionKey, cls.tool) });
+  }
+  return sendJson(res, 200, { allow: true });
 }
 
 export async function handleVoiceStepUp(
@@ -116,7 +144,7 @@ export async function handleVoiceStepUp(
   env: AgentEnv,
   runtime: PolicyRuntime,
 ): Promise<void> {
-  requireGatewayToken(req.headers.authorization, env);
+  requirePluginToken(req.headers.authorization);
   const body = (await readJsonBody<{ session_key?: unknown; pin?: unknown }>(req)) ?? {};
   const sessionKey = typeof body.session_key === "string" ? body.session_key : "";
   if (parseSessionKey(sessionKey).kind !== "voice") {
@@ -133,7 +161,7 @@ export async function handleSessionContext(
   env: AgentEnv,
   runtime: PolicyRuntime,
 ): Promise<void> {
-  requireGatewayToken(req.headers.authorization, env);
+  requirePluginToken(req.headers.authorization);
   const sessionKey = url.searchParams.get("session_key");
   const session = await runtime.policy.session(sessionKey);
   // Audit and off modes change nothing a session sees.

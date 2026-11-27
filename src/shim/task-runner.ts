@@ -20,6 +20,7 @@ import type { AttachmentRow, MessagingDB } from "./supabase-db.js";
 import { TaskReporter } from "./task-reporter.js";
 import { logUsageTotals, type UsageAccumulator } from "./usage-telemetry.js";
 import type { ToolCallHub } from "./tool-telemetry.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 
 /**
  * The long-running task executor (console migration 0047).
@@ -49,20 +50,14 @@ import type { ToolCallHub } from "./tool-telemetry.js";
  *   sandboxSessionKey -> catalogToolHookContext.sessionKey -> runBeforeToolCallHook
  *   -> plugin injects params.env -> execSchema.env -> subprocess
  *
- * There is a second, weaker injector: the exec shim
- * (docker/knox-python3-shim.py), which runs inside the subprocess. openclaw gives
- * that subprocess no session key, so it can only ask for "the single live
- * delegated turn" (DelegatedCredentialStore.currentSingle) and must return
- * nothing when several overlap — fail-closed, so one caller's secret can never
- * reach another's skill, but also capped at one delegated turn at a time. The
- * plugin now stamps a marker into the env so the shim stands down when the
- * parallel-safe path already ran; the shim only matters where the plugin does
- * not fire at all.
+ * The plugin is the only injector. Its loopback lookup takes the plugin token
+ * only the gateway process holds plus the exact session key, so a command run
+ * for one session cannot fetch another session's credentials (see
+ * routes-internal.ts).
  *
- * `AGENT_DELEGATED_TASK_MODE=serial` is the escape hatch for such a deployment:
- * it puts credential-carrying tasks back in a lane of one, so `currentSingle`
- * stays correct by construction. Ordinary tasks are never blocked behind that
- * lane in either mode.
+ * `AGENT_DELEGATED_TASK_MODE=serial` still puts credential-carrying tasks in a
+ * lane of one, for operators who want delegated work serialized. Ordinary tasks
+ * are never blocked behind that lane in either mode.
  */
 
 export interface TaskSpec {
@@ -149,6 +144,9 @@ export interface TaskRunnerDeps {
    *  Each task turn registers its context so tool calls are attributed to the
    *  task's work conversation + assistant row. */
   toolCalls: ToolCallHub;
+  /** The session rules (session-policy-service.ts): told which conversation
+   *  each task runs in, so a `task:` session is judged by it. */
+  sessionPolicy?: { rememberTask(taskId: string, conversationId: string | null): void };
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
 }
@@ -329,6 +327,7 @@ export class TaskRunner {
     const { spec } = task;
     const reporter = this.reporterFor(spec);
     const sessionKey = `task:${spec.taskId}`;
+    this.deps.sessionPolicy?.rememberTask(spec.taskId, spec.conversationId);
 
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     let cancelledByPlatform = false;
@@ -610,7 +609,7 @@ export class TaskRunner {
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`,
+            Authorization: `Bearer ${gatewayAuthToken(env)}`,
             "Content-Type": "application/json",
             Accept: "text/event-stream",
             "x-openclaw-session-key": sessionKey,

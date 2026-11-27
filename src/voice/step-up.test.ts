@@ -6,6 +6,7 @@ import {
   MAX_PIN_FAILURES_PER_CALL,
   normalizePin,
   PhoneStepUp,
+  unavailablePinStore,
   verifyPin,
   type PinStore,
 } from "./step-up.js";
@@ -104,6 +105,16 @@ describe("PhoneStepUp", () => {
       claim: async () => {
         throw new Error("rpc missing");
       },
+    });
+    const r = await stepUp.verify("voice:19015550100", "4421");
+    expect(r.ok).toBe(false);
+    expect(stepUp.isVerified("call-1")).toBe(false);
+  });
+
+  it("without the database key no PIN can be checked: the caller stays unverified", async () => {
+    const stepUp = new PhoneStepUp({
+      store: unavailablePinStore,
+      calls: { call: () => ({ conversationId: "call-1", userId: "member" }) },
     });
     const r = await stepUp.verify("voice:19015550100", "4421");
     expect(r.ok).toBe(false);

@@ -11,6 +11,20 @@
 # All per-agent configuration is delivered via env vars + Supabase Storage
 # at boot — there is nothing role-specific in this image.
 
+# --- prctl addon --------------------------------------------------------------
+# A few lines of C (docker/knox-prctl.c) giving Node prctl(PR_SET_DUMPABLE) and
+# prctl(PR_SET_NO_NEW_PRIVS). The shim and the openclaw gateway call it on
+# themselves at startup so the exec tool's commands, which run as the same uid,
+# cannot read their environment or memory through /proc (see
+# src/openclaw/process-hardening.ts). Built in the full node image, which has a
+# compiler and the Node-API headers; only the .so is copied into the runtime
+# image (same Debian release, and Node-API is ABI-stable across Node versions).
+FROM node:24-bookworm AS knox-prctl
+WORKDIR /build
+COPY docker/knox-prctl.c ./
+RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC -I/usr/local/include/node \
+      -o knox_prctl.node knox-prctl.c
+
 FROM node:24-bookworm-slim
 
 ENV NODE_ENV=production \
@@ -206,20 +220,6 @@ RUN apt-get update \
       'requests>=2.28' 'pypdf>=4.0' 'rapidocr-onnxruntime>=1.3' \
  && /opt/skills-venv/bin/python -c "import cv2, rapidocr_onnxruntime, pypdf; from PIL import features; assert features.check_codec('jpg_2000'), 'Pillow lacks JPEG 2000 support'"
 
-# --- Delegated-credential exec shim ------------------------------------------
-# openclaw's chat-completions/embedded run (the path a platform-brokered A2A
-# turn takes) does NOT fire the `before_tool_call` plugin, so per-turn delegated
-# credentials can't be injected into a skill's `python3` subprocess that way.
-# This tiny shim closes the gap from the runtime side: it is placed FIRST on the
-# EXEC tool's PATH (via `tools.exec.pathPrepend`, see
-# src/provision/render-workspace.ts — NOT the container PATH, so boot-time
-# python3 is unaffected), pulls the current delegated turn's credentials from the
-# shim loopback using the gateway token already in the exec env, exports them,
-# and re-execs the real venv python3. Strictly fail-open; never logs values. See
-# docker/knox-python3-shim.py for the full rationale.
-COPY --chown=agent:agent docker/knox-python3-shim.py /opt/knox-exec-shim/python3
-RUN chmod 0755 /opt/knox-exec-shim/python3
-
 # rembg downloads its ~170 MB u2net model on first use. Point its cache at the
 # Railway persistence volume (OPENCLAW_STATE_DIR) so the one-time download
 # survives restarts/redeploys instead of re-fetching into an ephemeral $HOME.
@@ -249,8 +249,9 @@ ENV U2NET_HOME=/home/agent/.openclaw/u2net
 #     doesn't pay the download — and still works under network policies that
 #     block the browser CDN at boot.
 #
-# The gateway spawns openclaw (and thus skills) with the container env (see
-# src/openclaw/gateway-process.ts), so PLAYWRIGHT_BROWSERS_PATH below points a
+# The gateway spawns openclaw (and thus skills) with the container env, minus
+# platform configuration (see src/openclaw/child-env.ts — image variables like
+# this one pass through), so PLAYWRIGHT_BROWSERS_PATH below points a
 # skill's own runtime Playwright at this baked build instead of the default
 # $HOME/.cache/ms-playwright. /opt/pw-browsers is chowned to the agent uid so
 # the build is usable without root; keeping it agent-writable also lets the
@@ -299,6 +300,11 @@ RUN if [ "$INSTALL_OLLAMA" = "true" ]; then \
       rm -f /tmp/ollama.tgz; \
       ollama --version >/dev/null 2>&1 || true; \
     fi
+
+# The prctl addon from the first stage. Root-owned and read-only to the agent
+# uid, so nothing running as the agent can swap it for a no-op.
+COPY --from=knox-prctl /build/knox_prctl.node /opt/knox-prctl/knox_prctl.node
+RUN chmod 0755 /opt/knox-prctl && chmod 0644 /opt/knox-prctl/knox_prctl.node
 
 # Drop runtime entrypoint last so iteration on it doesn't bust the npm layer.
 COPY --chown=agent:agent entrypoint.sh /app/entrypoint.sh

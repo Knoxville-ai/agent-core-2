@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const Schema = z.object({
+const BaseSchema = z.object({
   // Agent identity
   AGENT_UID: z.string().regex(/^[0-9a-f]{16}$/, "AGENT_UID must be 16-char lowercase hex"),
   AGENT_ORG: z.string().min(1),
@@ -14,6 +14,21 @@ const Schema = z.object({
   // Console JWKS for platform tokens. Defaults to the PLATFORM_MCP_URL origin
   // + /api/agent-auth/jwks when unset (see shim/auth.ts platformJwksUrl).
   PLATFORM_JWKS_URL: z.string().url().optional(),
+  // Which bearers the shim's HTTP surface accepts (see shim/auth.ts).
+  //   legacy-org-check (default) — platform tokens, plus the pre-platform
+  //     forms an older console still sends: a Supabase session token (only
+  //     for a member of AGENT_ORG, on every route) and the legacy HS256
+  //     shared-secret tokens (while SUPABASE_JWT_SECRET is set). Task routes
+  //     also take a platform token that is not bound to the task.
+  //   platform-only — console-minted platform tokens only, and the task
+  //     start/cancel routes need a token bound to that task. The console
+  //     writes this on the fleet once it mints platform tokens for every call.
+  // Removal: once every console sends platform tokens (AGENT_TOKEN_SIGNING_KEY
+  // set and the fleet re-synced), make platform-only the default and delete
+  // the legacy verifiers in shim/auth.ts.
+  AGENT_BEARER_POLICY: z
+    .enum(["legacy-org-check", "platform-only"])
+    .default("legacy-org-check"),
   MESSAGING_ENABLED: z
     .string()
     .optional()
@@ -22,9 +37,16 @@ const Schema = z.object({
   // Shim ↔ openclaw auth
   OPENCLAW_GATEWAY_TOKEN: z.string().min(16),
 
-  // Supabase
+  // Supabase. SUPABASE_URL is public (project URL; also where the shim finds
+  // the project JWKS). The service-role key is only needed while the console
+  // does not offer the agent data API: when PLATFORM_AGENT_DATA_URL and
+  // PLATFORM_API_TOKEN are set, every data path goes through that API, scoped
+  // to this agent, and the key is unused (see agent-data/client.ts).
   SUPABASE_URL: z.string().url(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().optional().default(""),
+  // Console agent data API (POST, authenticated by PLATFORM_API_TOKEN). Set by
+  // the console when it offers the API.
+  PLATFORM_AGENT_DATA_URL: z.string().url().optional(),
 
   // Model
   LLM_PROVIDER: z.string().min(1),
@@ -325,16 +347,12 @@ const Schema = z.object({
   //     so every concurrent task gets exactly its own caller's secrets. This is
   //     what an SME agent whose whole job is accepting delegations needs.
   //
-  //   serial — at most ONE credential-carrying task at a time. The fallback for
-  //     a deployment where the plugin path is not available (an openclaw old
-  //     enough that the embedded run skips before_tool_call, a tools.profile
-  //     that strips plugins, an exec host that bypasses the wrapper). There the
-  //     only injector is the exec shim, which openclaw gives no session key and
-  //     which therefore fails closed whenever two delegated turns overlap —
-  //     correct, but it caps delegated throughput at 1.
+  //   serial — at most ONE credential-carrying task at a time, for operators
+  //     who want delegated work serialized. Credentials are still injected only
+  //     by the plugin, per session; there is no session-less fallback.
   //
-  // Flip to `serial` if skills start reporting missing credentials under load;
-  // that is the signature of the plugin path not firing. See
+  // If skills report missing credentials, the plugin path is not firing (check
+  // the `[knox-delegated-credentials] exec hook` log lines). See
   // CONSOLE_INTEGRATION.md "Credentials on a delegated task".
   AGENT_DELEGATED_TASK_MODE: z
     .enum(["parallel", "serial"])
@@ -476,7 +494,17 @@ const Schema = z.object({
   OPENCLAW_STATE_DIR: z.string().default("/home/agent/.openclaw"),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional().default("info"),
-}).superRefine((env, ctx) => {
+});
+
+const Schema = BaseSchema.superRefine((env, ctx) => {
+  if (!env.SUPABASE_SERVICE_ROLE_KEY && !(env.PLATFORM_AGENT_DATA_URL && env.PLATFORM_API_TOKEN)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["SUPABASE_SERVICE_ROLE_KEY"],
+      message:
+        "required unless the console provides the agent data API (PLATFORM_AGENT_DATA_URL + PLATFORM_API_TOKEN)",
+    });
+  }
   if (env.LLM_AUTH_MODE === "oauth" && !env.OPENCLAW_AUTH_PROFILE_SECRET_KEY) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -504,6 +532,12 @@ const Schema = z.object({
 });
 
 export type AgentEnv = z.infer<typeof Schema>;
+
+/** Every variable name the vessel itself declares: platform configuration,
+ *  never customer data. ../openclaw/child-env.ts withholds these from the
+ *  processes the shim starts unless it lists one as needed there, so a new
+ *  platform variable added above stays out of exec commands by default. */
+export const AGENT_ENV_KEYS: readonly string[] = Object.freeze(Object.keys(BaseSchema.shape));
 
 export function loadEnv(): AgentEnv {
   const parsed = Schema.safeParse(process.env);

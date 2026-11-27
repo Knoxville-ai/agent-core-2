@@ -34,6 +34,10 @@ export async function handleInterrupt(
   if (conversation.agent_uid !== env.AGENT_UID) {
     throw new HttpError(404, "wrong agent");
   }
+  if (principal.kind === "service") {
+    // Only ever good for posting its one message (bearer-policy.ts).
+    throw new HttpError(403, "token is not valid for this route");
+  }
   if (principal.kind === "agent") {
     // A2A authorization is enforced console-side in the MCP call path (see
     // routes-messages.ts authorizeConversation). Same-org is all we assert here.

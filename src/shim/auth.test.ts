@@ -72,13 +72,82 @@ describe("platform tokens", () => {
   it("accepts a user token addressed to this agent", async () => {
     const token = await platformToken({ sub: "user-1", kind: "user", email: "a@b.c" });
     const p = await verifyBearer(`Bearer ${token}`, env(), deps);
-    expect(p).toEqual({ kind: "user", userId: "user-1", email: "a@b.c", role: "authenticated" });
+    expect(p).toEqual({
+      kind: "user",
+      userId: "user-1",
+      email: "a@b.c",
+      role: "authenticated",
+      source: "platform",
+    });
   });
 
   it("accepts an agent token addressed to this agent", async () => {
     const token = await platformToken({ sub: OTHER_UID, kind: "agent", org_id: "acme" });
     const p = await verifyBearer(`Bearer ${token}`, env(), deps);
-    expect(p).toEqual({ kind: "agent", agentUid: OTHER_UID, targetUid: AGENT_UID, orgId: "acme" });
+    expect(p).toEqual({
+      kind: "agent",
+      agentUid: OTHER_UID,
+      targetUid: AGENT_UID,
+      orgId: "acme",
+      source: "platform",
+    });
+  });
+
+  it("reads the task binding and agent-control scope", async () => {
+    const token = await platformToken({
+      sub: "user-1",
+      kind: "user",
+      scope: "agent-control",
+      task_id: "task-1",
+      task_org_id: "acme",
+      task_callback_url: "https://console.example/api/tasks/task-1",
+    });
+    const p = await verifyBearer(`Bearer ${token}`, env(), deps);
+    expect(p).toMatchObject({
+      kind: "user",
+      scope: "agent-control",
+      task: {
+        taskId: "task-1",
+        orgId: "acme",
+        callbackUrl: "https://console.example/api/tasks/task-1",
+      },
+    });
+  });
+
+  it("rejects a malformed task binding", async () => {
+    const token = await platformToken({ sub: "user-1", kind: "user", task_id: 42 });
+    expect(await status(verifyBearer(`Bearer ${token}`, env(), deps))).toBe(401);
+  });
+
+  it("accepts a service token bound to one conversation", async () => {
+    const token = await platformToken({
+      sub: "task-1",
+      kind: "service",
+      conversation_id: "conv-1",
+      origin: "task-callback",
+    });
+    const p = await verifyBearer(`Bearer ${token}`, env(), deps);
+    expect(p).toEqual({
+      kind: "service",
+      subject: "task-1",
+      conversationId: "conv-1",
+      origin: "task-callback",
+      source: "platform",
+    });
+  });
+
+  it("rejects a service token without a conversation or origin", async () => {
+    const noConv = await platformToken({ sub: "t", kind: "service", origin: "task-callback" });
+    const noOrigin = await platformToken({ sub: "t", kind: "service", conversation_id: "c" });
+    const badOrigin = await platformToken({
+      sub: "t",
+      kind: "service",
+      conversation_id: "c",
+      origin: "Task Callback!",
+    });
+    for (const t of [noConv, noOrigin, badOrigin]) {
+      expect(await status(verifyBearer(`Bearer ${t}`, env(), deps))).toBe(401);
+    }
   });
 
   it("rejects a token minted for another agent", async () => {
@@ -123,6 +192,55 @@ describe("legacy shared-secret tokens", () => {
     const a2a = await hs256({ sub: OTHER_UID, kind: "agent", org_id: "acme" }, AGENT_UID);
     expect((await verifyBearer(`Bearer ${user}`, e)).kind).toBe("user");
     expect((await verifyBearer(`Bearer ${a2a}`, e)).kind).toBe("agent");
+  });
+
+  it("tell a user's own Supabase session apart from the console's HS256 token", async () => {
+    const e = env({ SUPABASE_JWT_SECRET: LEGACY_SECRET });
+    const consoleToken = await hs256({ sub: "user-1", role: "authenticated" }, "authenticated");
+    const session = await hs256(
+      { sub: "user-1", role: "authenticated", session_id: "s-1", amr: [{ method: "password" }] },
+      "authenticated",
+    );
+    expect(await verifyBearer(`Bearer ${consoleToken}`, e)).toMatchObject({
+      source: "legacy-console",
+    });
+    expect(await verifyBearer(`Bearer ${session}`, e)).toMatchObject({
+      source: "supabase-session",
+    });
+  });
+});
+
+describe("AGENT_BEARER_POLICY=platform-only", () => {
+  const strict = (over: Partial<AgentEnv> = {}) =>
+    env({ AGENT_BEARER_POLICY: "platform-only", SUPABASE_JWT_SECRET: LEGACY_SECRET, ...over });
+
+  it("rejects a Supabase user session token", async () => {
+    const session = await hs256(
+      { sub: "user-1", role: "authenticated", session_id: "s-1" },
+      "authenticated",
+    );
+    expect(await status(verifyBearer(`Bearer ${session}`, strict(), deps))).toBe(401);
+    // An asymmetric session is refused before any key lookup.
+    const pair = await generateKeyPair("ES256");
+    const asym = await new SignJWT({ sub: "user-1", role: "authenticated", session_id: "s-1" })
+      .setProtectedHeader({ alg: "ES256" })
+      .setIssuer("http://supabase.invalid/auth/v1")
+      .setAudience("authenticated")
+      .setExpirationTime("2m")
+      .sign(pair.privateKey);
+    expect(await status(verifyBearer(`Bearer ${asym}`, strict(), deps))).toBe(401);
+  });
+
+  it("rejects the legacy shared-secret forms even while the secret is set", async () => {
+    const user = await hs256({ sub: "user-1", role: "authenticated" }, "authenticated");
+    const a2a = await hs256({ sub: OTHER_UID, kind: "agent", org_id: "acme" }, AGENT_UID);
+    expect(await status(verifyBearer(`Bearer ${user}`, strict(), deps))).toBe(401);
+    expect(await status(verifyBearer(`Bearer ${a2a}`, strict(), deps))).toBe(401);
+  });
+
+  it("still accepts platform tokens", async () => {
+    const token = await platformToken({ sub: "user-1", kind: "user" });
+    expect((await verifyBearer(`Bearer ${token}`, strict(), deps)).kind).toBe("user");
   });
 });
 

@@ -4,16 +4,20 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentEnv } from "../env.js";
+import { gatewayAuthToken, pluginLoopbackToken } from "../openclaw/gateway-auth.js";
 import { PhoneStepUp } from "../voice/step-up.js";
 import { HttpError } from "./auth.js";
 import { routePolicy, sessionIdsFor, type PolicyRuntime } from "./routes-policy.js";
 import { bootMemoryDigest } from "./session-policy.js";
 import { SessionPolicyService, type ConversationRow, type SessionTrustStore } from "./session-policy-service.js";
+import type { MessagingDB } from "./supabase-db.js";
 import { ToolApprovalGate } from "./tool-approvals.js";
+import { SessionTickets } from "./platform-mcp-forward.js";
+import { createPolicyRuntime } from "./routes-policy.js";
 
 const AGENT = "0123456789abcdef";
-const TOKEN = "gateway-token-0123456789";
-const env = { OPENCLAW_GATEWAY_TOKEN: TOKEN, AGENT_UID: AGENT } as AgentEnv;
+const TOKEN = pluginLoopbackToken();
+const env = { OPENCLAW_GATEWAY_TOKEN: "console-token-0123456789", AGENT_UID: AGENT } as AgentEnv;
 
 const rows: Record<string, ConversationRow> = {
   anon: { id: "anon", org_id: "acme", agent_uid: AGENT, user_id: null, origin: "web", caller_agent_uid: null, delegation_connection_id: null, drive_through_connection_id: null },
@@ -46,6 +50,8 @@ function runtime(): PolicyRuntime {
       store: { find: async () => [], claim: async () => true },
       asker: { ask: vi.fn(async () => "esc-9") },
     }),
+    tickets: new SessionTickets(),
+    forwarding: true,
   };
 }
 
@@ -81,7 +87,10 @@ async function ask(base: string, body: unknown) {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return { status: res.status, body: (await res.json().catch(() => null)) as { allow: boolean; reason?: string } };
+  return {
+    status: res.status,
+    body: (await res.json().catch(() => null)) as { allow: boolean; reason?: string; session_ticket?: string },
+  };
 }
 
 describe("POST /internal/tool-policy", () => {
@@ -110,10 +119,85 @@ describe("POST /internal/tool-policy", () => {
     expect(r.body.reason).toMatch(/verify_caller_pin/);
   });
 
-  it("requires the gateway token", async () => {
+  it("accepts only the plugin loopback token", async () => {
     const base = await start(runtime());
-    const res = await fetch(`${base}/internal/tool-policy`, { method: "POST", body: "{}" });
-    expect(res.status).toBe(401);
+    for (const auth of [undefined, `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`, `Bearer ${gatewayAuthToken(env)}`]) {
+      const res = await fetch(`${base}/internal/tool-policy`, {
+        method: "POST",
+        headers: auth ? { Authorization: auth } : {},
+        body: "{}",
+      });
+      expect(res.status).toBe(401);
+    }
+  });
+});
+
+describe("session tickets for the console MCP forward route", () => {
+  it("an allowed platform tool call gets a single-use ticket for its session; others don't", async () => {
+    const rt = runtime();
+    const base = await start(rt);
+    const r = await ask(base, { session_key: "webchat:mine", tool_name: "knoxville_platform__list_my_tasks", params: {} });
+    expect(r.body.allow).toBe(true);
+    expect(r.body.session_ticket).toMatch(/^kst_/);
+    expect(rt.tickets.redeem(r.body.session_ticket!, "list_my_tasks")).toBe("webchat:mine");
+    // Not a platform tool, or refused: no ticket.
+    expect((await ask(base, { session_key: "webchat:mine", tool_name: "exec", params: {} })).body.session_ticket).toBeUndefined();
+    const refused = await ask(base, { session_key: "webchat:anon", tool_name: "knoxville_platform__recall", params: {} });
+    expect(refused.body.allow).toBe(false);
+    expect(refused.body.session_ticket).toBeUndefined();
+  });
+
+  it("no tickets when openclaw goes straight to the console", async () => {
+    const rt = { ...runtime(), forwarding: false };
+    const base = await start(rt);
+    const r = await ask(base, { session_key: "webchat:mine", tool_name: "knoxville_platform__list_my_tasks", params: {} });
+    expect(r.body).toEqual({ allow: true });
+  });
+});
+
+describe("scoped data mode (no database key)", () => {
+  const scopedEnv = {
+    AGENT_UID: AGENT,
+    AGENT_ORG: "acme",
+    OPENCLAW_GATEWAY_TOKEN: "console-token-0123456789",
+    SUPABASE_SERVICE_ROLE_KEY: "",
+    SUPABASE_URL: "https://example.supabase.co",
+    OPENCLAW_STATE_DIR: "/home/agent/.openclaw",
+    OPENCLAW_MCP_SERVERS: JSON.stringify({ odoo: { url: "https://odoo.example/mcp" } }),
+    OPENCLAW_TOOLS_ESCALATE: "odoo__create_bill",
+    PLATFORM_MCP_URL: "https://console.example/api/mcp",
+    PLATFORM_API_TOKEN: "knox_agent_x",
+  } as unknown as AgentEnv;
+  const scopedDb = {
+    getConversation: async (id: string) =>
+      id === "mine" || id === "anon"
+        ? { id, org_id: "acme", agent_uid: AGENT, user_id: id === "mine" ? "member" : null, drive_through_connection_id: null }
+        : null,
+    userInOrg: async (u: string) => u === "member",
+  } as unknown as MessagingDB;
+
+  it("fails closed where the agent data API has no operation: approvals, PINs, opt-ins, task rows", async () => {
+    const rt = createPolicyRuntime(scopedEnv, scopedDb);
+    expect(rt.policy.scoped).toBe(true);
+    const gated = await rt.approvals.check("odoo__create_bill", { amount: 1 }, { channel: "trusted", conversationId: "mine", taskId: null });
+    expect(gated.allow).toBe(false);
+    expect(!gated.allow && gated.reason).toMatch(/can't check one/);
+    // A task the runner didn't announce can't be placed.
+    expect((await rt.policy.session("task:unknown")).channel).toBe("public");
+    rt.policy.rememberTask("t1", "mine");
+    expect((await rt.policy.session("task:t1")).channel).toBe("trusted");
+  });
+
+  it("goes by the conversation and the turn's caller", async () => {
+    const rt = createPolicyRuntime(scopedEnv, scopedDb);
+    expect((await rt.policy.session("webchat:mine")).channel).toBe("trusted");
+    // The API doesn't say where an ownerless conversation came from; the turn's
+    // caller does: someone outside the org makes it public.
+    rt.policy.noteCaller("anon", false);
+    expect((await rt.policy.session("webchat:anon")).channel).toBe("public");
+    expect((await rt.policy.decide("webchat:anon", "exec", {})).decision.allow).toBe(false);
+    rt.policy.noteCaller("anon", true);
+    expect((await rt.policy.session("webchat:anon")).channel).toBe("trusted");
   });
 });
 

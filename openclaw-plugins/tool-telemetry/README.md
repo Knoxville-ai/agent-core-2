@@ -14,7 +14,7 @@ invisible: not shown in the session, not stored, impossible to report or bill on
 The `before_tool_call` hook fires once per tool invocation with the tool name and
 params intact — the same hook the delegated-credentials / report-outcome /
 task-progress plugins already use. This plugin forwards a small, **redacted**
-record of each call to the shim over the same loopback + gateway-token channel the
+record of each call to the shim over the same loopback channel (plugin loopback token) the
 usage-telemetry plugin uses.
 
 ```
