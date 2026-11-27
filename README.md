@@ -48,7 +48,9 @@ list):
 | Var | Purpose |
 | --- | --- |
 | `AGENT_UID` / `AGENT_ORG` / `AGENT_ROLE` | identity; `AGENT_ROLE=generic` for vessel agents |
-| `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Storage access for workspace + manifest |
+| `SUPABASE_URL` | Supabase project URL |
+| `PLATFORM_AGENT_DATA_URL` | the console's agent data API; with `PLATFORM_API_TOKEN`, all database and Storage access goes through it, scoped to this agent (see CONSOLE_INTEGRATION.md, Platform data access) |
+| `SUPABASE_SERVICE_ROLE_KEY` | transitional: only used while the console does not provide `PLATFORM_AGENT_DATA_URL` |
 | `SUPABASE_JWT_SECRET` | HS256 secret used to verify the console's bearer JWTs |
 | `OPENCLAW_GATEWAY_TOKEN` | shared secret between shim and local openclaw gateway |
 | `LLM_PROVIDER` / `LLM_MODEL` / `LLM_API_KEY` | written into `openclaw.json` as the primary model |

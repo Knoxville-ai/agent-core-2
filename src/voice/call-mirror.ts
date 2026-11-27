@@ -5,6 +5,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { agentDataClientFromEnv, type AgentDataClient } from "../agent-data/client.js";
 import { LLM_COMPLETE_PATH } from "../shim/conversation-title.js";
 
 /**
@@ -620,8 +621,82 @@ export class CallLogTail {
   }
 }
 
+/** A CallMirrorStore that also names the agent (for the phone notifier). */
+export interface NamedCallMirrorStore extends CallMirrorStore {
+  agentDisplayName(): Promise<string | null>;
+}
+
+/** The store this container should use: the console's agent data API when it
+ *  provides one, else the service-role key. */
+export function callMirrorStoreFromEnv(env: AgentEnv): NamedCallMirrorStore {
+  const api = agentDataClientFromEnv(env);
+  return api ? new ScopedCallMirrorStore(api) : new SupabaseCallMirrorStore(env);
+}
+
+/** The store over the agent data API: the console fills in this agent's org and
+ *  uid and checks every conversation is its own. */
+export class ScopedCallMirrorStore implements NamedCallMirrorStore {
+  constructor(private readonly api: AgentDataClient) {}
+
+  async findMemberByPhone(digits: string): Promise<{ userId: string; name: string | null } | null> {
+    if (digits.length < 7) return null;
+    const { member } = await this.api.call<{ member: { user_id: string; name: string | null } | null }>(
+      "members.find_by_phone",
+      { digits: digits.slice(-15) },
+    );
+    return member ? { userId: member.user_id, name: member.name } : null;
+  }
+
+  async agentDisplayName(): Promise<string | null> {
+    const { display_name } = await this.api.call<{ display_name: string | null }>("agent.display_name");
+    return display_name?.trim() || null;
+  }
+
+  async createConversation(input: { userId: string | null; title: string }): Promise<string> {
+    try {
+      const { id } = await this.api.call<{ id: string }>("conversation.create_phone", {
+        user_id: input.userId,
+        title: input.title,
+      });
+      return id;
+    } catch (err) {
+      throw new Error(`create phone conversation: ${String(err)}`);
+    }
+  }
+
+  async insertMessage(input: Parameters<CallMirrorStore["insertMessage"]>[0]): Promise<void> {
+    try {
+      await this.api.call("messages.insert", {
+        conversation_id: input.conversationId,
+        role: input.role,
+        content: input.content,
+        status: "complete",
+        system_generated: input.systemGenerated ?? false,
+        sender_kind: input.senderKind,
+        sender_id: input.senderId || null,
+        created_at:
+          typeof input.at === "number" && Number.isFinite(input.at) ? new Date(input.at).toISOString() : null,
+      });
+    } catch (err) {
+      throw new Error(`insert phone message: ${String(err)}`);
+    }
+  }
+
+  async remember(input: { conversationId: string; body: string; tags: string[] }): Promise<void> {
+    try {
+      await this.api.call("memories.remember", {
+        conversation_id: input.conversationId,
+        body: input.body,
+        tags: input.tags,
+      });
+    } catch (err) {
+      throw new Error(`remember_memory: ${String(err)}`);
+    }
+  }
+}
+
 /** The Supabase-backed store (service role, same as the shim's MessagingDB). */
-export class SupabaseCallMirrorStore implements CallMirrorStore {
+export class SupabaseCallMirrorStore implements NamedCallMirrorStore {
   private readonly client: SupabaseClient;
 
   constructor(

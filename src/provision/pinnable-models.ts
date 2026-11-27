@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { agentDataClientFromEnv } from "../agent-data/client.js";
 
 /**
  * The extra models this agent may be pinned to by a routine's per-request model
@@ -32,6 +33,19 @@ import type { AgentEnv } from "../env.js";
  * used takes effect on the agent's next boot/redeploy.
  */
 export async function fetchPinnableModelIds(env: AgentEnv): Promise<string[]> {
+  const api = agentDataClientFromEnv(env);
+  if (api) {
+    // Same two queries, run by the console for this agent only.
+    try {
+      const { ids } = await api.call<{ ids: string[] }>("models.pinnable");
+      return Array.isArray(ids) ? ids.filter((id) => typeof id === "string" && id) : [];
+    } catch (err) {
+      log.warn("pinnable models: agent data API failed; tracking default model only", {
+        error: String(err),
+      });
+      return [];
+    }
+  }
   try {
     const sb = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
       auth: { persistSession: false, autoRefreshToken: false },

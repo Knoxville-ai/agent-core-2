@@ -37,9 +37,16 @@ const Schema = z.object({
   // Shim ↔ openclaw auth
   OPENCLAW_GATEWAY_TOKEN: z.string().min(16),
 
-  // Supabase
+  // Supabase. SUPABASE_URL is public (project URL; also where the shim finds
+  // the project JWKS). The service-role key is only needed while the console
+  // does not offer the agent data API: when PLATFORM_AGENT_DATA_URL and
+  // PLATFORM_API_TOKEN are set, every data path goes through that API, scoped
+  // to this agent, and the key is unused (see agent-data/client.ts).
   SUPABASE_URL: z.string().url(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().optional().default(""),
+  // Console agent data API (POST, authenticated by PLATFORM_API_TOKEN). Set by
+  // the console when it offers the API.
+  PLATFORM_AGENT_DATA_URL: z.string().url().optional(),
 
   // Model
   LLM_PROVIDER: z.string().min(1),
@@ -465,6 +472,14 @@ const Schema = z.object({
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional().default("info"),
 }).superRefine((env, ctx) => {
+  if (!env.SUPABASE_SERVICE_ROLE_KEY && !(env.PLATFORM_AGENT_DATA_URL && env.PLATFORM_API_TOKEN)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["SUPABASE_SERVICE_ROLE_KEY"],
+      message:
+        "required unless the console provides the agent data API (PLATFORM_AGENT_DATA_URL + PLATFORM_API_TOKEN)",
+    });
+  }
   if (env.LLM_AUTH_MODE === "oauth" && !env.OPENCLAW_AUTH_PROFILE_SECRET_KEY) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
