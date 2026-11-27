@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { log } from "../log.js";
+import { childEnv } from "../openclaw/child-env.js";
 import type { InstalledSkill } from "./resolver.js";
 
 /**
@@ -262,7 +263,7 @@ interface ExecResult {
  *  in the resolved value so callers can soft-fail. */
 function exec(cmd: string, args: string[], timeoutMs: number): Promise<ExecResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: process.env });
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: childEnv() });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (c: Buffer) => {

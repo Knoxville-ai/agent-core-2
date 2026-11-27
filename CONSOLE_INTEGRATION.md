@@ -374,6 +374,57 @@ touches three vessel behaviors:
   told the caller identity is platform-asserted even though the operator-approved
   credentials are available to its tools.
 
+## Exec environment and process isolation
+
+Every process in the container runs as the `agent` uid, including the commands
+the model starts through openclaw's `exec` tool. openclaw builds each command's
+environment from the gateway's own environment, so the shim decides what the
+gateway is started with (`src/openclaw/child-env.ts`, used for every process the
+shim spawns):
+
+- **Platform configuration is withheld** unless allowlisted: every variable
+  `src/env.ts` declares, plus `AGENT_SUPABASE_SECRET_KEY`,
+  `LLM_API_KEY_CREDENTIAL_ID`, `OPENCLAW_MODEL_ROUTE`, the `RAILWAY_*` and
+  `PLATFORM_*` namespaces, and any name containing `SERVICE_ROLE` or
+  `JWT_SECRET`. So `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+  `SUPABASE_JWT_SECRET`, `PLATFORM_API_TOKEN`, `PLATFORM_MCP_URL`,
+  `LLM_API_KEY`, `OPENCLAW_MCP_SERVERS` and the rest never reach a command. A
+  variable added to `env.ts` is withheld until it is added to
+  `CHILD_PLATFORM_ALLOW`.
+- **Allowlisted platform variables**: `AGENT_HTTP_PORT`, `OPENCLAW_GATEWAY_PORT`,
+  `OPENCLAW_STATE_DIR`, `OPENCLAW_AUTH_PROFILE_SECRET_KEY` (openclaw reads it to
+  decrypt the model OAuth store), `OPENCLAW_GATEWAY_TOKEN` (the knox plugins'
+  loopback bearer), and the non-secret `AGENT_UID` / `AGENT_ORG` / `AGENT_ROLE`.
+- **Customer variables pass unchanged**: credential-bound aliases, Environment
+  tab values, phone-provider keys, `GOOGLE_CSE_*`. Skills read these in exec.
+- Image variables (`PATH`, `HOME`, `LANG`, `NODE_ENV`, `NPM_CONFIG_PREFIX`,
+  `PLAYWRIGHT_BROWSERS_PATH`, `U2NET_HOME`, ...) pass; openclaw's own host-env
+  policy then strips its blocklist (`NODE_OPTIONS`, `LD_*`, `GITHUB_TOKEN`, ...).
+
+`openclaw skills check` runs with the same environment, so a skill whose
+`requires.env` names a withheld platform variable is reported `ineligible`.
+
+The git credential helper (`docker/git-credential-env`) reads the platform MCP
+URL and token from the `knoxville_platform` entry of `openclaw.json` instead of
+the environment.
+
+**`/proc`.** Removing a variable from an environment does not hide the value a
+process was started with: a same-uid process can read `/proc/<pid>/environ` and
+`/proc/<pid>/mem`. The shim and the gateway therefore mark themselves
+non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`) at startup and set `no_new_privs`,
+through a small Node-API addon built from `docker/knox-prctl.c` in its own
+Dockerfile stage (`src/openclaw/process-hardening.ts`; the gateway does it in
+`src/openclaw/knox-gateway-preload.ts`, loaded via `NODE_OPTIONS`). The kernel
+resets the flag on `execve`, so exec commands stay ordinary processes. A
+hardening failure is logged (`shim process hardening incomplete` /
+`gateway process hardening`) and never stops boot.
+
+Not covered by this: files the agent uid can read (`openclaw.json` holds the
+gateway auth token, the platform MCP bearer, `LLM_API_KEY` and inline MCP
+secrets; session transcripts), and the environment of other exec commands
+running at the same time. Closing those needs exec commands under a separate
+uid or sandbox.
+
 ## Storage contract (unchanged from CONTRACT.md)
 
 The shim reads/writes the same paths the console already manages:

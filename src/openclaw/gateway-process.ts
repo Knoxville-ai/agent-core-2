@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
+import { childEnv, withheldNames } from "./child-env.js";
+import { nodeOptionsWithPreload } from "./preload-options.js";
 import { ensureOpenclawTempDir } from "./temp-dir.js";
 
 /**
@@ -23,6 +25,13 @@ import { ensureOpenclawTempDir } from "./temp-dir.js";
  * We override OPENCLAW_HOME (and HOME for good measure) in the spawn
  * env to the *parent* of our state dir so any subprocess that re-derives
  * a path from $OPENCLAW_HOME/.openclaw lands at the right place.
+ *
+ * The gateway's environment is also the base of every exec tool command's
+ * environment, so it is built by `childEnv` (./child-env.ts): platform
+ * configuration is withheld unless allowlisted, customer variables pass. The
+ * preload ./knox-gateway-preload.ts (via NODE_OPTIONS) makes the gateway
+ * non-dumpable before openclaw loads, so those commands can't read the
+ * gateway's environment or memory through /proc either.
  *
  * We deliberately do NOT implement crash-restart in-process: Railway already
  * restarts the container on exit, and a gateway crash usually means the
@@ -53,17 +62,19 @@ export class GatewayProcess {
       userHome,
       configPath,
       tempDir,
+      // Names only: what the gateway (and so every exec command) is NOT given.
+      withheld: withheldNames(),
     });
 
     const child = spawn("openclaw", ["gateway", "--port", port, "--verbose"], {
-      env: {
-        ...process.env,
+      env: childEnv({
         HOME: userHome,
         OPENCLAW_HOME: userHome,
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
         TMPDIR: tempDir,
-      },
+        NODE_OPTIONS: nodeOptionsWithPreload(process.env.NODE_OPTIONS),
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.child = child;

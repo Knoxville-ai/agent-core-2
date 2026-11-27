@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const Schema = z.object({
+const BaseSchema = z.object({
   // Agent identity
   AGENT_UID: z.string().regex(/^[0-9a-f]{16}$/, "AGENT_UID must be 16-char lowercase hex"),
   AGENT_ORG: z.string().min(1),
@@ -449,7 +449,9 @@ const Schema = z.object({
   OPENCLAW_STATE_DIR: z.string().default("/home/agent/.openclaw"),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional().default("info"),
-}).superRefine((env, ctx) => {
+});
+
+const Schema = BaseSchema.superRefine((env, ctx) => {
   if (env.LLM_AUTH_MODE === "oauth" && !env.OPENCLAW_AUTH_PROFILE_SECRET_KEY) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -477,6 +479,12 @@ const Schema = z.object({
 });
 
 export type AgentEnv = z.infer<typeof Schema>;
+
+/** Every variable name the vessel itself declares: platform configuration,
+ *  never customer data. ../openclaw/child-env.ts withholds these from the
+ *  processes the shim starts unless it lists one as needed there, so a new
+ *  platform variable added above stays out of exec commands by default. */
+export const AGENT_ENV_KEYS: readonly string[] = Object.freeze(Object.keys(BaseSchema.shape));
 
 export function loadEnv(): AgentEnv {
   const parsed = Schema.safeParse(process.env);

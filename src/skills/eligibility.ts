@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 
 import { log } from "../log.js";
+import { childEnv } from "../openclaw/child-env.js";
 import { ensureOpenclawTempDir } from "../openclaw/temp-dir.js";
 
 /**
@@ -113,13 +114,12 @@ export function openclawEligibilityChecker(opts: OpenclawEligibilityOptions): El
       let child;
       try {
         child = spawn(binary, ["skills", "check", "--json"], {
-          env: {
-            ...process.env,
+          env: childEnv({
             HOME: userHome,
             OPENCLAW_HOME: userHome,
             OPENCLAW_STATE_DIR: opts.stateDir,
             TMPDIR: tempDir,
-          },
+          }),
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (err) {
