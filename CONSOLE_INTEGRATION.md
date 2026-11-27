@@ -290,6 +290,33 @@ each bundle capability's ClawHub skill (`openclaw skills install <ref> --version
 the bundle's pin wins, soft-fail per skill), then their Python deps. The lock is
 cleared. A skill in neither source is not persisted across restarts.
 
+### ClawHub content pinning (both modes)
+
+Every ClawHub install (bundle refs, boot list, the plan's `legacy[]`, the
+deprecated `/skills/install`) is content-checked before it is used. The vessel
+computes `manifestDigest` over the installed folder — the same digest as a
+library version's `content_sha256` — leaving out the top-level `.clawhub/`,
+`.clawdhub/` and `.openclaw/` install metadata, and refusing symlinks. Then:
+
+| Expected hash sent? | `CLAWHUB_INTEGRITY` | Result |
+| --- | --- | --- |
+| yes — bundle `skill.integrityHash`, boot-list entry `integrityHash`, or plan `legacy[].integrity_sha256` (64 hex, optional `sha256:` prefix) | any | must match, else refused |
+| no | `require` | refused |
+| no | unset / `pin` (default) | trust on first use: the digest is pinned per `<slug>@<installed version>` in `$OPENCLAW_STATE_DIR/clawhub-pins.json`; a later install of the same version with different content is refused |
+
+A refused install's folder is removed; a bundle skill then fails the boot (as any
+bundle install failure does), a boot-list skill is skipped, a `legacy[]` skill is
+reported `failed`. An expected hash always wins over (and replaces) an older pin,
+which is also how to accept a legitimately re-published version. A
+`legacy[]` entry with `integrity_sha256` is locked as
+`clawhub:<version>:<hash>`, so adding a hash triggers one verified reinstall.
+
+**Transition.** Today's consoles send no ClawHub hashes, so the default is
+`pin`. Once the console records the digest at approval time and sends it for
+every ClawHub entry (or every agent runs in library mode with ClawHub skills
+mirrored into the library), set `CLAWHUB_INTEGRITY=require` fleet-wide, then
+make `require` the default here and drop the trust-on-first-use path.
+
 ## Bring your own agent (BYOA)
 
 A third party can list a self-hosted drive thru whose agent runs on their
