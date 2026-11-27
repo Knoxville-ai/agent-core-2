@@ -15,6 +15,14 @@ import {
 } from "./outcome.js";
 import { inlineArtifactFile, isPublishArtifactTool, workspaceDir } from "./artifact.js";
 
+// Bearer for the shim's /internal/* loopback routes: a per-boot token the
+// shim hands the gateway process through its preload (never an env var, so
+// exec commands cannot read it). See src/openclaw/gateway-auth.ts.
+function loopbackToken() {
+  const token = process[Symbol.for("knox.pluginLoopbackToken")];
+  return typeof token === "string" ? token : "";
+}
+
 /**
  * Knox report-outcome injector — the OpenClaw half of per-session outcome
  * tracking (knoxville-ai-console migration 0039).
@@ -111,7 +119,7 @@ async function stampVoiceSession(event, ctx) {
 /** GET the shim's loopback voice-session → conversation link. */
 async function voiceConversationLookup(sessionKey) {
   const port = process.env.AGENT_HTTP_PORT || "8080";
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  const token = loopbackToken();
   try {
     const res = await fetch(
       `http://127.0.0.1:${port}/internal/voice-conversation?session_key=${encodeURIComponent(sessionKey ?? "")}`,

@@ -7,6 +7,14 @@ import {
   isWebchatSessionKey,
 } from "./context.js";
 
+// Bearer for the shim's /internal/* loopback routes: a per-boot token the
+// shim hands the gateway process through its preload (never an env var, so
+// exec commands cannot read it). See src/openclaw/gateway-auth.ts.
+function loopbackToken() {
+  const token = process[Symbol.for("knox.pluginLoopbackToken")];
+  return typeof token === "string" ? token : "";
+}
+
 /**
  * Knox voice context — tells the agent, on every consult the realtime voice
  * makes during a phone call, who is on the line (from the shim's call mirror,
@@ -42,7 +50,7 @@ export default definePluginEntry({
 
 async function lookup(sessionKey) {
   const port = process.env.AGENT_HTTP_PORT || "8080";
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  const token = loopbackToken();
   try {
     const res = await fetch(
       `http://127.0.0.1:${port}/internal/voice-conversation?session_key=${encodeURIComponent(sessionKey)}`,

@@ -2,6 +2,7 @@ import type { ServerResponse } from "node:http";
 
 import type { AgentEnv } from "../env.js";
 import { sendJson } from "./util.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 
 export function handleHealth(res: ServerResponse): void {
   sendJson(res, 200, { ok: true, service: "agent-core", role: "vessel" });
@@ -22,7 +23,7 @@ export async function handleReady(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 2_000);
     const probe = await fetch(url, {
-      headers: { Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}` },
+      headers: { Authorization: `Bearer ${gatewayAuthToken(env)}` },
       signal: controller.signal,
     });
     clearTimeout(timer);

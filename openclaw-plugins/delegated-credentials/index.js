@@ -2,6 +2,14 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 import { buildInjectedParams, isExecTool, parseCredentialsResponse } from "./inject.js";
 
+// Bearer for the shim's /internal/* loopback routes: a per-boot token the
+// shim hands the gateway process through its preload (never an env var, so
+// exec commands cannot read it). See src/openclaw/gateway-auth.ts.
+function loopbackToken() {
+  const token = process[Symbol.for("knox.pluginLoopbackToken")];
+  return typeof token === "string" ? token : "";
+}
+
 /**
  * Knox delegated-credentials injector — the OpenClaw half of the platform-brokered
  * A2A credential consumer.
@@ -14,9 +22,10 @@ import { buildInjectedParams, isExecTool, parseCredentialsResponse } from "./inj
  * would standalone.
  *
  * Boundaries this plugin keeps:
- *   - The secrets travel shim -> plugin over a LOOPBACK route, gateway-token
- *     authed. They never enter the model prompt, the tool-call the model emitted,
- *     or the transcript (this hook rewrites tool *execution* params only).
+ *   - The secrets travel shim -> plugin over a LOOPBACK route that takes the
+ *     plugin loopback token (held only by the gateway process) plus the exact
+ *     session key. They never enter the model prompt, the tool-call the model
+ *     emitted, or the transcript (this hook rewrites tool *execution* params only).
  *   - NEVER logs the secret VALUES. It DOES log a redacted diagnostic (session
  *     key, fetch status, and credential NAMES) so a delegated turn is traceable
  *     end-to-end — the same names-only rule the shim's staging log follows.
@@ -29,14 +38,12 @@ import { buildInjectedParams, isExecTool, parseCredentialsResponse } from "./inj
 
 const FETCH_TIMEOUT_MS = 2000;
 
-// Read the loopback port + gateway token at CALL time, not module-load time.
-// OpenClaw loads this plugin in more than one context during a run; capturing
-// `process.env` at import time risks binding an empty token in a realm that was
-// evaluated before the env was populated. Reading lazily always sees the live
-// process env of whatever realm the hook fires in.
+// Read the loopback port + token at CALL time, not module-load time. OpenClaw
+// loads this plugin in more than one context during a run; reading lazily
+// always sees the live process state of whatever realm the hook fires in.
 function loopbackConfig() {
   const port = process.env.AGENT_HTTP_PORT || "8080";
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  const token = loopbackToken();
   return { port, token, url: `http://127.0.0.1:${port}/internal/delegated-credentials` };
 }
 

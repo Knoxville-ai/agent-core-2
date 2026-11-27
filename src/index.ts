@@ -4,6 +4,7 @@ import { resolveDataAccess } from "./agent-data/client.js";
 import { log } from "./log.js";
 import { GatewayProcess } from "./openclaw/gateway-process.js";
 import { maybeStartOllama } from "./openclaw/ollama-process.js";
+import { hardenProcess } from "./openclaw/process-hardening.js";
 import { refreshManifest } from "./provision/manifest.js";
 import { restoreOAuthStore } from "./provision/oauth-store.js";
 import { assertStateDirWritable } from "./provision/state-dir.js";
@@ -25,6 +26,14 @@ import { cliSpeaker, PhoneNotifier, phoneNotify, telnyxSms } from "./voice/notif
 import { MessagingDB } from "./shim/supabase-db.js";
 
 async function main(): Promise<void> {
+  // First: make this process non-dumpable (and set no_new_privs) so the exec
+  // tool's commands, which run under the same uid, can't read the platform
+  // secrets in this process's environment or memory through /proc. See
+  // openclaw/process-hardening.ts. Best-effort; the result is logged.
+  const hardening = hardenProcess({ noNewPrivs: true });
+  if (hardening.error) log.error("shim process hardening incomplete", { ...hardening });
+  else log.info("shim process hardening", { ...hardening });
+
   const env = loadEnv();
   log.info("agent-core starting", {
     uid: env.AGENT_UID,

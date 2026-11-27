@@ -414,6 +414,70 @@ touches three vessel behaviors:
   told the caller identity is platform-asserted even though the operator-approved
   credentials are available to its tools.
 
+## Exec environment and process isolation
+
+Every process in the container runs as the `agent` uid, including the commands
+the model starts through openclaw's `exec` tool. openclaw builds each command's
+environment from the gateway's own environment, so the shim decides what the
+gateway is started with (`src/openclaw/child-env.ts`, used for every process the
+shim spawns):
+
+- **Platform configuration is withheld** unless allowlisted: every variable
+  `src/env.ts` declares, plus `AGENT_SUPABASE_SECRET_KEY`,
+  `LLM_API_KEY_CREDENTIAL_ID`, `OPENCLAW_MODEL_ROUTE`, the `RAILWAY_*` and
+  `PLATFORM_*` namespaces, and any name containing `SERVICE_ROLE` or
+  `JWT_SECRET`. So `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+  `SUPABASE_JWT_SECRET`, `PLATFORM_API_TOKEN`, `PLATFORM_MCP_URL`,
+  `LLM_API_KEY`, `OPENCLAW_MCP_SERVERS` and the rest never reach a command. A
+  variable added to `env.ts` is withheld until it is added to
+  `CHILD_PLATFORM_ALLOW`.
+- **Allowlisted platform variables**: `AGENT_HTTP_PORT`, `OPENCLAW_GATEWAY_PORT`,
+  `OPENCLAW_STATE_DIR`, `OPENCLAW_AUTH_PROFILE_SECRET_KEY` (openclaw reads it to
+  decrypt the model OAuth store), and the non-secret `AGENT_UID` / `AGENT_ORG` /
+  `AGENT_ROLE`. `OPENCLAW_GATEWAY_TOKEN` is **not** passed.
+- **Customer variables pass unchanged**: credential-bound aliases, Environment
+  tab values, phone-provider keys, `GOOGLE_CSE_*`. Skills read these in exec.
+- Image variables (`PATH`, `HOME`, `LANG`, `NODE_ENV`, `NPM_CONFIG_PREFIX`,
+  `PLAYWRIGHT_BROWSERS_PATH`, `U2NET_HOME`, ...) pass; openclaw's own host-env
+  policy then strips its blocklist (`NODE_OPTIONS`, `LD_*`, `GITHUB_TOKEN`, ...).
+
+`openclaw skills check` runs with the same environment, so a skill whose
+`requires.env` names a withheld platform variable is reported `ineligible`.
+
+**Loopback credentials** (`src/openclaw/gateway-auth.ts`):
+
+| Credential | Who presents it | Where it lives |
+| --- | --- | --- |
+| `OPENCLAW_GATEWAY_TOKEN` | console → shim `/files`, `/skills` | shim only (env) |
+| gateway auth token = HMAC(`OPENCLAW_GATEWAY_TOKEN`, fixed context) | shim → gateway | `openclaw.json` `gateway.auth.token` |
+| plugin loopback token (random per boot) | knox plugins → shim `/internal/*` | shim memory; gateway memory via fd 3 → `process[Symbol.for("knox.pluginLoopbackToken")]` |
+
+`/internal/*` routes accept only the plugin loopback token; the console's
+token and the gateway auth token get a 401 there.
+
+The git credential helper (`docker/git-credential-env`) reads the platform MCP
+URL and token from the `knoxville_platform` entry of `openclaw.json` instead of
+the environment.
+
+**`/proc`.** Removing a variable from an environment does not hide the value a
+process was started with: a same-uid process can read `/proc/<pid>/environ` and
+`/proc/<pid>/mem`. The shim and the gateway therefore mark themselves
+non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`) at startup and set `no_new_privs`,
+through a small Node-API addon built from `docker/knox-prctl.c` in its own
+Dockerfile stage (`src/openclaw/process-hardening.ts`; the gateway does it in
+`src/openclaw/knox-gateway-preload.ts`, loaded via `NODE_OPTIONS`). The kernel
+resets the flag on `execve`, so exec commands stay ordinary processes. A
+hardening failure is logged (`shim process hardening incomplete` /
+`gateway process hardening`) and never stops boot.
+
+Not covered by this: files the agent uid can read (`openclaw.json` holds the
+gateway auth token, the platform MCP bearer, `LLM_API_KEY` and inline MCP
+secrets; the session store and transcripts), what can be done with them (the
+gateway auth token opens the gateway's own HTTP API on loopback, which can run
+a turn under any session key), and the environment of other exec commands
+running at the same time, delegated credentials included. Closing those needs
+exec commands under a separate uid or sandbox.
+
 ## Storage contract (unchanged from CONTRACT.md)
 
 The shim reads/writes the same paths the console already manages:
@@ -703,8 +767,8 @@ concurrent tasks never share a lookup key, so they can never see each other's
 secrets.
 
 Verified against openclaw 2026.5.20 — the chain is worth recording, because an
-earlier version of this document (and the comment in `knox-python3-shim.py`)
-asserted the opposite and that mistake cost a lot of throughput:
+earlier version of this document asserted the opposite and that mistake cost a
+lot of throughput:
 
 | Step | Where |
 | --- | --- |
@@ -716,28 +780,23 @@ asserted the opposite and that mistake cost a lot of throughput:
 | plugin injects `params.env` | `openclaw-plugins/delegated-credentials` |
 | exec accepts a per-call env map | `dist/bash-tools.schemas` (`env: Type.Optional(Type.Record(...))`) |
 
-There is a second, weaker injector — the exec shim
-(`docker/knox-python3-shim.py`), which runs *inside* the subprocess. openclaw
-gives that subprocess no session key, so it can only ask for "the single live
-delegated turn" (`DelegatedCredentialStore.currentSingle`) and must return
-nothing when several overlap. That is fail-closed and safe, but it caps delegated
-throughput at one turn at a time. The plugin now stamps
-`KNOX_DELEGATED_CREDS_INJECTED` into the injected env, and the shim stands down
-when it sees it — so the parallel-safe path always wins and the shim only matters
-where the plugin does not fire at all.
+The plugin is the only injector. Its lookup,
+`GET /internal/delegated-credentials?session_key=<key>`, requires both the
+plugin loopback token (401 without it) and the exact session key (400 without
+it); there is no "whichever delegated turn is live" mode. The loopback token is
+random per shim process, handed to the gateway over an inherited pipe and kept
+in a process-local slot, so it is in no environment and no file (see
+[Exec environment and process isolation](#exec-environment-and-process-isolation)).
+Nothing inside an exec subprocess looks credentials up.
 
-**If the plugin path is unavailable** (an openclaw old enough to skip
-`before_tool_call` on the embedded run, a `tools.profile` that strips plugins, an
-exec host that bypasses the wrapper), set `AGENT_DELEGATED_TASK_MODE=serial`.
-That restores a lane of one for credential-carrying tasks, keeping
-`currentSingle` correct by construction at the cost of delegated throughput.
-Ordinary tasks are never blocked behind that lane in either mode, and a
-delegation that shares no credentials is never put in it (the console tells the
-vessel via `shares_credentials` on the start payload).
+`AGENT_DELEGATED_TASK_MODE=serial` still restores a lane of one for
+credential-carrying tasks. Ordinary tasks are never blocked behind that lane in
+either mode, and a delegation that shares no credentials is never put in it (the
+console tells the vessel via `shares_credentials` on the start payload).
 
-The symptom of the plugin not firing is skills reporting missing credentials
-under concurrency, with `[delegated-credentials] N delegated turns live at once`
-in the vessel log. That log line is the signal to flip the mode.
+The symptom of the plugin not firing is skills reporting missing credentials,
+with no `[knox-delegated-credentials] exec hook` line (or a non-200 `status=`
+on it) in the vessel log.
 
 ### Session keys
 

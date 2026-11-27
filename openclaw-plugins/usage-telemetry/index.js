@@ -17,7 +17,7 @@ import { loopbackConfig, normalizeUsageEvent } from "./usage.js";
  *
  * The `llm_output` hook fires ONE LEVEL UP, per model call, with the normalized
  * `{input, output, cacheRead, cacheWrite, total}` intact. We forward each sample
- * to the shim over the same loopback + gateway-token channel the
+ * to the shim over the same loopback channel (plugin loopback token) the
  * delegated-credentials plugin uses, and the shim folds the totals into the
  * assistant row's `token_usage`.
  *

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { log } from "../log.js";
+import { childEnv } from "../openclaw/child-env.js";
 import type { InstalledSkill } from "./resolver.js";
 
 /**
@@ -331,7 +332,7 @@ function exec(
   cmd: string,
   args: string[],
   timeoutMs: number,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = childEnv(),
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env });
@@ -451,7 +452,7 @@ export function packageIndexUrl(env: NodeJS.ProcessEnv = process.env): string {
 
 /** The installer child's env: the parent env minus every index/source override,
  *  with pip's config files disabled. */
-export function installerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function installerEnv(env: NodeJS.ProcessEnv = childEnv()): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...env };
   for (const key of INDEX_ENV_VARS) delete out[key];
   out.PIP_CONFIG_FILE = "/dev/null";

@@ -7,6 +7,7 @@ import { log } from "../log.js";
 import type { AgentEnv } from "../env.js";
 import { agentDataClientFromEnv, type AgentDataClient } from "../agent-data/client.js";
 import { LLM_COMPLETE_PATH } from "../shim/conversation-title.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 
 /**
  * Phone calls → the console.
@@ -832,7 +833,7 @@ export function llmCompleteSummarizer(env: AgentEnv, fetchImpl: typeof fetch = f
       const res = await fetchImpl(`http://127.0.0.1:${env.OPENCLAW_GATEWAY_PORT}${LLM_COMPLETE_PATH}`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`,
+          Authorization: `Bearer ${gatewayAuthToken(env)}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(request),

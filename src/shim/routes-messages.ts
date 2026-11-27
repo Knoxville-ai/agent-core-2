@@ -50,6 +50,7 @@ import {
   parseStoredMcq,
   SentinelFilter,
 } from "./mcq.js";
+import { gatewayAuthToken } from "../openclaw/gateway-auth.js";
 
 /**
  * POST /api/v1/conversations/:id/messages
@@ -532,7 +533,7 @@ export async function handleSendMessage(
     const upstream = await fetchOpenclawStream(gatewayUrl, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.OPENCLAW_GATEWAY_TOKEN}`,
+        Authorization: `Bearer ${gatewayAuthToken(env)}`,
         "Content-Type": "application/json",
         Accept: "text/event-stream",
         "x-openclaw-session-key": sessionKey,

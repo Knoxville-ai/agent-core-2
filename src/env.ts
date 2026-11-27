@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const Schema = z.object({
+const BaseSchema = z.object({
   // Agent identity
   AGENT_UID: z.string().regex(/^[0-9a-f]{16}$/, "AGENT_UID must be 16-char lowercase hex"),
   AGENT_ORG: z.string().min(1),
@@ -320,16 +320,12 @@ const Schema = z.object({
   //     so every concurrent task gets exactly its own caller's secrets. This is
   //     what an SME agent whose whole job is accepting delegations needs.
   //
-  //   serial — at most ONE credential-carrying task at a time. The fallback for
-  //     a deployment where the plugin path is not available (an openclaw old
-  //     enough that the embedded run skips before_tool_call, a tools.profile
-  //     that strips plugins, an exec host that bypasses the wrapper). There the
-  //     only injector is the exec shim, which openclaw gives no session key and
-  //     which therefore fails closed whenever two delegated turns overlap —
-  //     correct, but it caps delegated throughput at 1.
+  //   serial — at most ONE credential-carrying task at a time, for operators
+  //     who want delegated work serialized. Credentials are still injected only
+  //     by the plugin, per session; there is no session-less fallback.
   //
-  // Flip to `serial` if skills start reporting missing credentials under load;
-  // that is the signature of the plugin path not firing. See
+  // If skills report missing credentials, the plugin path is not firing (check
+  // the `[knox-delegated-credentials] exec hook` log lines). See
   // CONSOLE_INTEGRATION.md "Credentials on a delegated task".
   AGENT_DELEGATED_TASK_MODE: z
     .enum(["parallel", "serial"])
@@ -471,7 +467,9 @@ const Schema = z.object({
   OPENCLAW_STATE_DIR: z.string().default("/home/agent/.openclaw"),
 
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).optional().default("info"),
-}).superRefine((env, ctx) => {
+});
+
+const Schema = BaseSchema.superRefine((env, ctx) => {
   if (!env.SUPABASE_SERVICE_ROLE_KEY && !(env.PLATFORM_AGENT_DATA_URL && env.PLATFORM_API_TOKEN)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -507,6 +505,12 @@ const Schema = z.object({
 });
 
 export type AgentEnv = z.infer<typeof Schema>;
+
+/** Every variable name the vessel itself declares: platform configuration,
+ *  never customer data. ../openclaw/child-env.ts withholds these from the
+ *  processes the shim starts unless it lists one as needed there, so a new
+ *  platform variable added above stays out of exec commands by default. */
+export const AGENT_ENV_KEYS: readonly string[] = Object.freeze(Object.keys(BaseSchema.shape));
 
 export function loadEnv(): AgentEnv {
   const parsed = Schema.safeParse(process.env);

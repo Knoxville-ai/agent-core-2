@@ -29,6 +29,7 @@ import {
   handleDelegatedCredentialsLookup,
   handleLlmUsageIngest,
   handleToolCallIngest,
+  requirePluginToken,
 } from "./routes-internal.js";
 import { UsageAccumulator } from "./usage-telemetry.js";
 import { ToolCallHub } from "./tool-telemetry.js";
@@ -235,23 +236,24 @@ async function route(
   }
 
   // Loopback credential lookup for the gateway's before_tool_call plugin.
-  // Gateway-token authed like /files; returns the delegated creds staged for a
-  // session's current turn so the plugin can inject them into the skill env.
-  // The only caller is the in-container gateway plugin over loopback.
+  // Authed with the plugin loopback token (only the gateway process holds it)
+  // and bound to an exact session key; returns the delegated creds staged for
+  // that session's current turn so the plugin can inject them into its exec
+  // call. The only caller is the in-container gateway plugin over loopback.
   if (path === "/internal/delegated-credentials") {
     if (method !== "GET") throw new HttpError(405, "method not allowed");
     return handleDelegatedCredentialsLookup(url, req, res, env, delegatedCreds);
   }
 
   // Per-model-call token usage from the knox-usage-telemetry openclaw plugin.
-  // Same loopback + gateway-token trust anchor as the credential lookup above.
+  // Same plugin loopback token as the credential lookup above.
   if (path === "/internal/llm-usage") {
     if (method !== "POST") throw new HttpError(405, "method not allowed");
     return handleLlmUsageIngest(req, res, env, usage);
   }
 
   // Per-tool-call telemetry from the knox-tool-telemetry openclaw plugin. Same
-  // loopback + gateway-token trust anchor as the usage ingest above. Records
+  // plugin loopback token as the usage ingest above. Records
   // each tool call the agent makes to `agent_tool_calls` for in-session
   // surfacing, audit, and per-tool-call billing.
   if (path === "/internal/tool-call") {
@@ -262,11 +264,11 @@ async function route(
   // Which console conversation a live phone call's voice session belongs to,
   // for the knox-report-outcome plugin: a platform tool called mid-call
   // (start_task, report_outcome, ...) gets that conversation stamped on, so a
-  // background task's card and result land in the call's thread. Same loopback
-  // + gateway-token trust anchor as the routes above. See ../voice/call-mirror.ts.
+  // background task's card and result land in the call's thread. Same plugin
+  // loopback token as the routes above. See ../voice/call-mirror.ts.
   if (path === "/internal/voice-conversation") {
     if (method !== "GET") throw new HttpError(405, "method not allowed");
-    requireGatewayToken(req.headers.authorization, env);
+    requirePluginToken(req.headers.authorization);
     return sendJson(res, 200, voiceConversations.lookup(url.searchParams.get("session_key")));
   }
 

@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { log } from "../log.js";
 import type { SkillRequirement } from "../bundle/types.js";
+import { childEnv } from "../openclaw/child-env.js";
 import { ensureOpenclawTempDir } from "../openclaw/temp-dir.js";
 import { clawhubIntegrityMode, verifyClawhubInstall, type ClawhubIntegrityMode } from "./clawhub-integrity.js";
 import type { InstalledSkill, SkillResolver } from "./resolver.js";
@@ -121,13 +122,12 @@ export class ClawhubSkillResolver implements SkillResolver {
     const tempDir = ensureOpenclawTempDir(this.stateDir);
     return await new Promise((resolve, reject) => {
       const child = spawn(this.binary, args, {
-        env: {
-          ...process.env,
+        env: childEnv({
           HOME: userHome,
           OPENCLAW_HOME: userHome,
           OPENCLAW_STATE_DIR: this.stateDir,
           TMPDIR: tempDir,
-        },
+        }),
         stdio: ["ignore", "pipe", "pipe"],
       });
       let stdout = "";
