@@ -34,6 +34,16 @@ describe("parseBootList", () => {
     expect(reqs).toEqual([{ source: "clawhub", ref: "a", version: "1" }]);
   });
 
+  it("passes an entry's integrityHash through to the requirement", () => {
+    const h = "c".repeat(64);
+    expect(
+      parseBootList({ skills: [{ slug: "a", version: "1", integrityHash: h }, { slug: "b", integrityHash: "" }] }),
+    ).toEqual([
+      { source: "clawhub", ref: "a", version: "1", integrityHash: h },
+      { source: "clawhub", ref: "b", version: "" },
+    ]);
+  });
+
   it("returns [] for absent / malformed documents", () => {
     expect(parseBootList(null)).toEqual([]);
     expect(parseBootList({})).toEqual([]);

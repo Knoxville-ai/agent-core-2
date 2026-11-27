@@ -154,6 +154,16 @@ gateway starts), `nudge` (`POST /skills/sync`), `poll` (`SKILL_SYNC_POLL_MS`).
    `.skills-trash`, staging → `skills/<slug>`, trash removed, lock updated.
    Size limits and description length are the console's publishing policy and
    are never a reason for the vessel to refuse a skill.
+   **`install.uv` grammar.** Each entry must be `name[extras] <op> version, …`
+   (PEP 508 without direct references or markers: `mcp>=1.9.0`,
+   `playwright[chromium]>=1.40,<2`, `requests (>=2.28)`). An entry that is an
+   option (`-e`, `--index-url`, …), a URL / VCS / `name @ …` reference, a local
+   path or archive, or carries a `;` marker makes the skill `failed`
+   (`refused install.uv requirement(s): …`) and nothing is installed; the
+   legacy union install drops just that entry. Installs use one package index —
+   `SKILL_DEPS_INDEX_URL` (https only), else an image-set `UV_DEFAULT_INDEX` /
+   `UV_INDEX_URL` / `PIP_INDEX_URL`, else PyPI — with extra-index / find-links
+   env and uv/pip config files ignored.
 3. Lock entries the plan dropped (and that aren't in `legacy`) are removed.
 4. `legacy` entries are installed with `openclaw skills install` (ClawHub) when
    not already at that version, locked as `source: "clawhub"` with
@@ -279,6 +289,33 @@ each bundle capability's ClawHub skill (`openclaw skills install <ref> --version
 (`{ "version": 1, "skills": [ { "slug", "version", "addedAt" } ] }`; additive,
 the bundle's pin wins, soft-fail per skill), then their Python deps. The lock is
 cleared. A skill in neither source is not persisted across restarts.
+
+### ClawHub content pinning (both modes)
+
+Every ClawHub install (bundle refs, boot list, the plan's `legacy[]`, the
+deprecated `/skills/install`) is content-checked before it is used. The vessel
+computes `manifestDigest` over the installed folder — the same digest as a
+library version's `content_sha256` — leaving out the top-level `.clawhub/`,
+`.clawdhub/` and `.openclaw/` install metadata, and refusing symlinks. Then:
+
+| Expected hash sent? | `CLAWHUB_INTEGRITY` | Result |
+| --- | --- | --- |
+| yes — bundle `skill.integrityHash`, boot-list entry `integrityHash`, or plan `legacy[].integrity_sha256` (64 hex, optional `sha256:` prefix) | any | must match, else refused |
+| no | `require` | refused |
+| no | unset / `pin` (default) | trust on first use: the digest is pinned per `<slug>@<installed version>` in `$OPENCLAW_STATE_DIR/clawhub-pins.json`; a later install of the same version with different content is refused |
+
+A refused install's folder is removed; a bundle skill then fails the boot (as any
+bundle install failure does), a boot-list skill is skipped, a `legacy[]` skill is
+reported `failed`. An expected hash always wins over (and replaces) an older pin,
+which is also how to accept a legitimately re-published version. A
+`legacy[]` entry with `integrity_sha256` is locked as
+`clawhub:<version>:<hash>`, so adding a hash triggers one verified reinstall.
+
+**Transition.** Today's consoles send no ClawHub hashes, so the default is
+`pin`. Once the console records the digest at approval time and sends it for
+every ClawHub entry (or every agent runs in library mode with ClawHub skills
+mirrored into the library), set `CLAWHUB_INTEGRITY=require` fleet-wide, then
+make `require` the default here and drop the trust-on-first-use path.
 
 ## Bring your own agent (BYOA)
 

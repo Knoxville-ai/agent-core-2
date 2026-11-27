@@ -6,14 +6,22 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   collectSkillDeps,
+  DEFAULT_PACKAGE_INDEX,
   depsHash,
   extractSkillKey,
   extractUvRequirements,
+  installerEnv,
+  isSafeRequirement,
   needsChromium,
+  packageIndexUrl,
+  partitionRequirements,
+  pipInstallArgs,
   parseFrontmatter,
   parseFrontmatterLines,
   provisionSkillDepsFor,
   requirementName,
+  requirementProblem,
+  uvInstallArgs,
   type DepsRunner,
 } from "./deps.js";
 
@@ -296,5 +304,175 @@ describe("provisionSkillDepsFor", () => {
     const r = runner({ interpreter: async () => null });
     const d = await skill("name: s\nmetadata:\n  openclaw:\n    install:\n      uv: [mcp]");
     expect((await provisionSkillDepsFor(d, { runner: r })).ok).toBe(false);
+  });
+});
+
+describe("requirementProblem — install.uv grammar", () => {
+  it.each([
+    "mcp",
+    "mcp>=1.9.0",
+    "playwright>=1.40",
+    "playwright[chromium]>=1.40,<2",
+    "Pillow>=10.3,<12",
+    "rembg>=2.0.56,<3",
+    "rapidocr-onnxruntime>=1.3",
+    "zope.interface==6.*",
+    "discord.py~=2.3",
+    "requests (>=2.28)",
+    "requests >= 2.28 , < 3",
+    "pkg[a, b]==1.0+local.1",
+    "pkg===1.0-custom",
+    "pkg!=1.0",
+  ])("accepts %s", (req) => {
+    expect(requirementProblem(req)).toBeNull();
+  });
+
+  it.each([
+    "pkg @ https://example.invalid/pkg.whl",
+    "pkg@https://example.invalid/pkg.whl",
+    "https://example.invalid/pkg-1.0.tar.gz",
+    "git+https://example.invalid/repo.git",
+    "pkg @ git+https://example.invalid/repo.git",
+    "--index-url=https://example.invalid/simple",
+    "--index-url https://example.invalid/simple",
+    "--extra-index-url",
+    "-i",
+    "-e .",
+    "-e",
+    "-r requirements.txt",
+    "-c constraints.txt",
+    "--find-links=/tmp",
+    "--trusted-host=example.invalid",
+    ".",
+    "./local",
+    "../pkg",
+    "/abs/path/pkg",
+    "file:///tmp/pkg",
+    "pkg.whl",
+    "pkg-1.0-py3-none-any.whl",
+    "pkg-1.0.tar.gz",
+    "pkg.zip",
+    "pkg; python_version >= '3.9'",
+    "pkg>=1.0; sys_platform == 'linux'",
+    "pkg --index-url=https://example.invalid/simple",
+    "pkg>=1.0 --pre",
+    "pkg>=-1",
+    "pkg>=1.0 other",
+    "pkg $(id)",
+    "pkg`id`",
+    "pkg\nother",
+    "pkg>=1.0\u0000",
+    "pkg[extra",
+    "pkg(>=1.0",
+    "pkg>=1.0)",
+    "pkg>=1/2",
+    "pkg>=1:2",
+    "pkg==1.0 \\",
+    "pаckage",
+    "a".repeat(201),
+  ])("refuses %j", (req) => {
+    expect(requirementProblem(req)).not.toBeNull();
+    expect(isSafeRequirement(req)).toBe(false);
+  });
+
+  it("partitions valid from refused entries", () => {
+    expect(partitionRequirements(["mcp>=1.9.0", "-e .", "httpx"])).toEqual({
+      valid: ["mcp>=1.9.0", "httpx"],
+      invalid: [{ requirement: "-e .", problem: "options are not allowed" }],
+    });
+  });
+});
+
+describe("installer command line", () => {
+  it("pins one index and passes each requirement as its own argv element", () => {
+    expect(uvInstallArgs("/opt/skills-venv/bin/python3", ["mcp>=1.9.0", "httpx"], DEFAULT_PACKAGE_INDEX)).toEqual([
+      "pip",
+      "install",
+      "--no-config",
+      "--python",
+      "/opt/skills-venv/bin/python3",
+      "--index-url",
+      "https://pypi.org/simple",
+      "mcp>=1.9.0",
+      "httpx",
+    ]);
+    expect(pipInstallArgs(["mcp>=1.9.0"], DEFAULT_PACKAGE_INDEX)).toEqual([
+      "-m",
+      "pip",
+      "install",
+      "--break-system-packages",
+      "--index-url",
+      "https://pypi.org/simple",
+      "mcp>=1.9.0",
+    ]);
+  });
+
+  it("uses an https mirror when configured, else PyPI", () => {
+    expect(packageIndexUrl({})).toBe(DEFAULT_PACKAGE_INDEX);
+    expect(packageIndexUrl({ SKILL_DEPS_INDEX_URL: "https://mirror.example.invalid/simple" })).toBe(
+      "https://mirror.example.invalid/simple",
+    );
+    expect(packageIndexUrl({ UV_INDEX_URL: "https://mirror.example.invalid/simple" })).toBe(
+      "https://mirror.example.invalid/simple",
+    );
+    expect(packageIndexUrl({ SKILL_DEPS_INDEX_URL: "http://mirror.example.invalid/simple" })).toBe(DEFAULT_PACKAGE_INDEX);
+    expect(packageIndexUrl({ SKILL_DEPS_INDEX_URL: "https://u:p@mirror.example.invalid/simple" })).toBe(
+      DEFAULT_PACKAGE_INDEX,
+    );
+    expect(packageIndexUrl({ SKILL_DEPS_INDEX_URL: "file:///tmp/index" })).toBe(DEFAULT_PACKAGE_INDEX);
+  });
+
+  it("strips every extra index / find-links override from the installer env", () => {
+    const env = installerEnv({
+      PATH: "/usr/bin",
+      HTTPS_PROXY: "http://proxy:3128",
+      UV_EXTRA_INDEX_URL: "https://x.invalid/simple",
+      UV_INDEX: "x=https://x.invalid/simple",
+      UV_FIND_LINKS: "/tmp/wheels",
+      UV_INSECURE_HOST: "x.invalid",
+      PIP_EXTRA_INDEX_URL: "https://x.invalid/simple",
+      PIP_FIND_LINKS: "/tmp/wheels",
+      PIP_TRUSTED_HOST: "x.invalid",
+      PIP_CONFIG_FILE: "/tmp/pip.conf",
+    });
+    expect(env).toEqual({ PATH: "/usr/bin", HTTPS_PROXY: "http://proxy:3128", PIP_CONFIG_FILE: "/dev/null" });
+  });
+});
+
+describe("provisionSkillDepsFor — refused requirements", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "skill-deps-refuse-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it.each([
+    ["a direct URL reference", "'pkg @ https://example.invalid/pkg.whl'"],
+    ["an index override", "'--index-url=https://example.invalid/simple'"],
+    ["an editable install", "'-e .'"],
+    ["a relative path", "'../../pkg'"],
+  ])("fails the skill without running the installer for %s", async (_label, entry) => {
+    const installs: string[][] = [];
+    const runner: DepsRunner = {
+      interpreter: async () => ({ python: "/p", venvId: "v" }),
+      install: async (_p, reqs) => {
+        installs.push(reqs);
+        return { ok: true };
+      },
+      installChromium: async () => ({ ok: true }),
+    };
+    const d = join(dir, "s");
+    await mkdir(d, { recursive: true });
+    await writeFile(
+      join(d, "SKILL.md"),
+      skillMd(`name: s\nmetadata:\n  openclaw:\n    install:\n      uv:\n        - mcp>=1.9.0\n        - ${entry}`),
+    );
+    const out = await provisionSkillDepsFor(d, { runner });
+    expect(out.ok).toBe(false);
+    expect(out.hash).toBeNull();
+    expect(out.error).toMatch(/refused install\.uv requirement/);
+    expect(installs).toEqual([]);
   });
 });

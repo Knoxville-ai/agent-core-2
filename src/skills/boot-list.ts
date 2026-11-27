@@ -13,7 +13,8 @@ import { AgentStorage } from "../provision/supabase-storage.js";
  * not persisted.
  *
  * Shape written by the console:
- *   { "version": 1, "skills": [ { "slug": string, "version": string|null, "addedAt": ISO } ] }
+ *   { "version": 1, "skills": [ { "slug": string, "version": string|null, "addedAt": ISO,
+ *                                 "integrityHash"?: sha256 hex } ] }
  */
 
 const BOOT_LIST_KEY = "config/skills.json";
@@ -40,7 +41,15 @@ export function parseBootList(file: unknown): SkillRequirement[] {
     seen.add(ref);
     const rawVersion = (entry as { version?: unknown }).version;
     const version = typeof rawVersion === "string" ? rawVersion.trim() : "";
-    out.push({ source: "clawhub", ref, version });
+    // Optional expected content digest (see ./clawhub-integrity.ts). Passed
+    // through as-is so a malformed value is refused at install, not dropped.
+    const integrityHash = (entry as { integrityHash?: unknown }).integrityHash;
+    out.push({
+      source: "clawhub",
+      ref,
+      version,
+      ...(typeof integrityHash === "string" && integrityHash.trim() !== "" ? { integrityHash } : {}),
+    });
   }
   return out;
 }

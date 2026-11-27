@@ -173,6 +173,73 @@ export function extractUvRequirements(frontmatter: unknown): string[] {
     .map((r) => r.trim());
 }
 
+// ---------------------------------------------------------------------------
+// Requirement validation
+// ---------------------------------------------------------------------------
+
+/**
+ * The only requirement shape a skill may declare: a PEP 508 subset of
+ *
+ *   name [ "[" extra, ... "]" ] [ specifier, ... ]      e.g. `mcp>=1.9.0`,
+ *   `playwright[chromium]>=1.40,<2`, `requests (>=2.28)`
+ *
+ * where a specifier is one of `~= == != <= >= < > ===` followed by a version
+ * made of `[A-Za-z0-9.*+!_-]` that starts with a letter or digit. Everything
+ * else is refused: options (`-e`, `--index-url`, `-r`), direct references
+ * (`pkg @ https://…`, `git+…`), local paths and archives, environment markers
+ * (`; …`), whitespace-separated extra tokens and anything outside ASCII. Each
+ * requirement is passed to uv/pip as ONE argv element (no shell).
+ */
+const REQ_NAME = "[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?";
+const REQ_EXTRAS = `\\[[ \\t]*${REQ_NAME}(?:[ \\t]*,[ \\t]*${REQ_NAME})*[ \\t]*\\]`;
+const REQ_SPEC = "(?:~=|===|==|!=|<=|>=|<|>)[ \\t]*[A-Za-z0-9][A-Za-z0-9.*+!_-]{0,63}";
+const REQ_SPECS = `${REQ_SPEC}(?:[ \\t]*,[ \\t]*${REQ_SPEC})*`;
+const REQUIREMENT_RE = new RegExp(
+  `^${REQ_NAME}[ \\t]*(?:${REQ_EXTRAS})?[ \\t]*(?:\\([ \\t]*${REQ_SPECS}[ \\t]*\\)|${REQ_SPECS})?$`,
+);
+/** Names pip/uv would read as a local archive file rather than a project. */
+const ARCHIVE_NAME_RE = /\.(?:whl|zip|tar|tgz|tbz2?|txz|tlz|gz|bz2|xz|lz|lzma)$/i;
+const MAX_REQUIREMENT_CHARS = 200;
+
+/** Why `req` is not an acceptable requirement, or null when it is. */
+export function requirementProblem(req: string): string | null {
+  if (typeof req !== "string" || req.trim() === "") return "empty requirement";
+  const r = req.trim();
+  if (r.length > MAX_REQUIREMENT_CHARS) return "requirement too long";
+  if (r.startsWith("-")) return "options are not allowed";
+  if (!REQUIREMENT_RE.test(r)) {
+    return "only `name[extras] <op> version` requirements are allowed (no URLs, paths, options or markers)";
+  }
+  const name = r.split(/[\s<>=!~[(]/, 1)[0] ?? "";
+  if (ARCHIVE_NAME_RE.test(name)) return "requirement looks like a local archive";
+  return null;
+}
+
+function invalidRequirementsError(invalid: { requirement: string; problem: string }[]): string {
+  return `refused install.uv requirement(s): ${invalid
+    .map((i) => `${JSON.stringify(i.requirement.slice(0, 80))} (${i.problem})`)
+    .join("; ")}`;
+}
+
+export function isSafeRequirement(req: string): boolean {
+  return requirementProblem(req) === null;
+}
+
+/** Split requirements into the acceptable ones and the refused ones (with why). */
+export function partitionRequirements(requirements: string[]): {
+  valid: string[];
+  invalid: { requirement: string; problem: string }[];
+} {
+  const valid: string[] = [];
+  const invalid: { requirement: string; problem: string }[] = [];
+  for (const r of requirements) {
+    const problem = requirementProblem(r);
+    if (problem) invalid.push({ requirement: r, problem });
+    else valid.push(r);
+  }
+  return { valid, invalid };
+}
+
 /** `metadata.openclaw.skillKey` (the `skills.entries` key OpenClaw uses for the
  *  skill), or null when the skill doesn't set one. */
 export function extractSkillKey(frontmatter: unknown): string | null {
@@ -260,9 +327,14 @@ interface ExecResult {
 /** Run a command, streaming its output through so long installs are visible in
  *  the container logs. Never rejects — failures surface as `code`/`spawnError`
  *  in the resolved value so callers can soft-fail. */
-function exec(cmd: string, args: string[], timeoutMs: number): Promise<ExecResult> {
+function exec(
+  cmd: string,
+  args: string[],
+  timeoutMs: number,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ExecResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: process.env });
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (c: Buffer) => {
@@ -324,29 +396,105 @@ async function resolveAgentPython(): Promise<AgentPython | null> {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Package index
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_PACKAGE_INDEX = "https://pypi.org/simple";
+
+/** Env vars that add or replace package sources (or relax TLS for them). The
+ *  installer child gets none of them: the one index it uses is passed
+ *  explicitly on the command line. */
+const INDEX_ENV_VARS = [
+  "UV_INDEX",
+  "UV_INDEX_URL",
+  "UV_DEFAULT_INDEX",
+  "UV_EXTRA_INDEX_URL",
+  "UV_FIND_LINKS",
+  "UV_INSECURE_HOST",
+  "UV_NO_INDEX",
+  "UV_CONFIG_FILE",
+  "PIP_INDEX_URL",
+  "PIP_EXTRA_INDEX_URL",
+  "PIP_FIND_LINKS",
+  "PIP_TRUSTED_HOST",
+  "PIP_NO_INDEX",
+  "PIP_CONFIG_FILE",
+] as const;
+
+function isHttpsUrl(v: string | undefined): v is string {
+  if (!v) return false;
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" && u.username === "" && u.password === "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The single package index skill dependencies install from. An operator can
+ * point it at a mirror with `SKILL_DEPS_INDEX_URL` (an image that already set
+ * `UV_DEFAULT_INDEX` / `UV_INDEX_URL` / `PIP_INDEX_URL` keeps that mirror);
+ * otherwise PyPI. Only an https URL without embedded credentials is accepted —
+ * anything else falls back to PyPI.
+ */
+export function packageIndexUrl(env: NodeJS.ProcessEnv = process.env): string {
+  for (const key of ["SKILL_DEPS_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "PIP_INDEX_URL"]) {
+    const v = env[key]?.trim();
+    if (!v) continue;
+    if (isHttpsUrl(v)) return v;
+    log.warn("skill deps: ignoring a package index that is not a plain https URL", { var: key });
+  }
+  return DEFAULT_PACKAGE_INDEX;
+}
+
+/** The installer child's env: the parent env minus every index/source override,
+ *  with pip's config files disabled. */
+export function installerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const key of INDEX_ENV_VARS) delete out[key];
+  out.PIP_CONFIG_FILE = "/dev/null";
+  return out;
+}
+
+/** argv for `uv pip install`: one index, no uv config discovery, and each
+ *  (already validated) requirement as its own element. */
+export function uvInstallArgs(python: string, requirements: string[], indexUrl: string): string[] {
+  return ["pip", "install", "--no-config", "--python", python, "--index-url", indexUrl, ...requirements];
+}
+
+/** argv for the `python -m pip install` fallback. */
+export function pipInstallArgs(requirements: string[], indexUrl: string): string[] {
+  return ["-m", "pip", "install", "--break-system-packages", "--index-url", indexUrl, ...requirements];
+}
+
 /** Install the pip requirements into `python`. Prefers `uv` (fast, present in
  *  the skills-venv); falls back to `pip --break-system-packages` if uv is
- *  absent or fails. */
+ *  absent or fails. Refuses any requirement outside the strict grammar
+ *  (`requirementProblem`) before anything runs. */
 async function installRequirements(
   python: string,
   requirements: string[],
 ): Promise<{ ok: boolean; error?: string }> {
+  const { invalid } = partitionRequirements(requirements);
+  if (invalid.length > 0) {
+    return { ok: false, error: invalidRequirementsError(invalid) };
+  }
+  const indexUrl = packageIndexUrl();
+  const env = installerEnv();
   // Point uv at the exact interpreter the agent uses so packages land where
   // `python3 scripts/foo.py` will import them. The target is a venv, so PEP
   // 668's externally-managed marker doesn't apply; the pip fallback still
   // passes --break-system-packages in case python3 ever resolves to a
   // system interpreter.
-  const uv = await exec("uv", ["pip", "install", "--python", python, ...requirements], INSTALL_TIMEOUT_MS);
+  const uv = await exec("uv", uvInstallArgs(python, requirements, indexUrl), INSTALL_TIMEOUT_MS, env);
   if (uv.code === 0) return { ok: true };
   log.warn("skill deps: `uv pip install` unavailable/failed, falling back to pip", {
     err: uv.spawnError ? String(uv.spawnError) : `exit ${uv.code}`,
     stderr: uv.stderr.slice(-500),
   });
-  const pip = await exec(
-    python,
-    ["-m", "pip", "install", "--break-system-packages", ...requirements],
-    INSTALL_TIMEOUT_MS,
-  );
+  const pip = await exec(python, pipInstallArgs(requirements, indexUrl), INSTALL_TIMEOUT_MS, env);
   if (pip.code === 0) return { ok: true };
   log.error("skill deps: pip install failed", {
     err: pip.spawnError ? String(pip.spawnError) : `exit ${pip.code}`,
@@ -486,6 +634,14 @@ export async function provisionSkillDepsFor(
   if (requirements.length === 0) {
     return { ok: true, skipped: true, hash: null, requirements };
   }
+  const { invalid } = partitionRequirements(requirements);
+  if (invalid.length > 0) {
+    log.error("skill deps: refusing requirements outside the allowed grammar", {
+      skill: opts.label ?? skillDir,
+      refused: invalid,
+    });
+    return { ok: false, skipped: false, hash: null, requirements, error: invalidRequirementsError(invalid) };
+  }
   const interp = await runner.interpreter();
   if (!interp) {
     return {
@@ -538,7 +694,13 @@ export async function provisionSkillDepsFor(
  * `/skills/install`); SkillSync uses `provisionSkillDepsFor` per skill.
  */
 export async function provisionSkillDeps(skills: InstalledSkill[]): Promise<void> {
-  const { requirements, needsChromium: wantChromium, skillsWithDeps } = await collectSkillDeps(skills);
+  const collected = await collectSkillDeps(skills);
+  const { skillsWithDeps } = collected;
+  const { valid: requirements, invalid } = partitionRequirements(collected.requirements);
+  if (invalid.length > 0) {
+    log.error("skill deps: refusing requirements outside the allowed grammar", { refused: invalid });
+  }
+  const wantChromium = needsChromium(requirements);
   if (requirements.length === 0) {
     log.debug("skill deps: no install.uv requirements declared");
     return;

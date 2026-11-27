@@ -12,6 +12,9 @@ export interface SkillRequirement {
   source: SkillSource;
   ref: string;
   version: string;
+  /** Expected content digest of the installed skill folder for a ClawHub
+   *  skill: `manifestDigest` (as `content_sha256`), ClawHub install metadata
+   *  excluded. Verified after install; see skills/clawhub-integrity.ts. */
   integrityHash?: string | null;
 }
 
